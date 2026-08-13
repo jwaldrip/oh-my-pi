@@ -4,10 +4,17 @@
   "private": true,
   "type": "module",
   "main": "./src/main.ts",
-  "exports": { ".": "./src/main.ts" },
-  "bin": { "ompd": "./src/main.ts" },
+  "exports": {
+    ".": "./src/main.ts"
+  },
+  "bin": {
+    "ompd": "./src/main.ts"
+  },
   "dependencies": {
     "@ompd/core": "workspace:*",
     "@ompd/daemon": "workspace:*"
+  },
+  "scripts": {
+    "check": "bun ../../scripts/check-types.ts tsconfig.json"
   }
 }

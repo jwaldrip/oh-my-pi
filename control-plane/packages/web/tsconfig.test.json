@@ -3,7 +3,12 @@
   // would typecheck its way into a browser bundle. Hence two projects.
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["bun"]
+    // `vite/client` stays: it is what declares a side-effect `.css` import, and
+    // this project compiles `src` as well as `test`. Dropping it made the tests
+    // fail on the app's own stylesheet import rather than on anything a test
+    // wrote. Bun's globals are added here and nowhere else, which is what keeps
+    // a `Bun.*` call out of the browser bundle.
+    "types": ["bun", "vite/client"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

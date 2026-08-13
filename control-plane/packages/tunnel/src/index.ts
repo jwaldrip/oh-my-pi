@@ -4,6 +4,7 @@ export {
   type DialSocket,
   type DialTransport,
   type SessionAcceptor,
+  type SessionEvent,
   TunnelDaemon,
   type TunnelDaemonOptions,
 } from "./daemon.ts";

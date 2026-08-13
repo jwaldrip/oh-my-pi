@@ -179,7 +179,12 @@ export class Hub {
       },
     });
     this.#timer ??= setInterval(() => void this.#tick(), ACK_INTERVAL_MS);
-    return this.#server.port;
+    // Bun reports no port for a unix-socket server. This one always binds TCP,
+    // so an absent port means the listen did not do what was asked, and the
+    // same check guards `Gateway#listen` for the same reason.
+    const { port } = this.#server;
+    if (port === undefined) throw new Error("hub did not bind a TCP port");
+    return port;
   }
 
   async stop(): Promise<void> {

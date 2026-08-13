@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "bun test test/",
-    "verify:icons": "bun run ../../scripts/verify-icons.ts"
+    "verify:icons": "bun run ../../scripts/verify-icons.ts",
+    "check": "bun ../../scripts/check-types.ts tsconfig.json tsconfig.test.json"
   },
   "dependencies": {
     "@ompd/core": "workspace:*"

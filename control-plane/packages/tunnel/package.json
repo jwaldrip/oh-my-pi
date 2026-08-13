@@ -9,5 +9,8 @@
   },
   "dependencies": {
     "@noble/curves": "2.3.0"
+  },
+  "scripts": {
+    "check": "bun ../../scripts/check-types.ts tsconfig.json"
   }
 }

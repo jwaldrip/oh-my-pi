@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
     "@ompd/acp": "workspace:*",
     "@ompd/core": "workspace:*",
     "@ompd/tunnel": "workspace:*",
     "@oh-my-pi/pi-coding-agent": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:"
+  },
+  "scripts": {
+    "check": "bun ../../scripts/check-types.ts tsconfig.json"
   }
 }

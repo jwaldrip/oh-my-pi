@@ -75,6 +75,22 @@ export interface SessionAcceptor {
   accept(token: string, send: (raw: string) => void): AcceptResult;
 }
 
+/**
+ * What one client session came to, reported once it is settled.
+ *
+ * Named rather than inlined into the callback because a caller has to be able
+ * to hold one: the daemon's own tests collect them, and an operator-facing
+ * audit row is built from the same three fields.
+ */
+export interface SessionEvent {
+  sessionId: string;
+  outcome: "ok" | "denied";
+  /** Present only when the acceptor recognised the credential. */
+  deviceId?: string;
+  /** Why a `denied` session was refused, in the acceptor's own words. */
+  reason?: string;
+}
+
 export interface TunnelDaemonOptions {
   hubUrl: string;
   identity: DaemonKeyPair;
@@ -85,7 +101,7 @@ export interface TunnelDaemonOptions {
   onLog?: (message: string) => void;
   onRegistered?: (instanceId: string) => void;
   onRefused?: (code: RefusalCode, message: string) => void;
-  onSession?: (event: { sessionId: string; outcome: "ok" | "denied"; deviceId?: string; reason?: string }) => void;
+  onSession?: (event: SessionEvent) => void;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
   random?: () => number;
 }

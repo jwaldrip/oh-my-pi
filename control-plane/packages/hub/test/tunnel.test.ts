@@ -13,6 +13,7 @@ import {
   connectThroughHub,
   generateIdentity,
   type SessionAcceptor,
+  type SessionEvent,
   TunnelDaemon,
   type TunnelSocketLike,
 } from "@ompd/tunnel";
@@ -337,7 +338,7 @@ describe("refusals", () => {
   test("an unknown client credential is refused by the daemon, not the hub", async () => {
     fleet = await startHubs(1);
     const url = fleet.hubs[0]?.url ?? "";
-    const sessions: Array<{ outcome: string; reason?: string }> = [];
+    const sessions: SessionEvent[] = [];
     const identity = await enroll(fleet, "alpha");
     const daemon = new TunnelDaemon({
       hubUrl: url,
@@ -353,13 +354,18 @@ describe("refusals", () => {
     const client = openClient(url, identity.daemonId, "never-issued");
     await until(() => client.closed !== null, "the credential to be refused");
     expect(client.opened).toBe(false);
-    expect(sessions).toEqual([{ sessionId: expect.any(String), outcome: "denied", reason: "unknown" }]);
+    // Split rather than one `toEqual` with an asymmetric matcher: the id is
+    // minted per session, so the only honest claim about it is that there is
+    // one, and the outcome is what this test is actually about.
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({ outcome: "denied", reason: "unknown" });
+    expect(sessions[0]?.sessionId).toBeString();
   });
 
   test("a revoked credential is refused, and distinguishably so", async () => {
     fleet = await startHubs(1);
     const url = fleet.hubs[0]?.url ?? "";
-    const sessions: Array<{ outcome: string; reason?: string }> = [];
+    const sessions: SessionEvent[] = [];
     const identity = await enroll(fleet, "alpha");
     const daemon = new TunnelDaemon({
       hubUrl: url,
