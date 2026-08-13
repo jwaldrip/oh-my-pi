@@ -177,10 +177,17 @@ export const WebViewDriver = forwardRef<WebViewDriverHandle, WebViewDriverProps>
         source={{ uri: props.initialUrl ?? "about:blank" }}
         onMessage={onMessage}
         onNavigationStateChange={onNavigationStateChange}
-        // Each mount is a fresh sandbox; nothing about this WebView's storage
-        // is shared with the operator's own browser or persisted intentionally
-        // across app reinstalls.
-        incognito={false}
+        // A non-persistent data store, which is what makes the "fresh sandbox"
+        // claim in this file's header true rather than aspirational. Cookies and
+        // `localStorage` written here do not survive the mount, so a login an
+        // agent performed cannot be inherited by whatever mounts next, and
+        // nothing it touched is left on disk for a later session to find.
+        //
+        // `incognito={false}`, which this used to pass explicitly, puts the
+        // WebView in the app's shared persistent store: storage would outlive
+        // the pane, be visible to every other WebView the app creates, and
+        // survive a relaunch. See `docs/browser.md`.
+        incognito
         javaScriptEnabled
         originWhitelist={["*"]}
       />

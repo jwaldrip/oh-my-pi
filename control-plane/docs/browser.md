@@ -174,17 +174,21 @@ supported because nobody found a reason to say otherwise.
 
 ## What the agent can and cannot see from inside the WebView
 
-**It can see exactly what the app's own WebView loads, in the app's own
-sandbox.** `react-native-webview` gives each `<WebView>` its own cookie jar,
-`localStorage`, and process-level isolation from the rest of the app and
-from any other app on the device; it is not a bridge to Safari, Chrome, or
-whatever browser the phone's owner actually uses day to day. There is no
-shared session, no shared saved password, and no shared history. Whatever
-the agent navigates to starts from that sandbox's own blank state, the same
-way a fresh browser profile does, and whatever it observes is scoped to that
-one WebView instance -- not to other tabs, because there are no other tabs,
-and not to the OS keychain, because `injectJavaScript` runs inside the
-page's own JS context with the page's own privileges, not the app's.
+**It can see exactly what the app's own WebView loads, and nothing it writes
+outlives the pane.** The driver mounts with `incognito`, which is a
+non-persistent data store: cookies and `localStorage` live for the lifetime of
+that one `<WebView>` and are gone when it unmounts. That is what makes "each
+mount is a fresh sandbox" a fact rather than a hope. Without it, a WebView
+joins the app's shared persistent store, where storage outlives the pane, is
+visible to every other WebView the app creates, and survives a relaunch: an
+agent's login would sit there waiting for the next session to inherit.
+
+It is not a bridge to Safari, Chrome, or whatever browser the phone's owner
+actually uses. There is no shared session, no shared saved password, and no
+shared history. Whatever it observes is scoped to that one WebView instance,
+not to other tabs, because there are no other tabs, and not to the OS
+keychain, because `injectJavaScript` runs inside the page's own JS context
+with the page's own privileges, not the app's.
 
 **It cannot see the operator's real browsing.** No access to the device's
 system browser's cookies, saved credentials, extensions, or open tabs; no
