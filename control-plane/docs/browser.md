@@ -111,37 +111,51 @@ lets the identical call through to dispatch. `webview_observe` is proven
 allowed on the fast path with the *same* policy that denies `navigate`,
 which is the part that would be trivial to fake by hard-coding an allow.
 
-## Composition status: what is wired, what is not
+## Composition: the whole round trip
 
-Honestly, in one place, because "the daemon plumbing" understates how many
-distinct pieces that phrase covers.
+A tool call reaches a device and its answer reaches the model back through
+six seams, all of which are now wired. Named in order, because "the daemon
+plumbing" understates how many distinct pieces that phrase covers.
 
-**Built, tested, and reachable in isolation.** `WebViewBridge.performAction`
-(gating and dispatch), `startWebViewMcpServer` (a real Streamable-HTTP MCP
-server: `initialize`, `tools/list`, `tools/call`, per-agent token-gated),
-and `Supervisor`'s new `mcpServersFor` option plus the `AgentId` now threaded
-through `#bindAgentToSession`'s `openSession` closure so `createAgent` can
-build a per-agent MCP descriptor before the session exists. All of it is
-exercised by `daemon/test/browser-bridge.test.ts` and
-`daemon/test/browser-mcp.test.ts` against real HTTP, a real `Bun.serve`
-instance, and the real `DefaultPolicy`.
+1. **Mount.** `daemon.ts` constructs one `WebViewBridge` and one
+   `WebViewMcpServer` per daemon, and passes `mcpServersFor` to `Supervisor`,
+   so `session/new` and `session/load` both carry an `ompd-webview` descriptor
+   naming a loopback URL with a per-agent token. Resumed sessions get the same
+   mount as fresh ones, which is what stops a restart from silently taking the
+   capability away from an agent that had it.
+2. **Register.** A client that mounts a WebView sends
+   `{ t: "webview_register", agentId }` on its socket. The gateway holds one
+   target per agent, refuses a registration for an agent this socket has not
+   attached to, and requires `read` scope. Registering displaces the previous
+   holder, and `detach`, `webview_unregister`, or losing the socket all drop it.
+3. **Gate.** `tools/call` reaches `WebViewBridge.performAction`, which
+   evaluates `DefaultPolicy` before anything is dispatched. See "Every
+   mutating action reaches the policy engine" above.
+4. **Dispatch.** `Gateway.sendWebViewAction` pushes `webview_action` to the
+   registered socket, and answers `false` synchronously when there is no
+   target, so the tool call fails immediately rather than waiting out the
+   bridge's device timeout for a frame that could never arrive.
+5. **Answer.** The client performs the action against its own
+   `WebViewDriver` and replies `webview_result` with the request id it was
+   given. The gateway refuses a result from a socket that is not the agent's
+   registered target, and refuses an unknown or already-settled request id,
+   so one device cannot settle another's action by replaying what it observed.
+6. **Unavailable.** A registered socket that closes mid-action fails every
+   in-flight action for that agent at once (`onWebViewUnavailable` ->
+   `WebViewBridge.cancelAgent`), rather than leaving the model waiting.
 
-**Not yet wired into `daemon.ts`'s composition root.** `daemon.ts` does not
-construct a `WebViewBridge` or a `WebViewMcpServer`, and does not pass
-`mcpServersFor` to `Supervisor`, so no live daemon mounts this MCP server on
-a real session yet. `gateway.ts` does not deliver `webview_action` to an
-attached device (no `SupervisorEvents.onWebViewActionNeeded`-shaped fan-out
-exists to carry it) and does not handle an inbound `webview_result` frame
-in `#handle`. This is a scoping decision, not an oversight: `gateway.ts` is
-the single file every one of this session's six concurrent slices has a
-reason to touch, `daemon.ts` is close behind, and half-wiring
-`WebViewBridge` with no real dispatch would mean constructing something
-that answers every call with the exact kind of silent no-op this project
-refuses to ship. The pieces that exist do not fake being more finished than
-they are; the seam they wire into (`SupervisorEvents`, the `#sockets`
-iteration `onApprovalNeeded` already uses as its template) is identified
-and precedented, not invented, so finishing this is connecting two already-
-working halves, not designing a new mechanism under contention.
+`daemon/test/daemon.test.ts`'s "WebView composition" cases drive 1 through 5
+end to end against a real `Bun.serve` gateway, a real socket, and the real
+MCP server, and cover 6 by closing the socket mid-action. `gateway.test.ts`
+covers the refusal paths, `browser-bridge.test.ts` the gating, and
+`browser-mcp.test.ts` the MCP surface.
+
+On the client side, `core/src/ompd-client.ts` owns the transport for every
+ompd client (app, web, and the TUI-as-client), including replaying
+registrations after a reconnect's `hello`, in that order: an attach first,
+then the registration the daemon would otherwise refuse. `app`'s session
+screen mounts the driver behind a browser toggle and registers it on mount,
+which is the only place a `WebViewDriverHandle` and an `AgentId` meet.
 
 ## Per-platform status
 

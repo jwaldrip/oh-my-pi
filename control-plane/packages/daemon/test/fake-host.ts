@@ -37,6 +37,8 @@ export interface FakeHostController {
   emitUpdate(sessionId: string, update: unknown): void;
   /** Session ids handed out by `session/new`, in order. */
   sessions: string[];
+  /** Full `session/new` params, used to prove daemon-provided MCP mounts. */
+  newRequests: Array<{ cwd: string; mcpServers: unknown[] }>;
   /**
    * Session ids the peer was asked to load via `session/load`, in order.
    * Kept separate from `sessions` on purpose: a resume that mistakenly
@@ -74,6 +76,7 @@ export function createFakeHost(): FakeHostController {
   let nextPid = 424_242;
   let latest: AcpClient | null = null;
   const sessions: string[] = [];
+  const newRequests: Array<{ cwd: string; mcpServers: unknown[] }> = [];
   const loads: string[] = [];
   const loadRequests: Array<{ sessionId: string; cwd: string; mcpServers: unknown[] }> = [];
   const prompts: Array<{ sessionId: string; text: string }> = [];
@@ -162,6 +165,10 @@ export function createFakeHost(): FakeHostController {
     }
 
     if (msg.method === "session/new") {
+      newRequests.push({
+        cwd: String(msg.params?.cwd),
+        mcpServers: Array.isArray(msg.params?.mcpServers) ? msg.params.mcpServers : [],
+      });
       const sessionId = `sess_${nextSession++}`;
       sessions.push(sessionId);
       sessionClients.set(sessionId, client);
@@ -281,6 +288,7 @@ export function createFakeHost(): FakeHostController {
   return {
     factory,
     sessions,
+    newRequests,
     loads,
     loadRequests,
     prompts,

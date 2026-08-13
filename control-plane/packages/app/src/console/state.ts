@@ -24,7 +24,7 @@ import type {
   UnauthorizedEvent,
   UpdateEvent,
   ConnectionState,
-} from "../client.ts";
+} from "@ompd/core/ompd-client";
 import type { BrowserSession } from "../session/browser.ts";
 import type { SessionState } from "../session/model.ts";
 import { EMPTY_SESSION, appendApproval, appendPrompt, endTurn, reduce, resolveApproval } from "../session/model.ts";

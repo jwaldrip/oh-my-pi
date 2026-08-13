@@ -57,6 +57,12 @@ import { Scheduler } from "./routines/index.ts";
 import { SessionIndex } from "./sessions/index.ts";
 import { Supervisor } from "./supervisor.ts";
 import { listConnectorCatalog, listSkillCatalog, TaskManager } from "./workspace/index.ts";
+import { NO_TARGET, WebViewBridge, type WebViewDispatch } from "./browser/bridge.ts";
+import {
+  mcpServerDescriptor,
+  startWebViewMcpServer,
+  type WebViewMcpServer,
+} from "./browser/mcp-server.ts";
 import {
   speakableSegments,
   selectSttEngine,
@@ -320,6 +326,8 @@ export class Ompd {
   #sleepGuard: SleepGuard;
   /** The outbound leg, when a hub is configured. */
   #tunnel: TunnelDaemon | undefined;
+  #webViewBridge: WebViewBridge;
+  #webViewMcpServer: WebViewMcpServer | undefined;
 
   #stt: SttEngine | undefined;
   #tts: TtsEngine | undefined;
@@ -406,14 +414,29 @@ export class Ompd {
       onLog: this.#onLog,
     });
 
+    const policy = new DefaultPolicy({ mode: this.#config.policyMode });
+    let sendWebViewAction: WebViewDispatch["send"] = () => false;
+    this.#webViewBridge = new WebViewBridge({
+      policy,
+      store: this.#store,
+      dispatch: {
+        send: (agentId, requestId, action) => sendWebViewAction(agentId, requestId, action),
+      },
+    });
+
     this.#supervisor = new Supervisor({
       store: this.#store,
-      policy: new DefaultPolicy({ mode: this.#config.policyMode }),
+      policy,
       events: this.#events,
       ompPath: this.#config.ompPath,
       spawnHost: this.#hosts.spawn,
       provisioner: this.#provisioner,
       onLog: this.#onLog,
+      mcpServersFor: (agentId) => {
+        const server = this.#webViewMcpServer;
+        if (server === undefined) throw new Error("webview MCP server is not started");
+        return [mcpServerDescriptor(server, agentId)];
+      },
     });
 
     // Timer-driven runs act as the machine's own operator. The supervisor
@@ -447,6 +470,9 @@ export class Ompd {
       routines: this.#scheduler,
       sessions: this.#hosts,
       sessionIndex: this.#sessionIndex,
+      onWebViewResult: (agentId, requestId, result) =>
+        this.#webViewBridge.resolveResult(agentId, requestId, result),
+      onWebViewUnavailable: (agentId) => this.#webViewBridge.cancelAgent(agentId, NO_TARGET),
       staticRoot: opts.staticRoot ?? defaultStaticRoot(),
       skills: { list: listSkillCatalog },
       connectors: { list: listConnectorCatalog },
@@ -468,6 +494,8 @@ export class Ompd {
       onTextPrompt: (agentId, actor) => this.#voiced.delete(voiceKey(agentId, actor.deviceId)),
       voice: this.#voiceEnabled ? (send, actor) => this.#openVoice(send, actor) : undefined,
     });
+    sendWebViewAction = (agentId, requestId, action) =>
+      this.#gateway.sendWebViewAction(agentId, requestId, action);
   }
 
   /**
@@ -647,6 +675,8 @@ export class Ompd {
       this.#tts ??= tts;
     }
 
+    this.#webViewMcpServer ??= startWebViewMcpServer(this.#webViewBridge);
+
     const bootstrap = this.#bootstrapLocalOperator();
     const port = await this.#gateway.listen();
     const url = `http://${this.#config.host}:${port}`;
@@ -727,6 +757,8 @@ export class Ompd {
       //    still arrive for a host that had already been killed.
       await this.#supervisor.shutdown();
       await this.#provisioner.close();
+      this.#webViewMcpServer?.close();
+      this.#webViewMcpServer = undefined;
 
       // Retracted after the gateway is closed, never before: a file saying
       // "here" while the port is still accepting would be the wrong lie in the

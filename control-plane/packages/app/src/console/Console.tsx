@@ -103,6 +103,12 @@ export function Console({
         onDecide={(requestId, choice, scope) => {
           actions.decide(agent.id, requestId, choice, scope);
         }}
+        onMountWebView={(target) => {
+          actions.mountWebView(agent.id, target);
+        }}
+        onUnmountWebView={() => {
+          actions.unmountWebView(agent.id);
+        }}
       />
     );
 

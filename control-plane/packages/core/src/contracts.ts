@@ -299,6 +299,10 @@ export type ClientFrame =
   | { t: "decide"; agentId: AgentId; requestId: string; choice: ApprovalChoice; scope?: ApprovalScope }
   | { t: "audio"; agentId: AgentId; pcm: string } // base64 16k mono PCM16
   | { t: "audio_end"; agentId: AgentId }
+  /** Offer this socket's mounted WebView as the active target for an agent. */
+  | { t: "webview_register"; agentId: AgentId }
+  /** Withdraw this socket's WebView without detaching from the agent session. */
+  | { t: "webview_unregister"; agentId: AgentId }
   /** The outcome of a `webview_action` this client's WebView was asked to perform. */
   | { t: "webview_result"; agentId: AgentId; requestId: string; result: WebViewActionResult }
   | { t: "ping" };

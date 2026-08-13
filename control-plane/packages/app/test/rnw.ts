@@ -13,6 +13,12 @@
  *    bun's runtime resolver does not implement platform extensions. The stub
  *    passes path data straight through, so a rendered icon still carries its
  *    real Font Awesome geometry.
+ *  - `react-native-webview` and `react-native-view-shot` become inert for the
+ *    same reason one step further: both ship untranspiled Flow source that bun
+ *    cannot parse at all. Stubbing them lets a test mount the session screen
+ *    and drive its browser toggle, which is the wiring worth checking here.
+ *    Whether a real `<WebView>` renders a page is a device question, tracked as
+ *    `unverified` in `docs/browser.md`'s platform table.
  *
  * Import this module first in any test that renders. ES modules evaluate their
  * dependencies in source order, so the mocks are registered before the
@@ -44,5 +50,17 @@ for (const name of SVG_ELEMENTS) {
 stub.default = stub.Svg;
 
 mock.module("react-native-svg", () => stub);
+
+// Renders nothing and answers nothing: `WebViewDriver` owns every reply
+// through its own ref handle, so a stub that pretended to navigate would be
+// inventing behaviour no test is entitled to assert.
+const webView: Record<string, unknown> = {};
+webView.WebView = ({ children }: SvgProps) => children ?? null;
+webView.default = webView.WebView;
+mock.module("react-native-webview", () => webView);
+
+mock.module("react-native-view-shot", () => ({
+  captureRef: () => Promise.reject(new Error("captureRef is unavailable under bun test")),
+}));
 
 export {};

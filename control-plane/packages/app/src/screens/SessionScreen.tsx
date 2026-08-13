@@ -6,8 +6,10 @@
  * last, because it is the only thing here a thumb reaches for.
  */
 
-import type { JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
+import { webViewCapability } from "../browser/index.ts";
+import type { WebViewDriverHandle } from "../browser/index.ts";
 import type { Agent, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
 import { Composer } from "../components/Composer.tsx";
 import { StatusReadout } from "../components/StatusReadout.tsx";
@@ -16,7 +18,7 @@ import { elapsed, shortenPath } from "../design/format.ts";
 import { Glyph } from "../design/icons.tsx";
 import { Data, Kicker, Label, Title } from "../design/text.tsx";
 import { agentSignal, ground, ink, signal, space, stroke, TOUCH_TARGET } from "../design/tokens.ts";
-import type { ConnectionState } from "../client.ts";
+import type { ConnectionState } from "@ompd/core/ompd-client";
 import type { SessionState } from "../session/model.ts";
 
 export interface SessionScreenProps {
@@ -35,6 +37,14 @@ export interface SessionScreenProps {
   onSubmit: (text: string) => void;
   onCancel: () => void;
   onDecide: (requestId: string, choice: ApprovalChoice, scope?: ApprovalScope) => void;
+  /**
+   * Offer this screen's WebView as the agent's action target. Called when the
+   * operator opens the browser pane and again after a remount; the daemon
+   * keeps one target per agent, so re-offering is how a remount takes over.
+   */
+  onMountWebView?: (target: WebViewDriverHandle) => void;
+  /** Withdraw it. Always called when the pane closes or the screen unmounts. */
+  onUnmountWebView?: () => void;
   now?: number;
 }
 
@@ -42,6 +52,41 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
   const { agent, session, connection } = props;
   const tone = signal[agentSignal(agent.state)];
   const busy = agent.state === "busy";
+
+  const { onMountWebView, onUnmountWebView } = props;
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const mounted = useRef(false);
+
+  /**
+   * The ref callback is the mount signal, not an effect: the handle exists
+   * only once the driver has rendered, and registering before that would
+   * offer the daemon a target that cannot yet answer an action.
+   */
+  const holdDriver = useCallback(
+    (handle: WebViewDriverHandle | null) => {
+      if (handle === null) {
+        if (!mounted.current) return;
+        mounted.current = false;
+        onUnmountWebView?.();
+        return;
+      }
+      mounted.current = true;
+      onMountWebView?.(handle);
+    },
+    [onMountWebView, onUnmountWebView],
+  );
+
+  // Leaving the screen with the pane open never leaves a registration behind:
+  // the daemon would keep dispatching to a view that no longer exists, and
+  // every action would wait out its full timeout before failing.
+  useEffect(
+    () => () => {
+      if (!mounted.current) return;
+      mounted.current = false;
+      onUnmountWebView?.();
+    },
+    [onUnmountWebView],
+  );
 
   return (
     <View style={styles.screen} testID="session">
@@ -71,6 +116,21 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
         <Kicker color={tone} testID="session-state">
           {agent.state}
         </Kicker>
+
+        {webViewCapability === null ? null : (
+          <Pressable
+            testID="session-browser-toggle"
+            accessibilityRole="button"
+            accessibilityLabel={browserOpen ? "Close the agent's browser" : "Open the agent's browser"}
+            accessibilityState={{ selected: browserOpen }}
+            onPress={() => {
+              setBrowserOpen((open) => !open);
+            }}
+            style={styles.back}
+          >
+            <Glyph name="browser" size={14} color={browserOpen ? tone : ink.muted} />
+          </Pressable>
+        )}
       </View>
 
       <Transcript
@@ -80,6 +140,12 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
         onDecide={props.onDecide}
         spoken={props.spoken}
       />
+
+      {webViewCapability === null || !browserOpen ? null : (
+        <View style={styles.browser} testID="session-browser">
+          <webViewCapability.Driver ref={holdDriver} style={styles.driver} />
+        </View>
+      )}
 
       <StatusReadout
         state={connection}
@@ -114,4 +180,11 @@ const styles = StyleSheet.create({
   ident: { flex: 1, gap: space.hair },
   meta: { flexDirection: "row", alignItems: "center", gap: space.snug },
   origin: { flexShrink: 1 },
+  browser: {
+    height: 320,
+    borderTopWidth: stroke.heavy,
+    borderTopColor: ground.edge,
+    backgroundColor: ground.surface,
+  },
+  driver: { flex: 1 },
 });

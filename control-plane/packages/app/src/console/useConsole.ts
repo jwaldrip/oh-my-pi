@@ -10,10 +10,14 @@
 import { useEffect, useMemo, useReducer, useRef } from "react";
 import { AppState } from "react-native";
 import type { AgentId, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
-import { OmpdClient } from "../client.ts";
+import { OmpdClient } from "@ompd/core/ompd-client";
 import type { Connection } from "../platform/connection.ts";
 import { apply, emptyConsole } from "./state.ts";
 import type { ConsoleState } from "./state.ts";
+import { routeWebViewAction } from "./webview.ts";
+import type { WebViewTarget } from "./webview.ts";
+
+export type { WebViewTarget } from "./webview.ts";
 
 export interface ConsoleActions {
   select: (agentId: AgentId) => void;
@@ -22,6 +26,10 @@ export interface ConsoleActions {
   cancel: (agentId: AgentId) => void;
   decide: (agentId: AgentId, requestId: string, choice: ApprovalChoice, scope?: ApprovalScope) => void;
   dismiss: () => void;
+  /** Offer a mounted WebView as this agent's action target. */
+  mountWebView: (agentId: AgentId, target: WebViewTarget) => void;
+  /** Withdraw it. Safe to call for an agent that never mounted one. */
+  unmountWebView: (agentId: AgentId) => void;
 }
 
 export function useConsole(connection: Connection): [ConsoleState, ConsoleActions] {
@@ -45,6 +53,14 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
    */
   const backfilled = useRef(new Set<AgentId>());
 
+  /**
+   * The WebView currently mounted for each agent. A ref, for the same reason
+   * `backfilled` is one: the frame handler below is registered once and must
+   * see the target that is mounted when an action lands, not the one that was
+   * mounted when the effect ran.
+   */
+  const targets = useRef(new Map<AgentId, WebViewTarget>());
+
   useEffect(() => {
     const offs = [
       client.on("status", (event) => {
@@ -67,6 +83,11 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
       }),
       client.on("unauthorized", (event) => {
         dispatch({ t: "unauthorized", event });
+      }),
+      client.on("webview_action", (event) => {
+        void routeWebViewAction(targets.current.get(event.agentId), event.action, (result) => {
+          client.webViewResult(event.agentId, event.requestId, result);
+        });
       }),
     ];
     client.start();
@@ -115,6 +136,14 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
       },
       dismiss() {
         dispatch({ t: "dismiss" });
+      },
+      mountWebView(agentId, target) {
+        targets.current.set(agentId, target);
+        client.registerWebView(agentId);
+      },
+      unmountWebView(agentId) {
+        if (!targets.current.delete(agentId)) return;
+        client.unregisterWebView(agentId);
       },
     }),
     [client],

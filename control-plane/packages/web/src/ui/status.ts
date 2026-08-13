@@ -5,7 +5,7 @@
  * screen is stale and nothing is coming back until something changes).
  */
 
-import type { StatusEvent } from "../client.ts";
+import type { StatusEvent } from "@ompd/core/ompd-client";
 import { el, setText } from "./dom.ts";
 import { icon } from "./icons.ts";
 

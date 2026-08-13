@@ -243,6 +243,16 @@ describe("the transcript renders from canned frames", () => {
     expect(refused).toContain("approve scope");
     expect(refused).not.toContain("Always");
   });
+
+  test("the agent's browser is offered but closed until asked for", () => {
+    // Mounting the sandbox registers this device as the agent's action target,
+    // so a pane that opened by itself would hand the agent a browser nobody
+    // asked it to drive.
+    expect(html).toContain("session-browser-toggle");
+    expect(html).not.toContain("session-browser\"");
+    // The apostrophe arrives escaped, so the assertion stops short of it.
+    expect(html).toContain("aria-label=\"Open the agent");
+  });
 });
 
 // ---------------------------------------------------------------------------

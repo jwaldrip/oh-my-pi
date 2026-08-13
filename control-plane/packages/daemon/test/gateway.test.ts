@@ -38,6 +38,7 @@ import {
   type AgentId,
   type ClientFrame,
   type ServerFrame,
+  type WebViewActionResult,
 } from "@ompd/core";
 import { Supervisor } from "../src/supervisor.ts";
 import { HostRegistry } from "../src/hosts.ts";
@@ -89,7 +90,12 @@ interface Harness {
   http(path: string, init?: RequestInit, token?: string): Promise<Response>;
 }
 
-async function harness(opts: { approvalTimeoutMs?: number } = {}): Promise<Harness> {
+async function harness(
+  opts: {
+    approvalTimeoutMs?: number;
+    onWebViewResult?: (agentId: AgentId, requestId: string, result: WebViewActionResult) => boolean;
+  } = {},
+): Promise<Harness> {
   const path = `/tmp/ompd-gateway-${crypto.randomUUID()}.db`;
   paths.push(path);
   const store = new Store(path);
@@ -110,7 +116,14 @@ async function harness(opts: { approvalTimeoutMs?: number } = {}): Promise<Harne
   });
   sups.push(sup);
 
-  const gw = new Gateway({ supervisor: sup, store, events, port: 0, sessions: hosts });
+  const gw = new Gateway({
+    supervisor: sup,
+    store,
+    events,
+    port: 0,
+    sessions: hosts,
+    onWebViewResult: opts.onWebViewResult,
+  });
   gateways.push(gw);
   const port = await gw.listen();
   const base = `http://127.0.0.1:${port}`;
@@ -642,6 +655,87 @@ describe("requests with no Host header", () => {
 
     const after = await fetch(`${h.base}/v1/health`);
     expect(after.status).toBe(200);
+  });
+});
+
+describe("agent-driven WebView routing", () => {
+  test("routes an action and its correlated result through the registered attached socket", async () => {
+    const results: Array<{ agentId: AgentId; requestId: string; result: WebViewActionResult }> = [];
+    const h = await harness({
+      onWebViewResult: (agentId, requestId, result) => {
+        results.push({ agentId, requestId, result });
+        return true;
+      },
+    });
+    const operator = await h.pair("laptop", [SCOPE_READ, SCOPE_MANAGE]);
+    const agent = await createAgent(h, operator, "worker");
+    const phone = await openSocket(h.port, operator);
+
+    expect(h.gw.sendWebViewAction(agent.id, "before-register", { kind: "observe" })).toBe(false);
+
+    phone.send({ t: "attach", agentId: agent.id });
+    phone.send({ t: "webview_register", agentId: agent.id });
+    await barrier(phone, "webview registration");
+
+    expect(h.gw.sendWebViewAction(agent.id, "wv_1", { kind: "navigate", url: "https://example.com" })).toBe(
+      true,
+    );
+    const action = await phone.next((frame) => frame.t === "webview_action", "webview action");
+    expect(action).toEqual({
+      t: "webview_action",
+      agentId: agent.id,
+      requestId: "wv_1",
+      action: { kind: "navigate", url: "https://example.com" },
+    });
+
+    phone.send({
+      t: "webview_result",
+      agentId: agent.id,
+      requestId: "wv_1",
+      result: { kind: "ack", url: "https://example.com", title: "Example" },
+    });
+    await barrier(phone, "webview result");
+    expect(results).toEqual([
+      {
+        agentId: agent.id,
+        requestId: "wv_1",
+        result: { kind: "ack", url: "https://example.com", title: "Example" },
+      },
+    ]);
+
+    phone.send({ t: "detach", agentId: agent.id });
+    await barrier(phone, "webview detach");
+    expect(h.gw.sendWebViewAction(agent.id, "after-detach", { kind: "observe" })).toBe(false);
+  });
+
+  test("rejects a result from any socket other than the registered target", async () => {
+    const h = await harness({ onWebViewResult: () => true });
+    const operator = await h.pair("laptop", [SCOPE_READ, SCOPE_MANAGE]);
+    const agent = await createAgent(h, operator, "worker");
+    const target = await openSocket(h.port, operator);
+    target.send({ t: "attach", agentId: agent.id });
+    target.send({ t: "webview_register", agentId: agent.id });
+    await barrier(target, "target registration");
+
+    const bystander = await openSocket(h.port, await h.pair("phone", [SCOPE_READ]));
+    bystander.send({ t: "attach", agentId: agent.id });
+    await barrier(bystander, "bystander attach");
+    bystander.send({
+      t: "webview_result",
+      agentId: agent.id,
+      requestId: "wv_spoofed",
+      result: { kind: "ack", url: "https://attacker.invalid", title: "Spoof" },
+    });
+
+    const refusal = await bystander.next(
+      (frame) => frame.t === "error" && frame.code === "webview_not_registered",
+      "spoofed webview result refusal",
+    );
+    expect(refusal).toMatchObject({
+      t: "error",
+      agentId: agent.id,
+      code: "webview_not_registered",
+    });
   });
 });
 

@@ -31,6 +31,7 @@ import {
   loadConfig,
   type OmpdOptions,
 } from "../src/daemon.ts";
+import { NO_TARGET } from "../src/browser/bridge.ts";
 import {
   base64ToPcm,
   pcmToBase64,
@@ -809,6 +810,152 @@ async function pairDevice(
   const { token } = (await approved.json()) as { token: string };
   return token;
 }
+
+describe("WebView composition", () => {
+  test("mounts the per-agent MCP server and round-trips a tool call through the registered device", async () => {
+    const home = tempDir("ompd-webview-");
+    const fake = createFakeHost();
+    const daemon = new Ompd({
+      home,
+      overrides: { port: 0 },
+      spawnHost: fake.factory,
+      voice: false,
+    });
+    running.push(daemon);
+    const info = await daemon.start();
+    const operator = await tokenOf(home);
+
+    const created = await fetch(`${info.url}/v1/agents`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "browser-worker", cwd: home }),
+    });
+    expect(created.status).toBe(201);
+    const { agent } = (await created.json()) as { agent: { id: string } };
+
+    expect(fake.newRequests).toHaveLength(1);
+    const descriptor = fake.newRequests[0]?.mcpServers[0] as
+      | { name?: unknown; type?: unknown; url?: unknown }
+      | undefined;
+    expect(descriptor).toMatchObject({ name: "ompd-webview", type: "http" });
+    expect(descriptor?.url).toBeString();
+
+    const phone = await socketFor(info.port, operator);
+    phone.send({ t: "attach", agentId: agent.id });
+    phone.send({ t: "webview_register", agentId: agent.id });
+    phone.send({ t: "ping" });
+    await phone.next((frame) => frame.t === "pong");
+    // A rejected register would otherwise surface only as a five-second hang
+    // below, which reads as a slow test rather than a refused registration.
+    expect(phone.frames.filter((frame) => frame.t === "error")).toEqual([]);
+
+    const call = fetch(String(descriptor?.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "webview_observe", arguments: {} },
+      }),
+    });
+    // Racing the two sides turns "the bridge answered without ever reaching a
+    // device" into that message, instead of a timeout that says nothing.
+    const first = await Promise.race([
+      phone
+        .next((frame) => frame.t === "webview_action")
+        .then((frame) => ({ kind: "action" as const, frame })),
+      call.then((response) => ({ kind: "response" as const, response })),
+    ]);
+    if (first.kind !== "action") {
+      throw new Error(
+        `the MCP call settled before dispatch: ${first.response.status} ${await first.response.text()}`,
+      );
+    }
+    const action = first.frame;
+    expect(action).toMatchObject({
+      t: "webview_action",
+      agentId: agent.id,
+      action: { kind: "observe" },
+    });
+    phone.send({
+      t: "webview_result",
+      agentId: agent.id,
+      requestId: action.requestId,
+      result: {
+        kind: "observe",
+        observation: {
+          url: "https://example.com",
+          title: "Example",
+          settled: true,
+          tree: { tag: "body", ref: "n0", text: "hello" },
+        },
+      },
+    });
+
+    const response = await call;
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+    expect(body.result?.isError).toBe(false);
+    expect(JSON.parse(body.result?.content?.[0]?.text ?? "{}")).toMatchObject({
+      kind: "observe",
+      observation: { url: "https://example.com", title: "Example" },
+    });
+  });
+
+  test("fails an in-flight action when the registered device disconnects", async () => {
+    const home = tempDir("ompd-webview-");
+    const fake = createFakeHost();
+    const daemon = new Ompd({
+      home,
+      overrides: { port: 0 },
+      spawnHost: fake.factory,
+      voice: false,
+    });
+    running.push(daemon);
+    const info = await daemon.start();
+    const operator = await tokenOf(home);
+
+    const created = await fetch(`${info.url}/v1/agents`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "browser-worker", cwd: home }),
+    });
+    const { agent } = (await created.json()) as { agent: { id: string } };
+    const url = String(
+      (fake.newRequests[0]?.mcpServers[0] as { url?: unknown } | undefined)?.url,
+    );
+
+    const phone = await socketFor(info.port, operator);
+    phone.send({ t: "attach", agentId: agent.id });
+    phone.send({ t: "webview_register", agentId: agent.id });
+    phone.send({ t: "ping" });
+    await phone.next((frame) => frame.t === "pong");
+
+    const call = fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "webview_observe", arguments: {} },
+      }),
+    });
+    // Dispatched, so the bridge is holding a pending row: this is the state
+    // that would otherwise wait out the full device timeout.
+    await phone.next((frame) => frame.t === "webview_action");
+    phone.close();
+
+    const body = (await (await call).json()) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toBe(NO_TARGET);
+  });
+});
 
 describe("voice wiring", () => {
   test("a transcript that fails to prompt reaches the client as an error", async () => {

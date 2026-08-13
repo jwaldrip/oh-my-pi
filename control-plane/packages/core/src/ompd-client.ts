@@ -18,7 +18,16 @@
  * platform `WebSocket` global supplies its own via `createSocket`.
  */
 
-import type { Agent, AgentId, ApprovalChoice, ApprovalScope, ClientFrame, ServerFrame } from "./contracts.ts";
+import type {
+  Agent,
+  AgentId,
+  ApprovalChoice,
+  ApprovalScope,
+  ClientFrame,
+  ServerFrame,
+  WebViewAction,
+  WebViewActionResult,
+} from "./contracts.ts";
 
 // ---------------------------------------------------------------------------
 // Injectable seams
@@ -97,6 +106,10 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   // navigate/click/type it dispatched actually happened, which is the same
   // "silently believed something occurred" failure a lost `decide` is.
   webview_result: true,
+  // Re-sent from `webviews` on the next `hello`, exactly like `attach`: a
+  // registration that never left is restored by the reconnect that follows.
+  webview_register: false,
+  webview_unregister: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -224,6 +237,21 @@ export interface UnauthorizedEvent {
   reason: string;
 }
 
+/**
+ * An action the daemon wants this client's embedded WebView to perform.
+ *
+ * Only ever delivered to the socket that registered as the agent's WebView
+ * target, and only after the daemon's policy engine cleared it. The client's
+ * job is to perform it and answer with `webViewResult` carrying the same
+ * `requestId`: the daemon holds the agent's tool call open until it does, so
+ * an unanswered action is a tool call that waits out the bridge's timeout.
+ */
+export interface WebViewActionEvent {
+  agentId: AgentId;
+  requestId: string;
+  action: WebViewAction;
+}
+
 export interface ClientEventMap {
   status: StatusEvent;
   agents: AgentsEvent;
@@ -234,6 +262,7 @@ export interface ClientEventMap {
   speech: SpeechEvent;
   transcript: TranscriptEvent;
   unauthorized: UnauthorizedEvent;
+  webview_action: WebViewActionEvent;
 }
 
 export type ClientEventName = keyof ClientEventMap;
@@ -293,6 +322,14 @@ export class OmpdClient {
   private readonly watermarks = new Map<AgentId, number>();
   /** Agents whose attachment must survive a reconnect. */
   private readonly attached = new Set<AgentId>();
+  /**
+   * Agents whose WebView this client is the live target for.
+   *
+   * Kept separately from `attached` because the daemon drops the registration
+   * when the socket goes, while the attachment is what this client wants to be
+   * true. A reconnect replays both, in that order.
+   */
+  private readonly webviews = new Set<AgentId>();
 
   private socket: SocketLike | null = null;
   /** Invalidates handlers belonging to a socket we have already abandoned. */
@@ -399,7 +436,34 @@ export class OmpdClient {
     // The watermark deliberately outlives the attachment: reattaching later
     // should resume, not replay a transcript the client already holds.
     this.attached.delete(agentId);
+    // The daemon drops the WebView target with the attachment, so holding the
+    // local flag would make the next `hello` re-register a WebView for an
+    // agent this client is no longer watching.
+    this.webviews.delete(agentId);
     this.send({ t: "detach", agentId });
+  }
+
+  /**
+   * Offer this client's embedded WebView as the agent's action target.
+   *
+   * The daemon keeps one target per agent, so registering displaces whatever
+   * held it before. Detaching drops it too, which is why this is only ever
+   * called for an agent this client is already attached to.
+   */
+  registerWebView(agentId: AgentId): void {
+    this.webviews.add(agentId);
+    this.send({ t: "webview_register", agentId });
+  }
+
+  /** Withdraw this client's WebView without detaching from the agent. */
+  unregisterWebView(agentId: AgentId): void {
+    this.webviews.delete(agentId);
+    this.send({ t: "webview_unregister", agentId });
+  }
+
+  /** Answer one dispatched action. `requestId` must be the one that arrived. */
+  webViewResult(agentId: AgentId, requestId: string, result: WebViewActionResult): void {
+    this.send({ t: "webview_result", agentId, requestId, result });
   }
 
   prompt(agentId: AgentId, text: string, images?: string[]): void {
@@ -661,6 +725,9 @@ export class OmpdClient {
         // The whole point of the watermark. Every agent this client cares about
         // is reattached from exactly where its stream stopped.
         for (const agentId of this.attached) this.sendAttach(agentId);
+        // After the attachments, never before: the daemon refuses a
+        // registration for an agent this socket has not attached to yet.
+        for (const agentId of this.webviews) this.send({ t: "webview_register", agentId });
         return;
       }
       case "agents":
@@ -713,6 +780,13 @@ export class OmpdClient {
           agentId: frame.agentId,
           text: frame.text,
           final: frame.final,
+        });
+        return;
+      case "webview_action":
+        this.emit("webview_action", {
+          agentId: frame.agentId,
+          requestId: frame.requestId,
+          action: frame.action,
         });
         return;
       default:

@@ -56,6 +56,7 @@ import {
   faTrashCan,
   faTriangleExclamation,
   faWandMagicSparkles,
+  faWindowMaximize,
   faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type { JSX } from "react";
@@ -99,6 +100,7 @@ export type GlyphName =
   | "native"
   | "marketplace"
   | "warning"
+  | "browser"
   | "unknown";
 
 export const GLYPHS: Record<GlyphName, IconDefinition> = {
@@ -156,6 +158,9 @@ export const GLYPHS: Record<GlyphName, IconDefinition> = {
   native: faBuilding,
   marketplace: faStore,
   warning: faTriangleExclamation,
+  // The agent's own sandboxed WebView, which is a window it drives rather
+  // than the globe `fetch` uses for an HTTP call with no page behind it.
+  browser: faWindowMaximize,
   unknown: faCircleQuestion,
 };
 

@@ -15,7 +15,7 @@ import { Glyph } from "../design/icons.tsx";
 import { Data, Kicker, Label } from "../design/text.tsx";
 import type { SignalName } from "../design/tokens.ts";
 import { ground, ink, pressureSignal, signal, signalWash, space, stroke } from "../design/tokens.ts";
-import type { ConnectionState } from "../client.ts";
+import type { ConnectionState } from "@ompd/core/ompd-client";
 import type { Usage } from "../session/model.ts";
 
 /** What each connection state means, in the words shown on screen. */

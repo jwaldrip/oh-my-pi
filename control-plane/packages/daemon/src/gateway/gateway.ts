@@ -38,6 +38,8 @@ import {
   type SkillSummary,
   type Store,
   type Task,
+  type WebViewAction,
+  type WebViewActionResult,
 } from "@ompd/core";
 import type { SessionIndex } from "../sessions/session-index.ts";
 import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
@@ -74,7 +76,34 @@ function embeddedResponse(base64: string, key: string): Response {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
   return new Response(bytes, { headers: { "content-type": contentTypeFor(key) } });
+}
+/** Narrow an untrusted client payload before it reaches the MCP result path. */
+function isWebViewActionResult(value: unknown): value is WebViewActionResult {
+  if (typeof value !== "object" || value === null || !("kind" in value)) return false;
+  const result = value as Record<string, unknown>;
+  switch (result.kind) {
+    case "ack":
+      return typeof result.url === "string" && typeof result.title === "string";
+    case "error":
+      return typeof result.message === "string";
+    case "screenshot":
+      return typeof result.pngBase64 === "string";
+    case "observe": {
+      if (typeof result.observation !== "object" || result.observation === null) return false;
+      const observation = result.observation as Record<string, unknown>;
+      return (
+        typeof observation.url === "string" &&
+        typeof observation.title === "string" &&
+        typeof observation.settled === "boolean" &&
+        typeof observation.tree === "object" &&
+        observation.tree !== null
+      );
+    }
+    default:
+      return false;
+  }
 }
 
 const SESSION_STATUSES: readonly SessionLiveStatus[] = ["live-tui", "live-ompd", "dormant", "archived"];
@@ -279,6 +308,8 @@ export interface GatewayOptions {
    * answer can say which file moved rather than guessing.
    */
   onTokenRotated?: (deviceId: string, token: string) => string | undefined;
+  /** Fails in-flight actions when their registered target disappears. */
+  onWebViewUnavailable?: (agentId: AgentId) => void;
   /**
    * The skills-and-commands catalogue. Absent, `GET /v1/skills` reports the
    * feature off rather than an empty catalogue, which a client would read as
@@ -301,6 +332,11 @@ export interface GatewayOptions {
    * here" and "this daemon build has no catalogue wired in".
    */
   sessionIndex?: SessionIndex;
+  /**
+   * Settles one action previously dispatched to a registered client WebView.
+   * Returning false means the request is stale, unknown, or belongs elsewhere.
+   */
+  onWebViewResult?: (agentId: AgentId, requestId: string, result: WebViewActionResult) => boolean;
 }
 
 interface SocketState {
@@ -397,12 +433,16 @@ export class Gateway {
   #connectors: ConnectorCatalog | undefined;
   #tasks: TaskCatalog | undefined;
   #sessionIndex: SessionIndex | undefined;
+  #onWebViewResult: GatewayOptions["onWebViewResult"];
+  #onWebViewUnavailable: GatewayOptions["onWebViewUnavailable"];
   #staticRoot: string | undefined;
   /** Set by `listen`, so uptime measures serving rather than construction. */
   #startedAtMs: number | undefined;
 
   #server: Server<SocketState> | undefined;
   #sockets = new Set<GatewaySocket>();
+  /** Most recently registered live WebView socket for each agent. */
+  #webviews = new Map<AgentId, GatewaySocket>();
   #unsubscribeSay: (() => void) | undefined;
   #unsubscribeRevoked: (() => void) | undefined;
   #unsubscribe: (() => void) | undefined;
@@ -425,6 +465,8 @@ export class Gateway {
     this.#connectors = opts.connectors;
     this.#tasks = opts.tasks;
     this.#sessionIndex = opts.sessionIndex;
+    this.#onWebViewResult = opts.onWebViewResult;
+    this.#onWebViewUnavailable = opts.onWebViewUnavailable;
     // Resolved once so the traversal check below compares two absolute paths.
     this.#staticRoot = opts.staticRoot === undefined ? undefined : resolve(opts.staticRoot);
 
@@ -480,6 +522,7 @@ export class Gateway {
         // Dropped from the push set so nothing further is streamed to it, and
         // left open rather than closed: see the note on `revoked`.
         this.#sockets.delete(ws);
+        this.#unregisterWebViews(ws);
       }
     });
   }
@@ -516,8 +559,10 @@ export class Gateway {
     for (const ws of this.#sockets) {
       void ws.data.voice?.close();
       ws.data.voice = null;
+      this.#unregisterWebViews(ws);
     }
     this.#sockets.clear();
+    this.#webviews.clear();
     // `stop(true)` closes live connections itself. Closing each socket here
     // first and then awaiting it deadlocks on Bun 1.3.4: the promise never
     // settles. Measured, not guessed. Clients therefore see an abnormal close
@@ -636,6 +681,25 @@ export class Gateway {
     return this.#auth.hasLiveToken(deviceId, token);
   }
 
+
+  /**
+   * Dispatch an already policy-cleared action to the active WebView target.
+   *
+   * False is a synchronous availability result, not an eventual timeout: the
+   * bridge can fail the tool call immediately when no client has mounted the
+   * requested agent's WebView.
+   */
+  sendWebViewAction(agentId: AgentId, requestId: string, action: WebViewAction): boolean {
+    const ws = this.#webviews.get(agentId);
+    if (ws === undefined || !this.#sockets.has(ws) || ws.data.revoked) return false;
+    try {
+      ws.send(JSON.stringify({ t: "webview_action", agentId, requestId, action } satisfies ServerFrame));
+      return true;
+    } catch {
+      this.#webviews.delete(agentId);
+      return false;
+    }
+  }
   /** Revoke a paired device. Takes effect on its next request or frame. */
   revokeDevice(deviceId: string): void {
     this.#auth.revoke(deviceId);
@@ -1337,9 +1401,23 @@ export class Gateway {
 
   #close(ws: GatewaySocket): void {
     this.#sockets.delete(ws);
+    this.#unregisterWebViews(ws);
     void ws.data.voice?.close();
     ws.data.voice = null;
   }
+
+  #unregisterWebView(agentId: AgentId, ws: GatewaySocket): void {
+    if (this.#webviews.get(agentId) !== ws) return;
+    this.#webviews.delete(agentId);
+    this.#onWebViewUnavailable?.(agentId);
+  }
+
+  #unregisterWebViews(ws: GatewaySocket): void {
+    for (const [agentId, target] of this.#webviews) {
+      if (target === ws) this.#unregisterWebView(agentId, ws);
+    }
+  }
+
 
   #message(ws: GatewaySocket, message: string | Buffer): void {
     if (ws.data.revoked) {
@@ -1438,7 +1516,64 @@ export class Gateway {
         // And the spoken summary, so a reattached client is told again what
         // the turn it is watching came to.
         ws.data.said.delete(frame.agentId);
+        this.#unregisterWebView(frame.agentId, ws);
         return;
+
+      case "webview_register": {
+        if (!ws.data.scopes.has(SCOPE_READ)) {
+          this.#send(ws, {
+            t: "error",
+            code: "unauthorized",
+            message: "webview registration requires read scope",
+          });
+          return;
+        }
+        if (typeof frame.agentId !== "string" || !ws.data.attached.has(frame.agentId)) {
+          this.#send(ws, {
+            t: "error",
+            code: "webview_not_attached",
+            message: "attach to the agent before registering its WebView",
+          });
+          return;
+        }
+        const previous = this.#webviews.get(frame.agentId);
+        if (previous !== undefined && previous !== ws) this.#unregisterWebView(frame.agentId, previous);
+        this.#webviews.set(frame.agentId, ws);
+        return;
+      }
+
+      case "webview_unregister":
+        this.#unregisterWebView(frame.agentId, ws);
+        return;
+
+      case "webview_result": {
+        if (
+          typeof frame.agentId !== "string" ||
+          typeof frame.requestId !== "string" ||
+          !isWebViewActionResult(frame.result)
+        ) {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "invalid webview result" });
+          return;
+        }
+        if (this.#webviews.get(frame.agentId) !== ws) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "webview_not_registered",
+            message: "this socket is not the active WebView target for the agent",
+          });
+          return;
+        }
+        if (this.#onWebViewResult?.(frame.agentId, frame.requestId, frame.result) !== true) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unknown_webview_request",
+            message: "the WebView request is unknown or already settled",
+          });
+        }
+        return;
+      }
 
       case "prompt": {
         if (!ws.data.scopes.has(SCOPE_PROMPT)) {

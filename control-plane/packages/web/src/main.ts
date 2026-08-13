@@ -16,8 +16,8 @@ import "./styles.css";
 
 import type { Agent, AgentId } from "@ompd/core/contracts";
 import { SCOPE_APPROVE } from "@ompd/core/contracts";
-import { OmpdClient } from "./client.ts";
-import type { ClientErrorEvent } from "./client.ts";
+import { OmpdClient } from "@ompd/core/ompd-client";
+import type { ClientErrorEvent } from "@ompd/core/ompd-client";
 import { clearConnection, defaultSocketUrl, loadConnection, saveConnection } from "./config.ts";
 import type { Connection } from "./config.ts";
 import { EMPTY_SESSION, appendApproval, appendPrompt, endTurn, reduce, resolveApproval } from "./session/model.ts";
