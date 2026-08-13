@@ -109,6 +109,47 @@ export function dangerousMountReason(hostPath: string): string | null {
 }
 
 /**
+ * Schemes the agent's WebView may load. Everything else is refused.
+ *
+ * `about:blank` is where a fresh sandbox starts. Beyond that, a driveable page
+ * is a web page, and every other scheme a URL bar accepts is a way out of the
+ * sandbox rather than a place to browse: `file:` reads the app's own container,
+ * `tel:`/`sms:`/`mailto:` and any app scheme hand the request to another app
+ * through the OS, and `javascript:` is script injection wearing a URL. None of
+ * those are things an operator should be asked to approve, so they are refused
+ * before an approval is ever raised.
+ */
+const DRIVEABLE_SCHEMES: Record<string, true> = { "http:": true, "https:": true };
+
+/** Where a fresh sandbox starts, allowed without being a scheme anyone browses. */
+const BLANK_PAGE = "about:blank";
+
+/**
+ * Why the WebView must not load `url`, or null when it may.
+ *
+ * Enforced twice on purpose, and the two are not redundant. This is the check
+ * on a URL the agent supplied, and it runs before the operator is asked
+ * anything. The other is the device's own `onShouldStartLoadWithRequest`, which
+ * sees what this cannot: a redirect the page performed and a link the agent
+ * clicked, neither of which passed through any tool call.
+ */
+export function undriveableUrlReason(url: string): string | null {
+  const trimmed = url.trim();
+  if (trimmed === BLANK_PAGE) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return "not a URL";
+  }
+  if (DRIVEABLE_SCHEMES[parsed.protocol] !== true) return `scheme ${parsed.protocol} is not driveable`;
+  // A URL with no host is not a page: `http:///etc/passwd` parses, and on some
+  // platforms resolves to something local.
+  if (parsed.hostname.length === 0) return "no host";
+  return null;
+}
+
+/**
  * Commands that are never auto-allowed regardless of mode, because a mistake is
  * unrecoverable or exfiltrates credentials.
  */

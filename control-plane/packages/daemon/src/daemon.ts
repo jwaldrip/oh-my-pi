@@ -57,7 +57,12 @@ import { Scheduler } from "./routines/index.ts";
 import { SessionIndex } from "./sessions/index.ts";
 import { Supervisor } from "./supervisor.ts";
 import { listConnectorCatalog, listSkillCatalog, TaskManager } from "./workspace/index.ts";
-import { NO_TARGET, WebViewBridge, type WebViewDispatch } from "./browser/bridge.ts";
+import {
+  NO_TARGET,
+  WebViewBridge,
+  type WebViewApprovalGate,
+  type WebViewDispatch,
+} from "./browser/bridge.ts";
 import {
   mcpServerDescriptor,
   startWebViewMcpServer,
@@ -180,6 +185,8 @@ export interface OmpdOptions {
   repoRoot?: string;
   /** Host factory seam, so a test never spawns a real `omp acp`. */
   spawnHost?: (opts: SpawnLocalHostOptions) => LocalHost;
+  /** Approval deadline seam for deterministic composition tests. */
+  approvalTimeoutMs?: number;
   /** Power-assertion seam, so a test never spawns a real `caffeinate`. */
   spawnAwake?: (command: string[]) => AwakeProcess;
   /** Skips speech-engine probing, which shells out. */
@@ -416,11 +423,16 @@ export class Ompd {
 
     const policy = new DefaultPolicy({ mode: this.#config.policyMode });
     let sendWebViewAction: WebViewDispatch["send"] = () => false;
+    let requestWebViewApproval: WebViewApprovalGate["request"] = () =>
+      Promise.resolve({ allowed: false, reason: "approval supervisor is not available" });
     this.#webViewBridge = new WebViewBridge({
       policy,
       store: this.#store,
       dispatch: {
         send: (agentId, requestId, action) => sendWebViewAction(agentId, requestId, action),
+      },
+      approvals: {
+        request: (input) => requestWebViewApproval(input),
       },
     });
 
@@ -428,6 +440,7 @@ export class Ompd {
       store: this.#store,
       policy,
       events: this.#events,
+      approvalTimeoutMs: opts.approvalTimeoutMs,
       ompPath: this.#config.ompPath,
       spawnHost: this.#hosts.spawn,
       provisioner: this.#provisioner,
@@ -438,6 +451,8 @@ export class Ompd {
         return [mcpServerDescriptor(server, agentId)];
       },
     });
+    requestWebViewApproval = ({ agentId, tool, title, action }) =>
+      this.#supervisor.gateAction({ agentId, tool, title, input: action });
 
     // Timer-driven runs act as the machine's own operator. The supervisor
     // re-reads the device row on every call, so revoking that device stops

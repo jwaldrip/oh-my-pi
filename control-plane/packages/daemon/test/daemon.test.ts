@@ -905,6 +905,285 @@ describe("WebView composition", () => {
     });
   });
 
+  test("routes WebView navigation approval decisions through the operator socket", async () => {
+    const home = tempDir("ompd-webview-approval-");
+    const fake = createFakeHost();
+    const daemon = new Ompd({
+      home,
+      overrides: { port: 0 },
+      spawnHost: fake.factory,
+      voice: false,
+      approvalTimeoutMs: 2_000,
+    });
+    running.push(daemon);
+    const info = await daemon.start();
+    const operator = await tokenOf(home);
+
+    const created = await fetch(`${info.url}/v1/agents`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "browser-worker", cwd: home }),
+    });
+    expect(created.status).toBe(201);
+    const { agent } = (await created.json()) as { agent: { id: string } };
+    const mcpUrl = String(
+      (fake.newRequests[0]?.mcpServers[0] as { url?: unknown } | undefined)?.url,
+    );
+
+    const phone = await socketFor(info.port, operator);
+    phone.send({ t: "attach", agentId: agent.id });
+    phone.send({ t: "webview_register", agentId: agent.id });
+    phone.send({ t: "ping" });
+    await phone.next((frame) => frame.t === "pong");
+
+    const allowedUrl = "https://example.com/approved";
+    const allowedCall = fetch(mcpUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "webview_navigate", arguments: { url: allowedUrl } },
+      }),
+    });
+    const allowedApproval = await phone.next(
+      (frame) => frame.t === "approval" && frame.tool === "webview_navigate",
+    );
+    expect(allowedApproval).toMatchObject({
+      t: "approval",
+      agentId: agent.id,
+      title: `Navigate to ${allowedUrl}`,
+      tool: "webview_navigate",
+      input: { kind: "navigate", url: allowedUrl },
+    });
+    phone.send({
+      t: "decide",
+      agentId: agent.id,
+      requestId: allowedApproval.requestId,
+      choice: "allow",
+      scope: "once",
+    });
+
+    const allowedAction = await phone.next(
+      (frame) =>
+        frame.t === "webview_action" &&
+        frame.action !== null &&
+        typeof frame.action === "object" &&
+        "url" in frame.action &&
+        frame.action.url === allowedUrl,
+    );
+    expect(allowedAction).toMatchObject({
+      t: "webview_action",
+      agentId: agent.id,
+      action: { kind: "navigate", url: allowedUrl },
+    });
+    phone.send({
+      t: "webview_result",
+      agentId: agent.id,
+      requestId: allowedAction.requestId,
+      result: { kind: "ack", url: allowedUrl, title: "Approved page" },
+    });
+    const allowedBody = (await (await allowedCall).json()) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+    expect(allowedBody.result?.isError).toBe(false);
+    expect(JSON.parse(allowedBody.result?.content?.[0]?.text ?? "{}")).toMatchObject({
+      kind: "ack",
+      url: allowedUrl,
+    });
+    expect(daemon.store.getAgent(agent.id)?.state).toBe("idle");
+
+    const actionCount = phone.frames.filter((frame) => frame.t === "webview_action").length;
+    const approvalCount = phone.frames.filter((frame) => frame.t === "approval").length;
+    const deniedUrl = "https://example.com/denied";
+    const deniedCall = fetch(mcpUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "webview_navigate", arguments: { url: deniedUrl } },
+      }),
+    });
+    await phone.until(
+      () => phone.frames.filter((frame) => frame.t === "approval").length > approvalCount,
+    );
+    const deniedApproval = phone.frames.filter((frame) => frame.t === "approval")[approvalCount];
+    if (deniedApproval === undefined) throw new Error("missing denied navigation approval");
+    expect(deniedApproval).toMatchObject({
+      agentId: agent.id,
+      title: `Navigate to ${deniedUrl}`,
+      input: { kind: "navigate", url: deniedUrl },
+    });
+    phone.send({
+      t: "decide",
+      agentId: agent.id,
+      requestId: deniedApproval.requestId,
+      choice: "deny",
+      scope: "once",
+    });
+
+    const deniedBody = (await (await deniedCall).json()) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+    expect(deniedBody.result?.isError).toBe(true);
+    expect(deniedBody.result?.content?.[0]?.text).toContain("denied");
+    expect(phone.frames.filter((frame) => frame.t === "webview_action")).toHaveLength(
+      actionCount,
+    );
+    expect(daemon.store.getAgent(agent.id)?.state).toBe("idle");
+  });
+
+  test("fails a WebView approval closed when the operator does not decide", async () => {
+    const home = tempDir("ompd-webview-approval-timeout-");
+    const fake = createFakeHost();
+    const daemon = new Ompd({
+      home,
+      overrides: { port: 0 },
+      spawnHost: fake.factory,
+      voice: false,
+      approvalTimeoutMs: 100,
+    });
+    running.push(daemon);
+    const info = await daemon.start();
+    const operator = await tokenOf(home);
+
+    const created = await fetch(`${info.url}/v1/agents`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "browser-worker", cwd: home }),
+    });
+    const { agent } = (await created.json()) as { agent: { id: string } };
+    const mcpUrl = String(
+      (fake.newRequests[0]?.mcpServers[0] as { url?: unknown } | undefined)?.url,
+    );
+    const phone = await socketFor(info.port, operator);
+    phone.send({ t: "attach", agentId: agent.id });
+    phone.send({ t: "webview_register", agentId: agent.id });
+    phone.send({ t: "ping" });
+    await phone.next((frame) => frame.t === "pong");
+
+    const url = "https://example.com/unattended";
+    const call = fetch(mcpUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "webview_navigate", arguments: { url } },
+      }),
+    });
+    await phone.next((frame) => frame.t === "approval" && frame.tool === "webview_navigate");
+
+    const body = (await (await call).json()) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+    expect(body.result?.isError).toBe(true);
+    expect(body.result?.content?.[0]?.text).toContain("timed out");
+    expect(phone.frames.filter((frame) => frame.t === "webview_action")).toEqual([]);
+    expect(daemon.store.getAgent(agent.id)?.state).toBe("idle");
+  });
+
+  test("an agent-issued WebView call passes OMP's MCP wrapper and the bridge gate", async () => {
+    const home = tempDir("ompd-webview-agent-call-");
+    const fake = createFakeHost();
+    const daemon = new Ompd({
+      home,
+      overrides: { port: 0 },
+      spawnHost: fake.factory,
+      voice: false,
+      approvalTimeoutMs: 2_000,
+    });
+    running.push(daemon);
+    const info = await daemon.start();
+    const operator = await tokenOf(home);
+
+    const created = await fetch(`${info.url}/v1/agents`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "browser-worker", cwd: home }),
+    });
+    const { agent } = (await created.json()) as { agent: { id: string } };
+    const descriptor = fake.newRequests[0]?.mcpServers[0] as
+      | { url?: unknown; _meta?: Record<string, unknown> }
+      | undefined;
+    const mcpUrl = String(descriptor?.url);
+    const url = "https://example.com/from-agent";
+    expect(descriptor?._meta).toEqual({ "omp.toolApproval": "allow" });
+
+    fake.onPrompt(async () => {
+      if (descriptor?._meta?.["omp.toolApproval"] !== "allow") {
+        return { stopReason: "refusal" };
+      }
+      const response = await fetch(mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: { name: "webview_navigate", arguments: { url } },
+        }),
+      });
+      const body = (await response.json()) as { result?: { isError?: boolean } };
+      return { stopReason: body.result?.isError === true ? "refusal" : "end_turn" };
+    });
+
+    const phone = await socketFor(info.port, operator);
+    phone.send({ t: "attach", agentId: agent.id });
+    phone.send({ t: "webview_register", agentId: agent.id });
+    phone.send({ t: "ping" });
+    await phone.next((frame) => frame.t === "pong");
+
+    const turn = fetch(`${info.url}/v1/agents/${agent.id}/prompt`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" },
+      body: JSON.stringify({ text: "navigate the WebView" }),
+    });
+
+    const bridgeApproval = await phone.next(
+      (frame) =>
+        frame.t === "approval" &&
+        frame.tool === "webview_navigate" &&
+        frame.title === `Navigate to ${url}`,
+    );
+    phone.send({
+      t: "decide",
+      agentId: agent.id,
+      requestId: bridgeApproval.requestId,
+      choice: "allow",
+      scope: "once",
+    });
+
+    const action = await phone.next(
+      (frame) =>
+        frame.t === "webview_action" &&
+        frame.action !== null &&
+        typeof frame.action === "object" &&
+        "url" in frame.action &&
+        frame.action.url === url,
+    );
+    phone.send({
+      t: "webview_result",
+      agentId: agent.id,
+      requestId: action.requestId,
+      result: { kind: "ack", url, title: "Agent page" },
+    });
+
+    const response = await turn;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ agentId: agent.id, stopReason: "end_turn" });
+    expect(daemon.store.getAgent(agent.id)?.state).toBe("idle");
+    expect(
+      daemon.store
+        .listApprovals(agent.id)
+        .filter((approval) => approval.tool === "webview_navigate"),
+    ).toHaveLength(1);
+  });
+
   test("fails an in-flight action when the registered device disconnects", async () => {
     const home = tempDir("ompd-webview-");
     const fake = createFakeHost();

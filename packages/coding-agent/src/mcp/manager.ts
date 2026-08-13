@@ -201,6 +201,7 @@ export class MCPManager {
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#sources = new Map<string, SourceMeta>();
+	#trustedApprovals = new Map<string, MCPServerConnection["_trustedApproval"]>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
 	#notificationListeners = new Set<(serverName: string, method: string, params: unknown) => void>();
@@ -496,6 +497,7 @@ export class MCPManager {
 					if (sources[name]) {
 						connection._source = sources[name];
 					}
+					connection._trustedApproval = this.#trustedApprovals.get(name);
 					if (this.#pendingConnections.get(name) === connectionPromise) {
 						this.#pendingConnections.delete(name);
 						this.#connections.set(name, connection);
@@ -780,6 +782,17 @@ export class MCPManager {
 		return this.#connections.get(name);
 	}
 
+	/** Attach authorization provenance supplied by the trusted connection owner. */
+	setTrustedApproval(name: string, approval: MCPServerConnection["_trustedApproval"]): void {
+		if (approval === undefined) {
+			this.#trustedApprovals.delete(name);
+		} else {
+			this.#trustedApprovals.set(name, approval);
+		}
+		const connection = this.#connections.get(name);
+		if (connection) connection._trustedApproval = approval;
+	}
+
 	/**
 	 * Get current connection status for a server.
 	 */
@@ -863,6 +876,7 @@ export class MCPManager {
 		this.#pendingReconnections.delete(name);
 		this.#sources.delete(name);
 		this.#serverConfigs.delete(name);
+		this.#trustedApprovals.delete(name);
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
 
@@ -910,6 +924,7 @@ export class MCPManager {
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
 		this.#serverConfigs.clear();
+		this.#trustedApprovals.clear();
 		this.#connections.clear();
 		this.#tools = [];
 		this.#subscribedResources.clear();
@@ -1094,6 +1109,7 @@ export class MCPManager {
 
 		connection.config = config;
 		if (source) connection._source = source;
+		connection._trustedApproval = this.#trustedApprovals.get(name);
 
 		// Bail out if the server was disconnected or the manager was reset
 		// while we were connecting (e.g. /mcp reload called disconnectAll).

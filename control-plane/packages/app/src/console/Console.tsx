@@ -83,7 +83,13 @@ export function Console({
 
   const log =
     agent === null ? null : (
+      // Keyed, so selecting a different agent builds a new screen rather than
+      // re-rendering this one with different props. The browser pane is an
+      // offer the operator made about one agent: carried across a selection it
+      // would leave a page from the previous agent's work open, registered as
+      // the new agent's target, without anyone having asked for it.
       <SessionScreen
+        key={agent.id}
         agent={agent}
         session={sessionFor(state, agent.id)}
         connection={state.connection}

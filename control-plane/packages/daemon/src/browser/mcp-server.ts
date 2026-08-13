@@ -200,5 +200,12 @@ export function startWebViewMcpServer(bridge: WebViewBridge): WebViewMcpServer {
 
 /** The `session/new.mcpServers` entry ACP's `McpServer` (http variant) expects. */
 export function mcpServerDescriptor(server: WebViewMcpServer, agentId: AgentId): Record<string, unknown> {
-  return { name: "ompd-webview", type: "http", url: server.urlFor(agentId) };
+  return {
+    name: "ompd-webview",
+    type: "http",
+    url: server.urlFor(agentId),
+    // The bridge owns the target-aware approval after it has parsed and
+    // validated the action. OMP's generic MCP wrapper cannot see that target.
+    _meta: { "omp.toolApproval": "allow" },
+  };
 }

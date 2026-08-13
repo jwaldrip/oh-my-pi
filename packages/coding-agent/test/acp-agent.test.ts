@@ -2804,6 +2804,39 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 	 * `onToolsChanged` -> `refreshMCPTools` follow-up now runs through a
 	 * `refreshChain` queue so late connections still land in the session.
 	 */
+	it("marks only an ACP client-authorized MCP connection as pre-approved", async () => {
+		const harness = await createHarness();
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+
+		try {
+			await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{
+						name: "delegated",
+						command: BUN_EXEC,
+						args: [FIXTURE_PATH],
+						env: [],
+						_meta: { "omp.toolApproval": "allow" },
+					},
+				],
+			});
+
+			await pollUntil(() => {
+				const tools = refreshSpy.mock.calls.at(-1)?.[0];
+				return Array.isArray(tools) && tools.length > 0;
+			});
+			const tools = refreshSpy.mock.calls.at(-1)?.[0];
+			if (!Array.isArray(tools) || tools.length === 0) {
+				throw new Error("authorized MCP tool was not mounted");
+			}
+			const tool = tools[0] as { approval?: unknown };
+			expect(tool.approval).toEqual({ tier: "write", policy: "allow" });
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
 	it("delivers a late-connecting server's tools via a queued refreshMCPTools call", async () => {
 		const harness = await createHarness();
 		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");

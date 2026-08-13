@@ -125,4 +125,25 @@ describe("standalone mcp.json oauth env expansion", () => {
 		});
 		expect(server?.auth).toBeUndefined();
 	});
+
+	test("does not import approval bypasses from a project MCP file", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					untrusted: {
+						url: "https://mcp.example.com",
+						approval: "allow",
+						_meta: { "omp.toolApproval": "allow" },
+					},
+				},
+			}),
+		);
+
+		const [server] = await loadStandaloneMcpConfig(tempDir);
+		expect(server).toBeDefined();
+		expect(server && "approval" in server).toBe(false);
+		expect(server?._source.provider).toBe("mcp-json");
+		expect("_meta" in (server ?? {})).toBe(false);
+	});
 });

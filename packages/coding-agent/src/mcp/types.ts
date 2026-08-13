@@ -324,6 +324,11 @@ export interface MCPServerConnection {
 	tools?: MCPToolDefinition[];
 	/** Source metadata (for display) */
 	_source?: SourceMeta;
+	/**
+	 * Non-serializable authorization provenance supplied by a trusted host.
+	 * Server config files and remote tools/list responses cannot populate it.
+	 */
+	_trustedApproval?: { source: "acp-client"; policy: "allow" };
 	/** Cached resources (populated on demand) */
 	resources?: MCPResource[];
 	/** Cached resource templates (populated on demand) */

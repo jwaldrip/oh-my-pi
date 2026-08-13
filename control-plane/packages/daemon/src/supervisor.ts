@@ -58,6 +58,11 @@ export interface PendingApproval {
   resolve: (choice: { choice: "allow" | "deny"; scope?: "once" | "always"; actor: Actor }) => void;
 }
 
+interface GateResult {
+  option: AcpOptionId;
+  reason: string;
+}
+
 export interface SupervisorEvents {
   onUpdate?: (agentId: AgentId, seq: number, update: unknown) => void;
   onAgentsChanged?: (agents: Agent[]) => void;
@@ -495,6 +500,26 @@ export class Supervisor {
     return true;
   }
 
+  async gateAction(input: {
+    agentId: AgentId;
+    tool: string;
+    title: string;
+    input: unknown;
+  }): Promise<{ allowed: boolean; reason: string }> {
+    const agent = this.#store.getAgent(input.agentId);
+    if (!agent) return { allowed: false, reason: `no such agent: ${input.agentId}` };
+    const result = await this.#gate({
+      agentId: input.agentId,
+      agent,
+      requestId: `wva_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+      tool: input.tool,
+      title: input.title,
+      input: input.input,
+      probes: [input.input],
+    });
+    return { allowed: result.option.startsWith("allow"), reason: result.reason };
+  }
+
   /**
    * The ACP permission hook, gate 1.
    *
@@ -513,7 +538,7 @@ export class Supervisor {
     const tool = req.toolCall.kind === "execute" ? "bash" : (req.toolCall.kind ?? "unknown");
     const input = req.toolCall.rawInput ?? {};
 
-    return await this.#gate({
+    const result = await this.#gate({
       agentId,
       agent,
       requestId: req.toolCall.toolCallId,
@@ -522,6 +547,7 @@ export class Supervisor {
       input,
       probes: [input],
     });
+    return result.option;
   }
 
   /**
@@ -619,7 +645,7 @@ export class Supervisor {
     // so a human decides.
     if (probes.length === 0) probes.push({});
 
-    const option = await this.#gate({
+    const result = await this.#gate({
       agentId,
       agent,
       requestId,
@@ -628,7 +654,7 @@ export class Supervisor {
       input,
       probes,
     });
-    return option.startsWith("allow")
+    return result.option.startsWith("allow")
       ? { action: "accept", value: TOOL_APPROVAL_CHOICES[0] }
       : { action: "accept", value: TOOL_APPROVAL_CHOICES[1] };
   }
@@ -649,7 +675,7 @@ export class Supervisor {
     title: string;
     input: unknown;
     probes: unknown[];
-  }): Promise<AcpOptionId> {
+  }): Promise<GateResult> {
     const { agentId, agent, requestId, tool, title, input } = args;
     this.#store.openApproval({ requestId, agentId, tool, title, input });
 
@@ -679,11 +705,14 @@ export class Supervisor {
         decision.reason,
         null,
       );
-      return toAcpOption(decision);
+      return { option: toAcpOption(decision), reason: decision.reason };
     }
 
     // Ask a human. Fail closed on timeout: an unattended agent must not be
-    // able to wait out the gate.
+    // able to wait out the gate. Restore the state this particular gate
+    // interrupted, because WebView MCP requests can arrive while an agent is
+    // idle as well as from inside a busy turn.
+    const stateBeforeApproval = agent.state;
     this.#setState(agentId, "waiting");
     const answer = await new Promise<{
       choice: "allow" | "deny";
@@ -710,7 +739,9 @@ export class Supervisor {
 
       this.#events.onApprovalNeeded?.({ requestId, agentId, tool, title, input });
     });
-    this.#setState(agentId, "busy");
+    if (this.#store.getAgent(agentId)?.state === "waiting") {
+      this.#setState(agentId, stateBeforeApproval);
+    }
 
     const option = toAcpOption(
       decision,
@@ -731,7 +762,15 @@ export class Supervisor {
       outcome: allowed ? "ok" : "denied",
       detail: { requestId, tool, rule: decision.rule, timedOut: answer === null },
     });
-    return option;
+    return {
+      option,
+      reason:
+        answer === null
+          ? "operator approval timed out"
+          : answer.choice === "allow"
+            ? "approved by operator"
+            : "denied by operator",
+    };
   }
 
   /** Close out an approval nobody was asked about, and record why. */

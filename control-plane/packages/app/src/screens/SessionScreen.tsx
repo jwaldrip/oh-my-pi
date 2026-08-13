@@ -8,8 +8,8 @@
 
 import { useEffect, useRef, useState, type JSX } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
-import { webViewCapability } from "../browser/index.ts";
-import type { WebViewDriverHandle } from "../browser/index.ts";
+import { webViewCapability } from "../browser";
+import type { WebViewTarget } from "../console/webview.ts";
 import type { Agent, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
 import { Composer } from "../components/Composer.tsx";
 import { StatusReadout } from "../components/StatusReadout.tsx";
@@ -42,7 +42,7 @@ export interface SessionScreenProps {
    * operator opens the browser pane and again after a remount; the daemon
    * keeps one target per agent, so re-offering is how a remount takes over.
    */
-  onMountWebView?: (target: WebViewDriverHandle) => void;
+  onMountWebView?: (target: WebViewTarget) => void;
   /** Withdraw it. Always called when the pane closes or the screen unmounts. */
   onUnmountWebView?: () => void;
   now?: number;
@@ -54,7 +54,7 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
   const busy = agent.state === "busy";
 
   const [browserOpen, setBrowserOpen] = useState(false);
-  const driver = useRef<WebViewDriverHandle | null>(null);
+  const driver = useRef<WebViewTarget | null>(null);
 
   /**
    * The callbacks as of the last render, read rather than depended on.

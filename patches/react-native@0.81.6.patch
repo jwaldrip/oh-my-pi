@@ -1,0 +1,43 @@
+diff --git a/node_modules/react-native/.bun-tag-729f9be469ba225a b/.bun-tag-729f9be469ba225a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/third-party-podspecs/RCT-Folly.podspec b/third-party-podspecs/RCT-Folly.podspec
+index 8852179b6ce2ef6ae64e0239edb2594925ff8bc1..ed4c116ef5595ef958a8889d231b8a25e1cec524 100644
+--- a/third-party-podspecs/RCT-Folly.podspec
++++ b/third-party-podspecs/RCT-Folly.podspec
+@@ -25,7 +25,10 @@ Pod::Spec.new do |spec|
+   spec.dependency "DoubleConversion"
+   spec.dependency "glog"
+   spec.dependency "fast_float", "8.0.0"
+-  spec.dependency "fmt", "11.0.2"
++  # Keep Folly aligned with the Xcode-26-compatible fmt release declared in
++  # fmt.podspec. The exact 11.0.2 constraint otherwise prevents CocoaPods from
++  # resolving the compatible source.
++  spec.dependency "fmt", "12.1.0"
+   spec.compiler_flags = '-Wno-documentation -faligned-new'
+   spec.source_files = 'folly/String.cpp',
+                       'folly/Conv.cpp',
+diff --git a/third-party-podspecs/fmt.podspec b/third-party-podspecs/fmt.podspec
+index 2f38990e226c13f483aaf1b986302d4094243814..e7989fbf7e498f8b1e8ef3cd956f5e820cb61400 100644
+--- a/third-party-podspecs/fmt.podspec
++++ b/third-party-podspecs/fmt.podspec
+@@ -8,14 +8,17 @@ fmt_git_url = fmt_config[:git]
+ 
+ Pod::Spec.new do |spec|
+   spec.name = "fmt"
+-  spec.version = "11.0.2"
++  # fmt 11.0.2 does not compile with the Apple Clang bundled by Xcode 26.4+:
++  # its FMT_STRING consteval calls are rejected in C++20 mode. fmt 12.1.0 is
++  # the upstream compatibility release used by newer React Native versions.
++  spec.version = "12.1.0"
+   spec.license = { :type => "MIT" }
+   spec.homepage = "https://github.com/fmtlib/fmt"
+   spec.summary = "{fmt} is an open-source formatting library for C++. It can be used as a safe and fast alternative to (s)printf and iostreams."
+   spec.authors = "The fmt contributors"
+   spec.source = {
+     :git => fmt_git_url,
+-    :tag => "11.0.2"
++    :tag => "12.1.0"
+   }
+   spec.pod_target_xcconfig = {
+     "CLANG_CXX_LANGUAGE_STANDARD" => rct_cxx_language_standard(),

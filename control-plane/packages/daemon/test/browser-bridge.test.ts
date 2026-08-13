@@ -14,8 +14,23 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
-import { DefaultPolicy, Store, type Agent, type Policy, type PolicyContext, type PolicyDecision, type WebViewAction } from "@ompd/core";
-import { NO_RESPONSE, NO_TARGET, PROMPT_NOT_WIRED, WebViewBridge, type WebViewDispatch } from "../src/browser/bridge.ts";
+import {
+  DefaultPolicy,
+  Store,
+  type Agent,
+  type Policy,
+  type PolicyContext,
+  type PolicyDecision,
+  type WebViewAction,
+} from "@ompd/core";
+import {
+  NO_RESPONSE,
+  NO_TARGET,
+  PROMPT_NOT_WIRED,
+  WebViewBridge,
+  type WebViewApprovalGate,
+  type WebViewDispatch,
+} from "../src/browser/bridge.ts";
 
 const paths: string[] = [];
 
@@ -23,7 +38,7 @@ afterEach(() => {
   for (const path of paths.splice(0)) rmSync(path, { force: true });
 });
 
-function harness(policy: Policy, available = true) {
+function harness(policy: Policy, available = true, approvals?: WebViewApprovalGate) {
   const path = `/tmp/ompd-webview-bridge-${crypto.randomUUID()}.db`;
   paths.push(path);
   const store = new Store(path);
@@ -46,7 +61,7 @@ function harness(policy: Policy, available = true) {
       return available;
     },
   };
-  const bridge = new WebViewBridge({ policy, store, dispatch, timeoutMs: 200 });
+  const bridge = new WebViewBridge({ policy, store, dispatch, approvals, timeoutMs: 200 });
   return { bridge, sent, agentId: agent.id };
 }
 
@@ -88,6 +103,136 @@ describe("WebViewBridge: an action reaches the policy engine", () => {
     const { bridge, sent, agentId } = harness(fixedPolicy("prompt"));
     const result = await bridge.performAction(agentId, { kind: "click", ref: "n3" });
     expect(result).toEqual({ kind: "error", message: PROMPT_NOT_WIRED });
+    expect(sent).toEqual([]);
+  });
+
+  test("a prompted navigate asks the gate and dispatches the exact approved action", async () => {
+    const asked: Parameters<WebViewApprovalGate["request"]>[0][] = [];
+    const approvals: WebViewApprovalGate = {
+      request: (input) => {
+        asked.push(input);
+        return Promise.resolve({ allowed: true, reason: "approved once" });
+      },
+    };
+    const { bridge, sent, agentId } = harness(fixedPolicy("prompt"), true, approvals);
+    const action = { kind: "navigate" as const, url: "https://example.com/path" };
+    const pending = bridge.performAction(agentId, action);
+    await Promise.resolve();
+
+    expect(asked).toEqual([
+      {
+        agentId,
+        tool: "webview_navigate",
+        title: "Navigate to https://example.com/path",
+        action,
+      },
+    ]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.action).toEqual(action);
+    bridge.resolveResult(agentId, sent[0]!.requestId, {
+      kind: "ack",
+      url: action.url,
+      title: "Example",
+    });
+    await expect(pending).resolves.toMatchObject({ kind: "ack", url: action.url });
+  });
+
+  test("a gate refusal carries its reason and never dispatches", async () => {
+    const asked: Parameters<WebViewApprovalGate["request"]>[0][] = [];
+    const approvals: WebViewApprovalGate = {
+      request: (input) => {
+        asked.push(input);
+        return Promise.resolve({ allowed: false, reason: "operator denied this click" });
+      },
+    };
+    const { bridge, sent, agentId } = harness(fixedPolicy("prompt"), true, approvals);
+    const action = { kind: "click" as const, ref: "n3" };
+
+    await expect(bridge.performAction(agentId, action)).resolves.toEqual({
+      kind: "error",
+      message: "operator denied this click",
+    });
+    expect(asked).toEqual([
+      { agentId, tool: "webview_click", title: "Click n3", action },
+    ]);
+    expect(sent).toEqual([]);
+  });
+
+  test("a type approval title names the ref and text", async () => {
+    const asked: Parameters<WebViewApprovalGate["request"]>[0][] = [];
+    const approvals: WebViewApprovalGate = {
+      request: (input) => {
+        asked.push(input);
+        return Promise.resolve({ allowed: false, reason: "operator denied typing" });
+      },
+    };
+    const { bridge, sent, agentId } = harness(fixedPolicy("prompt"), true, approvals);
+    const action = { kind: "type" as const, ref: "n4", text: "hello world" };
+
+    await bridge.performAction(agentId, action);
+    expect(asked).toEqual([
+      {
+        agentId,
+        tool: "webview_type",
+        title: 'Type "hello world" into n4',
+        action,
+      },
+    ]);
+    expect(sent).toEqual([]);
+  });
+
+  test("observe bypasses the approval gate", async () => {
+    let asks = 0;
+    const approvals: WebViewApprovalGate = {
+      request: () => {
+        asks += 1;
+        return Promise.resolve({ allowed: false, reason: "must not be asked" });
+      },
+    };
+    const { bridge, sent, agentId } = harness(fixedPolicy("allow"), true, approvals);
+    const pending = bridge.performAction(agentId, { kind: "observe" });
+    expect(asks).toBe(0);
+    expect(sent).toHaveLength(1);
+    bridge.resolveResult(agentId, sent[0]!.requestId, {
+      kind: "observe",
+      observation: {
+        url: "about:blank",
+        title: "",
+        settled: true,
+        tree: { tag: "body", ref: "n0" },
+      },
+    });
+    await expect(pending).resolves.toMatchObject({ kind: "observe" });
+  });
+
+  test.each([
+    ["file URL", "file:///etc/passwd"],
+    ["OS-handled URL", "tel:+15551234567"],
+    ["script URL", "javascript:alert(1)"],
+    ["URL without a host", "https://"],
+  ])("refuses a %s before policy, approval, or dispatch", async (_class, url) => {
+    let evaluated = false;
+    let asks = 0;
+    const policy: Policy = {
+      evaluate() {
+        evaluated = true;
+        return { action: "prompt", reason: "must not run", rule: "test" };
+      },
+    };
+    const approvals: WebViewApprovalGate = {
+      request: () => {
+        asks += 1;
+        return Promise.resolve({ allowed: true, reason: "must not run" });
+      },
+    };
+    const { bridge, sent, agentId } = harness(policy, true, approvals);
+
+    const result = await bridge.performAction(agentId, { kind: "navigate", url });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("unsafe navigation unexpectedly dispatched");
+    expect(result.message).toContain(url);
+    expect(evaluated).toBe(false);
+    expect(asks).toBe(0);
     expect(sent).toEqual([]);
   });
 

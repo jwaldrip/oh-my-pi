@@ -23,6 +23,7 @@ import { View, type StyleProp, type ViewStyle } from "react-native";
 import WebView, { type WebViewMessageEvent, type WebViewNavigation } from "react-native-webview";
 import { captureRef } from "react-native-view-shot";
 import type { WebViewAction, WebViewActionResult } from "@ompd/core/contracts";
+import { undriveableUrlReason } from "@ompd/core/policy";
 import { buildInjectedScript, mintNonce, parseBridgeMessage } from "./bridge.ts";
 
 export interface WebViewDriverHandle {
@@ -36,6 +37,13 @@ export interface WebViewDriverProps {
   style?: StyleProp<ViewStyle>;
   /** How long one action waits for the page (or the native capture) to answer before failing rather than hanging the caller forever. */
   timeoutMs?: number;
+  /**
+   * A navigation this WebView refused, with the reason. Worth surfacing rather
+   * than swallowing: a page that tried to open the phone's dialer is something
+   * an operator should be told about, and an agent whose click went nowhere is
+   * otherwise left guessing why the page did not change.
+   */
+  onRefusedNavigation?: (url: string, reason: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -170,6 +178,29 @@ export const WebViewDriver = forwardRef<WebViewDriverHandle, WebViewDriverProps>
     pending.resolve({ kind: "ack", url: nav.url, title: nav.title });
   }, []);
 
+  /**
+   * The last word on what this WebView loads, and the only one that sees a
+   * navigation no tool call made: a redirect the page issued, a link the agent
+   * clicked, a form that posts somewhere else. The daemon checks the URL an
+   * agent asked for; nothing but this sees the URL a page chose.
+   *
+   * Refusing here rather than narrowing `originWhitelist` is deliberate.
+   * `react-native-webview` does not simply decline a URL outside that list: it
+   * hands it to `Linking.openURL`, which is the OS asking another app to open
+   * it. A page inside the agent's sandbox could then launch the phone's mail
+   * client, dialer, or App Store. Returning false stops the load without
+   * offering it to anything else.
+   */
+  const onShouldStartLoadWithRequest = useCallback(
+    (request: WebViewNavigation & { isTopFrame: boolean }) => {
+      const reason = undriveableUrlReason(request.url);
+      if (reason === null) return true;
+      props.onRefusedNavigation?.(request.url, reason);
+      return false;
+    },
+    [props.onRefusedNavigation],
+  );
+
   return (
     <View ref={containerRef} style={props.style ?? { flex: 1 }}>
       <WebView<object>
@@ -187,8 +218,12 @@ export const WebViewDriver = forwardRef<WebViewDriverHandle, WebViewDriverProps>
         // WebView in the app's shared persistent store: storage would outlive
         // the pane, be visible to every other WebView the app creates, and
         // survive a relaunch. See `docs/browser.md`.
+        onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
         incognito
         javaScriptEnabled
+        // Every load already passes `onShouldStartLoadWithRequest` above, which
+        // is a stricter rule than any origin list and, unlike one, never hands a
+        // refused URL to `Linking.openURL`.
         originWhitelist={["*"]}
       />
     </View>

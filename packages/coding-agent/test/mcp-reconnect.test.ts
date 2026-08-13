@@ -65,6 +65,18 @@ describe("deduplicateMCPToolsByName", () => {
 	});
 });
 
+describe("MCP tool approval provenance", () => {
+	it("accepts only trusted ACP connection provenance, not a file-shaped config field", () => {
+		const connection = makeConnection(mockTransport(async () => toolCallResult("ok")));
+		Object.assign(connection.config, { approval: "allow" });
+		const tool = new MCPTool(connection, TOOL_DEF);
+
+		expect(tool.approval).toBe("write");
+		connection._trustedApproval = { source: "acp-client", policy: "allow" };
+		expect(tool.approval).toEqual({ tier: "write", policy: "allow" });
+	});
+});
+
 // ---------------------------------------------------------------------------
 // isRetriableConnectionError
 // ---------------------------------------------------------------------------

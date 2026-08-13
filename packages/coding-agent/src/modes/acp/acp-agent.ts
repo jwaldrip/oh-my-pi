@@ -99,6 +99,7 @@ const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
 const THINKING_OFF = "off";
 const SESSION_PAGE_SIZE = 50;
+const ACP_MCP_TOOL_APPROVAL_META_KEY = "omp.toolApproval";
 const SPEECH_MODELS_LIST_METHOD = "speech.models.list";
 /**
  * Delay between `session/new` (or `session/load` / `session/resume` /
@@ -2474,6 +2475,15 @@ export class AcpAgent implements Agent {
 				path: `acp://${server.name}`,
 				level: "project",
 			};
+		}
+
+		for (const server of servers) {
+			manager.setTrustedApproval(
+				server.name,
+				server._meta?.[ACP_MCP_TOOL_APPROVAL_META_KEY] === "allow"
+					? { source: "acp-client", policy: "allow" }
+					: undefined,
+			);
 		}
 
 		const result = await manager.connectServers(configs, sources);
