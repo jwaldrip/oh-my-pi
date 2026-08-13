@@ -28,7 +28,7 @@ interface Harness {
   pair: (id: string, scopes: string[]) => Actor;
 }
 
-function harness(opts: { approvalTimeoutMs?: number } = {}): Harness {
+function harness(opts: { approvalTimeoutMs?: number; mcpServersFor?: (agentId: string) => unknown[] } = {}): Harness {
   const path = `/tmp/ompd-resume-${crypto.randomUUID()}.db`;
   paths.push(path);
   const store = new Store(path);
@@ -41,6 +41,7 @@ function harness(opts: { approvalTimeoutMs?: number } = {}): Harness {
     policy: new DefaultPolicy({ mode: "standard" }),
     approvalTimeoutMs: opts.approvalTimeoutMs ?? 500,
     spawnHost: fake.factory,
+    mcpServersFor: opts.mcpServersFor,
     events: {
       onApprovalNeeded: (p) => approvals.push(p),
       onUpdate: (agentId, seq, update) => updates.push({ agentId, seq, update }),
@@ -86,6 +87,32 @@ describe("resumeAgent", () => {
     // The decisive negative: a restart would show up here, as a freshly
     // minted `sess_1`. It never does.
     expect(h.fake.sessions).toEqual([]);
+  });
+
+  test("restores the daemon MCP mounts when loading an existing session", async () => {
+    const descriptors: Array<{ name: string; url: string }> = [];
+    const h = harness({
+      mcpServersFor: agentId => {
+        const descriptor = { name: "ompd-webview", url: `http://127.0.0.1/webview/${agentId}` };
+        descriptors.push(descriptor);
+        return [descriptor];
+      },
+    });
+    const admin = h.pair("admin", [SCOPE_READ, SCOPE_PROMPT, SCOPE_MANAGE, SCOPE_APPROVE]);
+
+    const agent = await h.sup.resumeAgent(
+      { name: "r", cwd: "/work", sessionId: "prior-session-with-webview" },
+      admin,
+    );
+
+    expect(descriptors).toEqual([{ name: "ompd-webview", url: `http://127.0.0.1/webview/${agent.id}` }]);
+    expect(h.fake.loadRequests).toEqual([
+      {
+        sessionId: "prior-session-with-webview",
+        cwd: "/work",
+        mcpServers: descriptors,
+      },
+    ]);
   });
 
   test("session/update frames sent before any prompt reach the resumed agent, proving continuation rather than a blank start", async () => {

@@ -15,7 +15,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { DefaultPolicy, Store, type Agent, type Policy, type PolicyContext, type PolicyDecision, type WebViewAction } from "@ompd/core";
-import { NO_RESPONSE, PROMPT_NOT_WIRED, WebViewBridge, type WebViewDispatch } from "../src/browser/bridge.ts";
+import { NO_RESPONSE, NO_TARGET, PROMPT_NOT_WIRED, WebViewBridge, type WebViewDispatch } from "../src/browser/bridge.ts";
 
 const paths: string[] = [];
 
@@ -23,7 +23,7 @@ afterEach(() => {
   for (const path of paths.splice(0)) rmSync(path, { force: true });
 });
 
-function harness(policy: Policy) {
+function harness(policy: Policy, available = true) {
   const path = `/tmp/ompd-webview-bridge-${crypto.randomUUID()}.db`;
   paths.push(path);
   const store = new Store(path);
@@ -41,7 +41,10 @@ function harness(policy: Policy) {
 
   const sent: Array<{ agentId: string; requestId: string; action: WebViewAction }> = [];
   const dispatch: WebViewDispatch = {
-    send: (agentId, requestId, action) => sent.push({ agentId, requestId, action }),
+    send: (agentId, requestId, action) => {
+      sent.push({ agentId, requestId, action });
+      return available;
+    },
   };
   const bridge = new WebViewBridge({ policy, store, dispatch, timeoutMs: 200 });
   return { bridge, sent, agentId: agent.id };
@@ -69,8 +72,16 @@ describe("WebViewBridge: an action reaches the policy engine", () => {
     // The action dispatched synchronously to `sent` before the promise settles.
     expect(sent).toHaveLength(1);
     expect(sent[0]?.action).toEqual({ kind: "navigate", url: "https://example.com" });
-    bridge.resolveResult(sent[0]!.requestId, { kind: "ack", url: "https://example.com", title: "Example" });
+    bridge.resolveResult(agentId, sent[0]!.requestId, { kind: "ack", url: "https://example.com", title: "Example" });
     await expect(pending).resolves.toEqual({ kind: "ack", url: "https://example.com", title: "Example" });
+  });
+
+  test("an allowed action with no registered target fails immediately", async () => {
+    const { bridge, agentId } = harness(fixedPolicy("allow"), false);
+    await expect(bridge.performAction(agentId, { kind: "observe" })).resolves.toEqual({
+      kind: "error",
+      message: NO_TARGET,
+    });
   });
 
   test("a `prompt` verdict fails closed with a distinct reason, and never reaches a device", async () => {
@@ -84,7 +95,7 @@ describe("WebViewBridge: an action reaches the policy engine", () => {
     const { bridge: obsBridge, sent: obsSent, agentId: obsAgent } = harness(new DefaultPolicy({ mode: "standard" }));
     const observePending = obsBridge.performAction(obsAgent, { kind: "observe" });
     expect(obsSent).toHaveLength(1);
-    obsBridge.resolveResult(obsSent[0]!.requestId, {
+    obsBridge.resolveResult(obsAgent, obsSent[0]!.requestId, {
       kind: "observe",
       observation: { url: "https://example.com", title: "Example", settled: true, tree: { tag: "body", ref: "n0" } },
     });
@@ -102,9 +113,15 @@ describe("WebViewBridge: an action reaches the policy engine", () => {
     expect(result).toEqual({ kind: "error", message: NO_RESPONSE });
   });
 
-  test("resolveResult against an unknown or already-settled request id returns false, not a throw", () => {
-    const { bridge } = harness(fixedPolicy("allow"));
-    expect(bridge.resolveResult("wv_doesnotexist", { kind: "ack", url: "x", title: "x" })).toBe(false);
+  test("resolveResult rejects the wrong agent, an unknown id, and an already-settled id", async () => {
+    const { bridge, sent, agentId } = harness(fixedPolicy("allow"));
+    const pending = bridge.performAction(agentId, { kind: "observe" });
+    const requestId = sent[0]!.requestId;
+    expect(bridge.resolveResult("agt_other", requestId, { kind: "ack", url: "x", title: "x" })).toBe(false);
+    expect(bridge.resolveResult(agentId, requestId, { kind: "ack", url: "x", title: "x" })).toBe(true);
+    await expect(pending).resolves.toEqual({ kind: "ack", url: "x", title: "x" });
+    expect(bridge.resolveResult(agentId, requestId, { kind: "ack", url: "x", title: "x" })).toBe(false);
+    expect(bridge.resolveResult(agentId, "wv_doesnotexist", { kind: "ack", url: "x", title: "x" })).toBe(false);
   });
 
   test("an unknown agent id is refused before the policy is even consulted", async () => {

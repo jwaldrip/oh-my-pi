@@ -384,8 +384,8 @@ export class AcpClient {
     return r.sessions ?? [];
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<void> {
-    await this.request("session/load", { sessionId, cwd, mcpServers: [] });
+  async loadSession(sessionId: string, cwd: string, mcpServers: unknown[] = []): Promise<void> {
+    await this.request("session/load", { sessionId, cwd, mcpServers });
   }
 
   async prompt(sessionId: string, text: string): Promise<PromptResult> {

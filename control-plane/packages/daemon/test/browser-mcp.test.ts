@@ -45,7 +45,8 @@ function harness(reply: WebViewActionResult) {
   const dispatch: WebViewDispatch = {
     send: (agentId, requestId, action) => {
       sent.push({ agentId, requestId, action });
-      bridge.resolveResult(requestId, reply);
+      bridge.resolveResult(agentId, requestId, reply);
+      return true;
     },
   };
   bridge = new WebViewBridge({ policy: new DefaultPolicy({ mode: "standard" }), store, dispatch });

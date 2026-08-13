@@ -34,11 +34,16 @@ const DAEMON_ACTOR: Actor = { deviceId: "daemon", scopes: ["read", "prompt", "ap
 export const PROMPT_NOT_WIRED = "requires operator approval, not yet wired for WebView actions";
 
 export const NO_RESPONSE = "no response from the device within the timeout";
+export const NO_TARGET = "no registered WebView is available for this agent";
 
 /** How the bridge actually reaches a device. Implemented by whatever owns live connections (the gateway). */
 export interface WebViewDispatch {
-  /** Push the action to whichever device is attached to `agentId`. Fire-and-forget: the result arrives later via `resolveResult`. */
-  send(agentId: AgentId, requestId: string, action: WebViewAction): void;
+  /**
+   * Push the action to the device currently registered for `agentId`.
+   * `false` means there is no usable target, so the caller fails now rather
+   * than waiting out a timeout for a frame that could never arrive.
+   */
+  send(agentId: AgentId, requestId: string, action: WebViewAction): boolean;
 }
 
 export interface WebViewBridgeOptions {
@@ -108,24 +113,32 @@ export class WebViewBridge {
           resolve(result);
         },
       });
-      // Sent last, after the pending row exists, so a synchronous or
-      // same-tick `resolveResult` (a test double, or a device that answers
-      // instantly over loopback) always finds something to resolve.
-      this.#dispatch.send(agentId, requestId, action);
+      if (!this.#dispatch.send(agentId, requestId, action)) {
+        const pending = this.#pending.get(requestId);
+        if (pending) {
+          this.#pending.delete(requestId);
+          pending.resolve({ kind: "error", message: NO_TARGET });
+        }
+      }
+      // Sent after the pending row exists, so a same-tick device answer can
+      // settle it; the dispatch above is the only outbound action.
     });
   }
 
   /**
    * A device's answer to a dispatched action, arriving as `webview_result`.
-   *
-   * Returns false for an unknown or already-settled request id rather than
-   * throwing, mirroring `Supervisor.decide`'s contract: this is reachable
-   * straight from a websocket frame handler, and a malformed or replayed
-   * frame must cost nothing more than a false return.
+   * Returns false for a different agent, an unknown request id, or an
+   * already-settled request id rather than throwing. The agent check matters:
+   * request ids are opaque capabilities, but an authenticated client still
+   * must not settle another session's action by replaying one it observed.
    */
-  resolveResult(requestId: string, result: WebViewActionResult): boolean {
+  resolveResult(
+    agentId: AgentId,
+    requestId: string,
+    result: WebViewActionResult,
+  ): boolean {
     const pending = this.#pending.get(requestId);
-    if (!pending) return false;
+    if (!pending || pending.agentId !== agentId) return false;
     this.#pending.delete(requestId);
     pending.resolve(result);
     return true;

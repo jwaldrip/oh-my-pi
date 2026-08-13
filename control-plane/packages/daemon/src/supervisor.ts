@@ -97,15 +97,14 @@ export interface SupervisorOptions {
    */
   provisioner?: Provisioner;
   /**
-   * Per-agent ACP `mcpServers` entries, mounted on `session/new`. `undefined`
-   * (the default) mounts nothing extra -- most daemons have nothing to add.
+   * Per-agent ACP `mcpServers` entries, mounted on both `session/new` and
+   * `session/load`. `undefined` (the default) mounts nothing extra.
    *
-   * `@ompd/daemon/src/browser`'s webview MCP server is the first, and so far
-   * only, consumer: `mcpServerDescriptor(webViewMcpServer, agentId)` wrapped
-   * in an array. Resumed and loaded sessions do not currently receive this
-   * (`AcpClient.loadSession` hardcodes `mcpServers: []`; see `@ompd/acp`) --
-   * a stated gap, not an oversight, left for a change that also touches the
-   * resume path deliberately rather than in passing.
+   * `@ompd/daemon/src/browser`'s WebView MCP server is the first consumer:
+   * `mcpServerDescriptor(webViewMcpServer, agentId)` wrapped in an array.
+   * Applying it on both paths is load-bearing: resuming a session must restore
+   * its tool surface, not silently produce an agent that remembers using a
+   * browser but can no longer call it.
    */
   mcpServersFor?: (agentId: AgentId) => unknown[];
 }
@@ -326,12 +325,12 @@ export class Supervisor {
       throw new Error(`host kind ${spec.kind} requires the provisioner`);
     }
     const entry = await this.#hostFor(spec, input.cwd, who);
-    return await this.#bindAgentToSession(input, spec, entry, who, { resumed: true }, async sessionEntry => {
-      // `AcpClient.loadSession` does not yet accept `mcpServers` (see
-      // `@ompd/acp`), so a resumed agent does not get this daemon's webview
-      // MCP server remounted. Stated in `SupervisorOptions.mcpServersFor`'s
-      // doc, not silently dropped here.
-      await sessionEntry.host.client.loadSession(input.sessionId, input.cwd);
+    return await this.#bindAgentToSession(input, spec, entry, who, { resumed: true }, async (sessionEntry, agentId) => {
+      await sessionEntry.host.client.loadSession(
+        input.sessionId,
+        input.cwd,
+        this.#mcpServersFor?.(agentId) ?? [],
+      );
       return input.sessionId;
     });
   }
