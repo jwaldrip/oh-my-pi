@@ -8,6 +8,15 @@
  * URL-safe alphabet wrong anyway.
  */
 
+/**
+ * The alphabet, indexed with `charAt` rather than `[]` throughout.
+ *
+ * A six-bit group is 0..63 and this string is exactly 64 characters, so the
+ * lookup cannot miss. `[]` says otherwise under `noUncheckedIndexedAccess`,
+ * which leaves two ways out: assert the result is a string at each of the nine
+ * call sites, or use the accessor whose return type is already `string`. The
+ * second keeps the impossible case impossible rather than asserted away.
+ */
 const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /** Reverse table, built once. -1 marks a byte that is not in the alphabet. */
@@ -22,15 +31,19 @@ export function toBase64Url(bytes: Uint8Array): string {
   let i = 0;
   for (; i + 2 < bytes.length; i += 3) {
     const n = ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8) | (bytes[i + 2] as number);
-    out += B64URL[(n >>> 18) & 63] + B64URL[(n >>> 12) & 63] + B64URL[(n >>> 6) & 63] + B64URL[n & 63];
+    out +=
+      B64URL.charAt((n >>> 18) & 63) +
+      B64URL.charAt((n >>> 12) & 63) +
+      B64URL.charAt((n >>> 6) & 63) +
+      B64URL.charAt(n & 63);
   }
   const left = bytes.length - i;
   if (left === 1) {
     const n = (bytes[i] as number) << 16;
-    out += B64URL[(n >>> 18) & 63] + B64URL[(n >>> 12) & 63];
+    out += B64URL.charAt((n >>> 18) & 63) + B64URL.charAt((n >>> 12) & 63);
   } else if (left === 2) {
     const n = ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8);
-    out += B64URL[(n >>> 18) & 63] + B64URL[(n >>> 12) & 63] + B64URL[(n >>> 6) & 63];
+    out += B64URL.charAt((n >>> 18) & 63) + B64URL.charAt((n >>> 12) & 63) + B64URL.charAt((n >>> 6) & 63);
   }
   return out;
 }

@@ -78,6 +78,29 @@ describe("base64url", () => {
     expect(fromBase64Url(toBase64Url(all))).toEqual(all);
   });
 
+  test("round-trips every remainder, so both tails are exercised", () => {
+    // 256 bytes leaves one byte over, so the test above only ever walks the
+    // one-left tail. A two-byte tail is its own arm of the encoder and its own
+    // way to lose the last character of a key on the wire.
+    for (let length = 0; length <= 8; length++) {
+      const bytes = new Uint8Array(length);
+      for (let i = 0; i < length; i++) bytes[i] = (i * 37 + 11) & 0xff;
+      const text = toBase64Url(bytes);
+      expect(text).not.toContain("=");
+      expect(fromBase64Url(text)).toEqual(bytes);
+    }
+  });
+
+  test("encodes known vectors, not merely something it can read back", () => {
+    // A round trip alone passes with any self-consistent alphabet. These pin
+    // the output to base64url itself, including the two characters that differ
+    // from standard base64.
+    expect(toBase64Url(utf8("foobar"))).toBe("Zm9vYmFy");
+    expect(toBase64Url(new Uint8Array([0xff, 0xef, 0xbf]))).toBe("_--_");
+    expect(toBase64Url(new Uint8Array([0xfb, 0xff]))).toBe("-_8");
+    expect(toBase64Url(new Uint8Array([0xfc]))).toBe("_A");
+  });
+
   test("rejects padding, whitespace, and the non-url alphabet", () => {
     expect(fromBase64Url("AA==")).toBeNull();
     expect(fromBase64Url("A A")).toBeNull();

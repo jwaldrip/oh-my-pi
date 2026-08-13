@@ -32,11 +32,14 @@ import { EMPTY_SESSION } from "../src/session/model.ts";
 // could substitute it, and the real DOM globals before happy-dom is registered.
 const { SessionScreen } = await import("../src/screens/SessionScreen.tsx");
 
-// React 19 reads this to decide whether act() is legal outside a test renderer.
-// The flag is React's own contract with a test host, and no ambient type
-// declares it, so this is the one place the shape is asserted rather than read.
-const reactGlobals: { IS_REACT_ACT_ENVIRONMENT?: boolean } = globalThis;
-reactGlobals.IS_REACT_ACT_ENVIRONMENT = true;
+// React 19 reads this to decide whether act() is legal outside a test
+// renderer. It is React's own contract with a test host and no shipped type
+// declares it, so the declaration belongs here rather than at a call site.
+declare global {
+  // `var` is what a global declaration takes; `let`/`const` do not reach globalThis.
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const AGENT: Agent = {
   id: "agt_0000000000000001",
