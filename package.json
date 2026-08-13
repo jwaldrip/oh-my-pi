@@ -178,8 +178,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
+    "@happy-dom/global-registrator": "20.0.0",
     "@types/bun": "catalog:",
     "@typescript/native-preview": "catalog:",
+    "happy-dom": "20.0.0",
     "lint-staged": "catalog:",
     "prettier": "catalog:",
     "ts-morph": "catalog:",

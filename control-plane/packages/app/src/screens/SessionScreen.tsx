@@ -6,7 +6,7 @@
  * last, because it is the only thing here a thumb reaches for.
  */
 
-import { useCallback, useEffect, useRef, useState, type JSX } from "react";
+import { useEffect, useRef, useState, type JSX } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { webViewCapability } from "../browser/index.ts";
 import type { WebViewDriverHandle } from "../browser/index.ts";
@@ -53,40 +53,41 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
   const tone = signal[agentSignal(agent.state)];
   const busy = agent.state === "busy";
 
-  const { onMountWebView, onUnmountWebView } = props;
   const [browserOpen, setBrowserOpen] = useState(false);
-  const mounted = useRef(false);
+  const driver = useRef<WebViewDriverHandle | null>(null);
 
   /**
-   * The ref callback is the mount signal, not an effect: the handle exists
-   * only once the driver has rendered, and registering before that would
-   * offer the daemon a target that cannot yet answer an action.
+   * The callbacks as of the last render, read rather than depended on.
+   *
+   * A parent that rebuilds these per render is the ordinary case: `Console`
+   * closes over `agent.id`, and the log re-renders on every update frame of a
+   * live turn. Depending on their identity would make the effect below
+   * unregister and re-register on each of those, which is not merely noisy: in
+   * the window between the two frames the daemon has no target for this agent,
+   * so an action dispatched mid-turn fails with "no registered WebView" for a
+   * pane that never went away.
    */
-  const holdDriver = useCallback(
-    (handle: WebViewDriverHandle | null) => {
-      if (handle === null) {
-        if (!mounted.current) return;
-        mounted.current = false;
-        onUnmountWebView?.();
-        return;
-      }
-      mounted.current = true;
-      onMountWebView?.(handle);
-    },
-    [onMountWebView, onUnmountWebView],
-  );
+  const handlers = useRef({ onMountWebView: props.onMountWebView, onUnmountWebView: props.onUnmountWebView });
+  useEffect(() => {
+    handlers.current = { onMountWebView: props.onMountWebView, onUnmountWebView: props.onUnmountWebView };
+  });
 
-  // Leaving the screen with the pane open never leaves a registration behind:
-  // the daemon would keep dispatching to a view that no longer exists, and
-  // every action would wait out its full timeout before failing.
-  useEffect(
-    () => () => {
-      if (!mounted.current) return;
-      mounted.current = false;
-      onUnmountWebView?.();
-    },
-    [onUnmountWebView],
-  );
+  /**
+   * Registration follows the pane, and nothing else. An object ref rather than
+   * a ref callback because React fills `.current` before effects run, so the
+   * handle is already there, and the effect's dependencies can then be the two
+   * facts that actually decide the registration: which agent, and whether its
+   * browser is open.
+   */
+  useEffect(() => {
+    if (!browserOpen) return;
+    const handle = driver.current;
+    if (handle === null) return;
+    handlers.current.onMountWebView?.(handle);
+    return () => {
+      handlers.current.onUnmountWebView?.();
+    };
+  }, [browserOpen, agent.id]);
 
   return (
     <View style={styles.screen} testID="session">
@@ -143,7 +144,7 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
 
       {webViewCapability === null || !browserOpen ? null : (
         <View style={styles.browser} testID="session-browser">
-          <webViewCapability.Driver ref={holdDriver} style={styles.driver} />
+          <webViewCapability.Driver ref={driver} style={styles.driver} />
         </View>
       )}
 
