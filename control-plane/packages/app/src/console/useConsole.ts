@@ -38,7 +38,7 @@ export interface ConsoleActions {
  * connection has no socket of its own: it goes through the pinned daemon's
  * relay instead, which is why it needs its own `createSocket`.
  */
-function buildClient(connection: Connection): OmpdClient {
+export function createOmpdClient(connection: Connection): OmpdClient {
   if (connection.transport === "direct") {
     return new OmpdClient({ url: connection.url, token: connection.token });
   }
@@ -56,7 +56,7 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
   // socket per render is a reconnect loop that looks like a flaky daemon.
   const clientRef = useRef<OmpdClient | null>(null);
   if (clientRef.current === null) {
-    clientRef.current = buildClient(connection);
+    clientRef.current = createOmpdClient(connection);
   }
   const client = clientRef.current;
 

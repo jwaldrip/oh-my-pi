@@ -22,6 +22,20 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
+        <!-- Custom scheme for callers that cannot open a verified App Link. -->
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="ompd" android:host="collab" />
+        </intent-filter>
+        <!-- The domain validates this package/signing key through assetlinks.json. -->
+        <intent-filter android:autoVerify="true">
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" android:host="my.ompd.sh" android:pathPrefix="/collab" />
+        </intent-filter>
       </activity>
     </application>
 </manifest>

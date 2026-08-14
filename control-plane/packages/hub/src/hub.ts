@@ -880,6 +880,24 @@ function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/**
+ * Universal-link origin registered by the native clients. A room id identifies
+ * shared state but is not a credential: device pairing and room membership are
+ * still checked by the daemon after the native app opens it.
+ */
+export const COLLAB_UNIVERSAL_LINK_ORIGIN = "https://my.ompd.sh";
+const COLLAB_ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{10,64}$/;
+
+export function isCollabRoomId(roomId: string): boolean {
+  return COLLAB_ROOM_ID_PATTERN.test(roomId);
+}
+
+/** The `/collab` share target for native Universal Links and Android App Links. */
+export function formatCollabJoinLink(roomId: string): string {
+  if (!isCollabRoomId(roomId)) throw new Error("collab room id must be a 10 to 64 character base64url id");
+  return `${COLLAB_UNIVERSAL_LINK_ORIGIN}/collab/${roomId}`;
+}
+
 /** Session ids the hub mints must satisfy what the handshake will accept. */
 export function isRoutableSessionId(sessionId: string): boolean {
   return SESSION_ID_PATTERN.test(sessionId);

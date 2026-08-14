@@ -15,8 +15,10 @@ import type {
   ApprovalRecord,
   AuditAction,
   AuditEntry,
+  CollabVoiceNoteFrame,
+  CollabVoiceNoteMetadata,
+  CollabVoiceParticipant,
   Device,
-  Routine,
   Run,
   Task,
   TaskState,
@@ -108,6 +110,26 @@ CREATE TABLE IF NOT EXISTS session_scan_cache (
   size_bytes INTEGER NOT NULL, message_count INTEGER NOT NULL
 );
 
+-- A voice note is transcript material. Its metadata is queryable separately,
+-- while the PCM payload is committed with it so a reconnect can replay the
+-- actual note rather than a dead "audio happened" placeholder.
+CREATE TABLE IF NOT EXISTS collab_voice_notes (
+  room_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  note_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  participant_kind TEXT NOT NULL,
+  participant_name TEXT,
+  created_at TEXT NOT NULL,
+  duration_ms INTEGER,
+  encoding TEXT NOT NULL,
+  sample_rate_hz INTEGER NOT NULL,
+  channels INTEGER NOT NULL,
+  audio_pcm TEXT NOT NULL,
+  PRIMARY KEY (room_id, sequence),
+  UNIQUE (room_id, note_id)
+);
+
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, action TEXT NOT NULL,
   actor_device_id TEXT, agent_id TEXT, detail TEXT NOT NULL, outcome TEXT NOT NULL
@@ -168,6 +190,22 @@ export interface SessionScanCacheEntry {
   mtimeMs: number;
   sizeBytes: number;
   messageCount: number;
+}
+
+/** Voice content and identity to commit atomically before a room broadcast. */
+export interface PersistCollabVoiceNoteInput {
+  roomId: string;
+  noteId: string;
+  participant: CollabVoiceParticipant;
+  audio: CollabVoiceNoteFrame["audio"];
+  durationMs?: number;
+}
+
+export interface PersistedCollabVoiceNote {
+  frame: CollabVoiceNoteFrame;
+  metadata: CollabVoiceNoteMetadata;
+  /** False when this `noteId` was already committed for the room. */
+  inserted: boolean;
 }
 
 /**
@@ -694,6 +732,71 @@ export class Store {
       .run(sessionId, entry.mtimeMs, entry.sizeBytes, entry.messageCount);
   }
 
+  // -- collaboration voice -------------------------------------------------
+
+  /**
+   * Allocate a room sequence and store replayable audio in one SQLite
+   * transaction. The returned frame is safe to broadcast only after this
+   * method returns: a crash cannot leave recipients holding an un-replayable
+   * note, and a retry of the same `noteId` returns the original sequence.
+   */
+  recordCollabVoiceNote(input: PersistCollabVoiceNoteInput): PersistedCollabVoiceNote {
+    return this.#db.transaction(() => {
+      const existing = this.#db
+        .query(`SELECT * FROM collab_voice_notes WHERE room_id=? AND note_id=?`)
+        .get(input.roomId, input.noteId) as Record<string, string | number | null> | null;
+      if (existing !== null) {
+        const frame = rowToCollabVoiceNote(existing);
+        return { frame, metadata: collabVoiceMetadata(frame), inserted: false };
+      }
+
+      const next = this.#db
+        .query(`SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM collab_voice_notes WHERE room_id=?`)
+        .get(input.roomId) as { sequence: number };
+      const frame: CollabVoiceNoteFrame = {
+        t: "collab_voice_note",
+        roomId: input.roomId,
+        noteId: input.noteId,
+        sequence: next.sequence,
+        createdAt: new Date().toISOString(),
+        participant: input.participant,
+        audio: input.audio,
+      };
+      if (input.durationMs !== undefined) frame.durationMs = input.durationMs;
+
+      this.#db
+        .query(
+          `INSERT INTO collab_voice_notes (
+             room_id,sequence,note_id,participant_id,participant_kind,participant_name,
+             created_at,duration_ms,encoding,sample_rate_hz,channels,audio_pcm
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          frame.roomId,
+          frame.sequence,
+          frame.noteId,
+          frame.participant.id,
+          frame.participant.kind,
+          frame.participant.displayName ?? null,
+          frame.createdAt,
+          frame.durationMs ?? null,
+          frame.audio.encoding,
+          frame.audio.sampleRateHz,
+          frame.audio.channels,
+          frame.audio.pcm,
+        );
+      return { frame, metadata: collabVoiceMetadata(frame), inserted: true };
+    })();
+  }
+
+  /** Replay finished notes in their durable room order. */
+  listCollabVoiceNotes(roomId: string): CollabVoiceNoteFrame[] {
+    const rows = this.#db
+      .query(`SELECT * FROM collab_voice_notes WHERE room_id=? ORDER BY sequence ASC`)
+      .all(roomId) as Array<Record<string, string | number | null>>;
+    return rows.map(rowToCollabVoiceNote);
+  }
+
   // -- audit ---------------------------------------------------------------
 
   audit(entry: AuditInput): void {
@@ -755,6 +858,48 @@ function rowToAuthToken(row: Record<string, string | null>): AuthTokenRecord {
   }
   if (row.revoked_at !== null && row.revoked_at !== undefined) record.revokedAt = row.revoked_at;
   return record;
+}
+
+function collabVoiceMetadata(frame: CollabVoiceNoteFrame): CollabVoiceNoteMetadata {
+  const metadata: CollabVoiceNoteMetadata = {
+    roomId: frame.roomId,
+    sequence: frame.sequence,
+    noteId: frame.noteId,
+    participant: frame.participant,
+    createdAt: frame.createdAt,
+    format: {
+      encoding: frame.audio.encoding,
+      sampleRateHz: frame.audio.sampleRateHz,
+      channels: frame.audio.channels,
+    },
+  };
+  if (frame.durationMs !== undefined) metadata.durationMs = frame.durationMs;
+  return metadata;
+}
+
+function rowToCollabVoiceNote(row: Record<string, string | number | null>): CollabVoiceNoteFrame {
+  const participant: CollabVoiceParticipant = {
+    id: row.participant_id as string,
+    kind: row.participant_kind as "human" | "agent",
+  };
+  if (row.participant_name !== null) participant.displayName = row.participant_name as string;
+
+  const frame: CollabVoiceNoteFrame = {
+    t: "collab_voice_note",
+    roomId: row.room_id as string,
+    noteId: row.note_id as string,
+    sequence: row.sequence as number,
+    createdAt: row.created_at as string,
+    participant,
+    audio: {
+      pcm: row.audio_pcm as string,
+      encoding: row.encoding as "pcm_s16le",
+      sampleRateHz: row.sample_rate_hz as number,
+      channels: row.channels as 1 | 2,
+    },
+  };
+  if (row.duration_ms !== null) frame.durationMs = row.duration_ms as number;
+  return frame;
 }
 
 function rowToTask(row: TaskRow): Task {

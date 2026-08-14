@@ -288,6 +288,111 @@ export type WebViewActionResult =
   | { kind: "error"; message: string };
 
 // ---------------------------------------------------------------------------
+// Collaboration voice
+// ---------------------------------------------------------------------------
+
+/**
+ * A speaker in a collaboration room.
+ *
+ * The daemon derives human identities from the authenticated socket and names
+ * agent identities itself. A client-supplied frame never gets to choose one.
+ */
+export interface CollabVoiceParticipant {
+  id: string;
+  kind: "human" | "agent";
+  displayName?: string;
+}
+
+/** Format shared by every track in a mixed frame. */
+export interface CollabAudioFormat {
+  encoding: "pcm_s16le";
+  sampleRateHz: number;
+  channels: 1 | 2;
+}
+
+/** One aligned participant track in a multi-party audio mix. */
+export interface CollabVoiceTrack {
+  participant: CollabVoiceParticipant;
+  /** Base64 little-endian signed PCM. The enclosing mix supplies its format. */
+  pcm: string;
+}
+
+/**
+ * A finished push-to-talk note before the daemon authenticates and sequences
+ * it. Clients provide audio only; the daemon owns author identity and order.
+ */
+export interface CollabVoiceNoteInput {
+  t: "collab_voice_note";
+  roomId: string;
+  noteId: string;
+  audio: CollabAudioFormat & { pcm: string };
+  durationMs?: number;
+}
+
+/** An authenticated, room-sequenced audio note suitable for replay and playback. */
+export interface CollabVoiceNoteFrame extends CollabVoiceNoteInput {
+  participant: CollabVoiceParticipant;
+  /** Monotonic within `roomId`, allocated atomically before any broadcast. */
+  sequence: number;
+  createdAt: string;
+}
+
+/**
+ * An aligned group of simultaneous tracks. This is for a live mixer, not the
+ * voice-note player, which deliberately plays finished notes one at a time.
+ */
+export interface CollabVoiceMixFrame {
+  t: "collab_voice_mix";
+  roomId: string;
+  mixId: string;
+  sequence: number;
+  createdAt: string;
+  format: CollabAudioFormat;
+  tracks: readonly [CollabVoiceTrack, ...CollabVoiceTrack[]];
+}
+
+export type CollabVoiceFrame = CollabVoiceNoteFrame | CollabVoiceMixFrame;
+
+/** Stored for transcript replay. Deliberately excludes raw audio bytes. */
+export interface CollabVoiceNoteMetadata {
+  roomId: string;
+  sequence: number;
+  noteId: string;
+  participant: CollabVoiceParticipant;
+  createdAt: string;
+  durationMs?: number;
+  format: CollabAudioFormat;
+}
+
+/**
+ * WebRTC signaling sent by an authenticated participant. `targetParticipantId`
+ * is resolved only among members of the same room.
+ */
+export type CollabSignalInput =
+  | { t: "room_offer"; roomId: string; targetParticipantId: string; sdp: string }
+  | { t: "room_answer"; roomId: string; targetParticipantId: string; sdp: string }
+  | { t: "ice_candidate"; roomId: string; targetParticipantId: string; candidate: string; sdpMid?: string; sdpMLineIndex?: number };
+
+/** Signaling the daemon has authenticated and routed to the intended room peer. */
+export type CollabSignalFrame =
+  | { t: "room_offer"; roomId: string; from: CollabVoiceParticipant; sdp: string }
+  | { t: "room_answer"; roomId: string; from: CollabVoiceParticipant; sdp: string }
+  | { t: "ice_candidate"; roomId: string; from: CollabVoiceParticipant; candidate: string; sdpMid?: string; sdpMLineIndex?: number };
+
+export type CollabClientFrame =
+  | { t: "room_join"; roomId: string }
+  | { t: "room_leave"; roomId: string }
+  | CollabSignalInput
+  | CollabVoiceNoteInput;
+
+export type CollabServerFrame =
+  | { t: "room_participants"; roomId: string; participants: CollabVoiceParticipant[] }
+  | CollabSignalFrame
+  | CollabVoiceFrame
+  /** Finished notes replay with their durable audio payload; app-side de-duplication prevents re-speaking live notes. */
+  | { t: "collab_voice_history"; roomId: string; notes: CollabVoiceNoteFrame[] };
+
+// ---------------------------------------------------------------------------
 // Client wire protocol
 // ---------------------------------------------------------------------------
 
@@ -305,6 +410,7 @@ export type ClientFrame =
   | { t: "webview_unregister"; agentId: AgentId }
   /** The outcome of a `webview_action` this client's WebView was asked to perform. */
   | { t: "webview_result"; agentId: AgentId; requestId: string; result: WebViewActionResult }
+  | CollabClientFrame
   | { t: "ping" };
 
 export type ServerFrame =
@@ -335,6 +441,7 @@ export type ServerFrame =
   | { t: "error"; agentId?: AgentId; message: string; code?: string }
   /** Ask a client's embedded WebView to perform an action, already cleared by the policy engine. */
   | { t: "webview_action"; agentId: AgentId; requestId: string; action: WebViewAction }
+  | CollabServerFrame
   | { t: "pong" };
 
 // ---------------------------------------------------------------------------

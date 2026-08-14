@@ -24,6 +24,12 @@ import type {
   ApprovalChoice,
   ApprovalScope,
   ClientFrame,
+  CollabSignalFrame,
+  CollabSignalInput,
+  CollabVoiceFrame,
+  CollabVoiceNoteInput,
+  CollabVoiceNoteFrame,
+  CollabVoiceParticipant,
   ServerFrame,
   WebViewAction,
   WebViewActionResult,
@@ -99,6 +105,12 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   ping: false,
   audio: false,
   audio_end: false,
+  room_join: false,
+  room_leave: false,
+  room_offer: true,
+  room_answer: true,
+  ice_candidate: true,
+  collab_voice_note: true,
   prompt: true,
   cancel: true,
   decide: true,
@@ -252,6 +264,24 @@ export interface WebViewActionEvent {
   action: WebViewAction;
 }
 
+export interface RoomParticipantsEvent {
+  roomId: string;
+  participants: CollabVoiceParticipant[];
+}
+
+export interface RoomSignalEvent {
+  signal: CollabSignalFrame;
+}
+
+export interface CollabVoiceEvent {
+  frame: CollabVoiceFrame;
+}
+
+export interface CollabVoiceHistoryEvent {
+  roomId: string;
+  notes: CollabVoiceNoteFrame[];
+}
+
 export interface ClientEventMap {
   status: StatusEvent;
   agents: AgentsEvent;
@@ -263,6 +293,10 @@ export interface ClientEventMap {
   transcript: TranscriptEvent;
   unauthorized: UnauthorizedEvent;
   webview_action: WebViewActionEvent;
+  room_participants: RoomParticipantsEvent;
+  room_signal: RoomSignalEvent;
+  collab_voice: CollabVoiceEvent;
+  collab_voice_history: CollabVoiceHistoryEvent;
 }
 
 export type ClientEventName = keyof ClientEventMap;
@@ -330,6 +364,9 @@ export class OmpdClient {
    * true. A reconnect replays both, in that order.
    */
   private readonly webviews = new Set<AgentId>();
+  /** Rooms this client must rejoin after a socket reconnect. */
+  private readonly rooms = new Set<string>();
+
 
   private socket: SocketLike | null = null;
   /** Invalidates handlers belonging to a socket we have already abandoned. */
@@ -482,6 +519,27 @@ export class OmpdClient {
         ? { t: "decide", agentId, requestId, choice }
         : { t: "decide", agentId, requestId, choice, scope };
     this.send(frame);
+  }
+
+  /** Join a room and automatically restore membership after a reconnect. */
+  joinRoom(roomId: string): void {
+    this.rooms.add(roomId);
+    this.send({ t: "room_join", roomId });
+  }
+
+  leaveRoom(roomId: string): void {
+    this.rooms.delete(roomId);
+    this.send({ t: "room_leave", roomId });
+  }
+
+  /** Relay a WebRTC offer, answer, or ICE candidate to one room participant. */
+  sendRoomSignal(signal: CollabSignalInput): void {
+    this.send(signal);
+  }
+
+  /** Publish a finished push-to-talk note. Identity and order are daemon-owned. */
+  sendCollabVoiceNote(note: Omit<CollabVoiceNoteInput, "t">): void {
+    this.send({ t: "collab_voice_note", ...note });
   }
 
   // -- connection lifecycle -------------------------------------------------
@@ -728,6 +786,7 @@ export class OmpdClient {
         // After the attachments, never before: the daemon refuses a
         // registration for an agent this socket has not attached to yet.
         for (const agentId of this.webviews) this.send({ t: "webview_register", agentId });
+        for (const roomId of this.rooms) this.send({ t: "room_join", roomId });
         return;
       }
       case "agents":
@@ -744,6 +803,21 @@ export class OmpdClient {
           tool: frame.tool,
           input: frame.input,
         });
+        return;
+      case "room_participants":
+        this.emit("room_participants", { roomId: frame.roomId, participants: frame.participants });
+        return;
+      case "room_offer":
+      case "room_answer":
+      case "ice_candidate":
+        this.emit("room_signal", { signal: frame });
+        return;
+      case "collab_voice_note":
+      case "collab_voice_mix":
+        this.emit("collab_voice", { frame });
+        return;
+      case "collab_voice_history":
+        this.emit("collab_voice_history", { roomId: frame.roomId, notes: frame.notes });
         return;
       case "error":
         // An error frame is a message about a request, not a transport

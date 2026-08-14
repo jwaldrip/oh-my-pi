@@ -7,19 +7,30 @@
 
 import type { JSX } from "react";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet } from "react-native";
+import { ActivityIndicator, Linking, StyleSheet } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Console } from "./console/Console.tsx";
 import { SafeScreen } from "./design/SafeScreen.tsx";
 import { ink } from "./design/tokens.ts";
 import type { Connection } from "./platform/connection.ts";
 import { clearConnection, loadConnection, saveConnection } from "./platform/connection.ts";
+import { listenForCollabLinks, type DeepLinkSource } from "./platform/deeplink.ts";
+import { CollabSessionScreen } from "./screens/CollabSessionScreen.tsx";
 import { PairScreen } from "./screens/PairScreen.tsx";
 
 type Boot = { phase: "loading" } | { phase: "pair"; notice?: string } | { phase: "console"; connection: Connection };
 
+const nativeDeepLinks: DeepLinkSource = {
+  getInitialURL: () => Linking.getInitialURL(),
+  addEventListener: (event, listener) => Linking.addEventListener(event, listener),
+};
+
 export function App(): JSX.Element {
   const [boot, setBoot] = useState<Boot>({ phase: "loading" });
+  const [collabRoomId, setCollabRoomId] = useState<string | null>(null);
+
+  useEffect(() => listenForCollabLinks(nativeDeepLinks, setCollabRoomId), []);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -63,8 +74,17 @@ export function App(): JSX.Element {
         <ActivityIndicator color={ink.plain} />
       </SafeScreen>
     );
+  } else if (collabRoomId !== null && boot.phase === "console") {
+    body = (
+      <CollabSessionScreen roomId={collabRoomId} connection={boot.connection} onClose={() => setCollabRoomId(null)} />
+    );
   } else if (boot.phase === "pair") {
-    body = <PairScreen notice={boot.notice} onPair={pair} />;
+    body = (
+      <PairScreen
+        notice={collabRoomId === null ? boot.notice : "Pair this device to join the shared room."}
+        onPair={pair}
+      />
+    );
   } else {
     // Keyed on the durable halves of the connection so a re-pair with a new
     // daemon rebuilds the console rather than leaving the old socket open.
