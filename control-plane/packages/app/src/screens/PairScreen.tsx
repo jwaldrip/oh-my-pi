@@ -14,7 +14,7 @@
 
 import type { JSX } from "react";
 import { useState } from "react";
-import { Pressable, StyleSheet, TextInput, View } from "react-native";
+import { Pressable, StyleSheet, TextInput, useWindowDimensions, View } from "react-native";
 import { parseEndpoint } from "@ompd/core/pairing";
 import { Glyph } from "../design/icons.tsx";
 import { SafeScreen } from "../design/SafeScreen.tsx";
@@ -33,12 +33,13 @@ export function PairScreen({
 }): JSX.Element {
   const [raw, setRaw] = useState("");
   const [token, setToken] = useState("");
+  const { width } = useWindowDimensions();
   const endpoint = parseEndpoint(raw);
   const ready = endpoint !== null && token.trim().length > 0;
 
   return (
     <SafeScreen style={styles.screen} testID="pair">
-      <View style={styles.form}>
+      <View style={width > 480 ? [styles.form, { maxWidth: 480 }] : styles.form} testID="pair-form">
         <Kicker color={ink.muted}>ompd</Kicker>
         <Display heading>Take the position</Display>
 
@@ -137,7 +138,7 @@ function Field({
 
 const styles = StyleSheet.create({
   screen: { justifyContent: "center", padding: space.loose },
-  form: { gap: space.step, maxWidth: 480, width: "100%", alignSelf: "center" },
+  form: { gap: space.step, width: "100%", alignSelf: "center" },
   notice: {
     flexDirection: "row",
     gap: space.snug,
