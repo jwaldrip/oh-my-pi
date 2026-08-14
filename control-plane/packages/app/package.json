@@ -7,6 +7,7 @@
     "start": "react-native start",
     "ios": "react-native run-ios",
     "android": "react-native run-android",
+    "windows": "react-native run-windows",
     "macos": "react-native run-macos",
     "web": "vite",
     "build:web": "vite build",

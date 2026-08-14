@@ -1,28 +1,21 @@
 /**
  * Platform registry for the community CLI.
  *
- * iOS and Android use the hosts in `ios/` and `android/`. macOS and Windows
- * remain dependency-only until their native projects exist. This file is
- * CommonJS because the React Native CLI loads it that way, and the app package
- * declares `"type": "module"`.
- * iOS and Android come from `react-native` itself and need no entry here; their
- * host projects are in `ios/` and `android/`. macOS is an out-of-tree platform,
- * so its explicit entry activates `react-native-macos`'s project discovery for
- * the generated `macos/` host.
+ * iOS and Android come from `react-native` itself and use the host projects in
+ * `ios/` and `android/`. macOS and Windows are out-of-tree platforms, so their
+ * explicit entries activate project discovery for the generated native hosts.
  *
- * Windows remains unlisted because its host project has not been generated.
- * The Windows CLI shells out to `npm install`, which refuses to run inside this
- * Bun workspace (`ENOWORKSPACES`).
- *
- * `assets` is what links the vendored typefaces into a native build. Without it
- * Archivo and IBM Plex Mono exist in the repository and nowhere on a device, and
- * the native targets silently fall back to the system face.
+ * `assets` links the vendored typefaces into native builds. Without it, Archivo
+ * and IBM Plex Mono exist in the repository and nowhere on a device.
+ * This file is CommonJS because the React Native CLI loads it that way, while
+ * the app package declares `"type": "module"`.
  */
 module.exports = {
   project: {
     ios: {},
     android: {},
     macos: {},
+    windows: {},
   },
   assets: ["./src/design/fonts"],
 };
