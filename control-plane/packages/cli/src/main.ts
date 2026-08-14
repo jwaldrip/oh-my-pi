@@ -35,6 +35,7 @@ import {
 import { doctorCommand } from "./commands/doctor.ts";
 import { openCommand } from "./commands/open.ts";
 import { routinesCommand, runCommand } from "./commands/routines.ts";
+import { syncConfigCommand } from "./commands/sync.ts";
 import { installCommand, uninstallCommand } from "./commands/service.ts";
 import { selfInstallCommand } from "./commands/self-install.ts";
 import { OMPD_VERSION } from "@ompd/daemon";
@@ -93,6 +94,8 @@ export async function run(argv: string[], ctx: CliContext = defaultContext()): P
         return await routinesCommand(ctx);
       case "run":
         return await runCommand(ctx, command);
+      case "sync-config":
+        return await syncConfigCommand(ctx, command);
       case "audit":
         return await auditCommand(ctx, command);
       case "open":
