@@ -1351,6 +1351,46 @@ ul {
   text-decoration-color: var(--room-edge);
 }
 
+.plan-review {
+  display: grid;
+  gap: 8px;
+  margin: 0 var(--pad) 12px;
+  padding: 10px;
+  border: 1px solid var(--sig-hold);
+  background: color-mix(in srgb, var(--sig-hold) 8%, var(--room-bay));
+}
+
+.plan-review-message {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: var(--t-xs);
+  color: var(--ink-strong);
+}
+
+.plan-review-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.plan-review-actions button {
+  min-block-size: var(--tap);
+  padding: 0 10px;
+  border: 1px solid var(--sig-hold);
+  background: var(--room-raised);
+  color: var(--ink-strong);
+  cursor: pointer;
+  font: 600 var(--t-xs) var(--sans);
+}
+
+.plan-review-approve {
+  border-color: var(--sig-clear) !important;
+}
+
+.plan-review-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Data block                                                                */
 /* ------------------------------------------------------------------------ */

@@ -3,8 +3,8 @@ import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/ext
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { CompactMode } from "@oh-my-pi/pi-coding-agent/session/compact-modes";
 import {
-	ACP_BUILTIN_SLASH_COMMANDS,
 	executeAcpBuiltinSlashCommand,
+	getAcpBuiltinSlashCommands,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
@@ -67,7 +67,7 @@ describe("/compact dispatch (ACP)", () => {
 	});
 
 	it("advertises the mode subcommands and input hint to ACP clients", () => {
-		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "compact");
+		const advertised = getAcpBuiltinSlashCommands().find(c => c.name === "compact");
 		expect(advertised).toBeDefined();
 		expect(advertised?.input?.hint).toBe("[soft|remote|snapcompact] [focus]");
 	});

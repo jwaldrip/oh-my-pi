@@ -77,6 +77,23 @@ export function resolveDaemonToken(options: ResolveDaemonAddressOptions = {}): s
 	return readTrimmed(path.join(home, "token"));
 }
 
+/** The resolved daemon endpoint and credential a control leg needs as one unit. */
+export interface DaemonAddress {
+	baseUrl: string;
+	token: string | null;
+}
+
+/**
+ * Resolve the endpoint and credential together so a caller never reaches a
+ * daemon using a token read from a different home or environment.
+ */
+export function resolveDaemonAddress(options: ResolveDaemonAddressOptions = {}): DaemonAddress {
+	return {
+		baseUrl: resolveDaemonBaseUrl(options),
+		token: resolveDaemonToken(options),
+	};
+}
+
 export const TOKEN_MISSING_GUIDANCE =
 	"No ompd device token found.\n" +
 	"  Run `ompd start` on this machine: it mints a local operator token at ~/.ompd/token.\n" +

@@ -104,6 +104,22 @@ export type ApprovalChoice = "allow" | "deny";
 export type ApprovalScope = "once" | "always";
 
 /**
+ * The only choices OMP offers when it asks an operator to review a plan.
+ *
+ * These strings are protocol values, not display copy: the answer goes back
+ * through ACP's enum-shaped elicitation response.
+ */
+export type PlanReviewChoice = "Approve and execute" | "Refine plan";
+
+/** A plan awaiting an operator's answer. It is transient, like an ACP turn. */
+export interface PlanReviewRequest {
+  requestId: string;
+  agentId: AgentId;
+  message: string;
+  choices: readonly PlanReviewChoice[];
+}
+
+/**
  * ACP option ids, as advertised by `session/request_permission`. The supervisor
  * maps a PolicyDecision onto one of these; nothing else may.
  */
@@ -314,6 +330,7 @@ export type ClientFrame =
   | { t: "prompt"; agentId: AgentId; text: string; images?: string[] }
   | { t: "cancel"; agentId: AgentId }
   | { t: "decide"; agentId: AgentId; requestId: string; choice: ApprovalChoice; scope?: ApprovalScope }
+  | { t: "plan_decide"; agentId: AgentId; requestId: string; choice: PlanReviewChoice }
   | { t: "audio"; agentId: AgentId; pcm: string } // base64 16k mono PCM16
   | { t: "audio_end"; agentId: AgentId }
   /** Offer this socket's mounted WebView as the active target for an agent. */
@@ -322,6 +339,12 @@ export type ClientFrame =
   | { t: "webview_unregister"; agentId: AgentId }
   /** The outcome of a `webview_action` this client's WebView was asked to perform. */
   | { t: "webview_result"; agentId: AgentId; requestId: string; result: WebViewActionResult }
+  /** A normal TUI offers its already-open session for a managed takeover. */
+  | { t: "tui_register"; sessionId: string; cwd: string; title?: string; pid: number }
+  /** ACP JSON-RPC carried over the registered TUI's single control socket. */
+  | { t: "tui_acp"; sessionId: string; raw: string }
+  /** The TUI has stopped rendering and its in-process ACP server is ready. */
+  | { t: "tui_acp_ready"; sessionId: string }
   | { t: "ping" };
 
 export type ServerFrame =
@@ -329,6 +352,7 @@ export type ServerFrame =
   | { t: "agents"; agents: Agent[] }
   | { t: "update"; agentId: AgentId; seq: number; update: unknown }
   | { t: "approval"; agentId: AgentId; requestId: string; title: string; tool: string; input: unknown }
+  | { t: "plan_review"; agentId: AgentId; requestId: string; message: string; choices: readonly PlanReviewChoice[] }
   /**
    * The speakable form of a turn's answer, as prose.
    *
@@ -352,6 +376,10 @@ export type ServerFrame =
   | { t: "error"; agentId?: AgentId; message: string; code?: string }
   /** Ask a client's embedded WebView to perform an action, already cleared by the policy engine. */
   | { t: "webview_action"; agentId: AgentId; requestId: string; action: WebViewAction }
+  /** Command a registered normal TUI to release its renderer for ACP takeover. */
+  | { t: "tui_takeover"; sessionId: string }
+  /** ACP JSON-RPC carried over the registered TUI's single control socket. */
+  | { t: "tui_acp"; sessionId: string; raw: string }
   | { t: "pong" };
 
 // ---------------------------------------------------------------------------

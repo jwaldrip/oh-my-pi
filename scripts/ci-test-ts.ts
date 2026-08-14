@@ -10,6 +10,7 @@ type Mode =
 	| "local-ts"
 	| "workspace"
 	| "native"
+	| "control-plane"
 	| "coding-agent-singleton"
 	| "coding-agent-ui"
 	| "coding-agent-runtime"
@@ -54,6 +55,7 @@ const validModes: Record<Mode, true> = {
 	"local-ts": true,
 	workspace: true,
 	native: true,
+	"control-plane": true,
 	"coding-agent-singleton": true,
 	"coding-agent-ui": true,
 	"coding-agent-runtime": true,
@@ -106,6 +108,38 @@ const nativeAndIntegrationPackages = [
 	"packages/collab-web",
 	"packages/typescript-edit-benchmark",
 ];
+
+// The control-plane (ompd) workspace: daemon, its client libraries, and the
+// app/web front ends. Each package gets its own `bun test` process (the same
+// isolation every other bucket already relies on) because `app` globally
+// registers happy-dom via `@happy-dom/global-registrator` for the whole
+// process lifetime (see control-plane/packages/app/test/rnw.ts) — sharing a
+// process with any other package's `fetch`-based tests corrupts them with
+// HPE_UNEXPECTED_CONTENT_LENGTH once happy-dom's Node-backed fetch shadows
+// Bun's native one.
+const controlPlanePackages = [
+	"control-plane/packages/core",
+	"control-plane/packages/acp",
+	"control-plane/packages/tunnel",
+	"control-plane/packages/hub",
+	"control-plane/packages/daemon",
+	"control-plane/packages/cli",
+	"control-plane/packages/app",
+	"control-plane/packages/web",
+];
+
+// `app`'s test suite globally registers happy-dom and `mock.module`s
+// "react-native" once per process (see rnw.ts) so every test file can share
+// one substituted module graph without racing a per-file re-registration.
+// Bun's `--parallel` flag breaks that (verified experimentally: reproduces at
+// every width down to 1, and disappears the instant `--parallel` is dropped —
+// see the exact repro commands in this PR's description) — files depending on
+// the substitution fail parsing the real Flow-typed `react-native` entry
+// point instead. Only `app` needs the exemption; every other control-plane
+// package is safe at the bucket's normal file-level parallelism.
+function controlPlaneParallel(pkg: string, width: number): number | undefined {
+	return pkg === "control-plane/packages/app" ? undefined : width;
+}
 
 // Packages the CI buckets deliberately skip but a local full run should still
 // cover. robomp-web lives under python/robomp and is outside every CI TS bucket.
@@ -202,7 +236,11 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
+function workspaceTestCommand(
+	pkg: string,
+	parallel: number | undefined,
+	options: { extraArgs?: string[] } = {},
+): TestCommand {
 	const { extraArgs = [] } = options;
 	return {
 		label: pkg,
@@ -330,6 +368,8 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
 		case "native":
 			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
+		case "control-plane":
+			return controlPlanePackages.map(pkg => workspaceTestCommand(pkg, controlPlaneParallel(pkg, 4)));
 		case "coding-agent-singleton":
 			return await codingAgentTestCommands("singleton");
 		case "coding-agent-ui":
@@ -349,6 +389,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 			return [
 				...(await commandsForMode("workspace")),
 				...(await commandsForMode("native")),
+				...(await commandsForMode("control-plane")),
 				...(await commandsForMode("coding-agent-heavy")),
 			];
 		// `local-ts` is the full local TypeScript run that root `bun run test:ts`
@@ -360,6 +401,9 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 			return [
 				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
 				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
+				...controlPlanePackages.map(pkg =>
+					workspaceTestCommand(pkg, controlPlaneParallel(pkg, 4), { extraArgs: onlyFailuresArgs }),
+				),
 				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				...(await commandsForMode("coding-agent-heavy")),
 			];

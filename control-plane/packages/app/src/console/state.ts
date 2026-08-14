@@ -13,13 +13,14 @@
  * load and its spend.
  */
 
-import type { Agent, AgentId, ApprovalChoice } from "@ompd/core/contracts";
+import type { Agent, AgentId, ApprovalChoice, PlanReviewChoice } from "@ompd/core/contracts";
 import { SCOPE_APPROVE } from "@ompd/core/contracts";
 import type {
   AgentsEvent,
   ApprovalEvent,
   ClientErrorEvent,
   SayEvent,
+  PlanReviewEvent,
   StatusEvent,
   UnauthorizedEvent,
   UpdateEvent,
@@ -27,7 +28,16 @@ import type {
 } from "@ompd/core/ompd-client";
 import type { BrowserSession } from "../session/browser.ts";
 import type { SessionState } from "../session/model.ts";
-import { EMPTY_SESSION, appendApproval, appendPrompt, endTurn, reduce, resolveApproval } from "../session/model.ts";
+import {
+  EMPTY_SESSION,
+  appendApproval,
+  appendPrompt,
+  endTurn,
+  reduce,
+  resolveApproval,
+  resolvePlanReview,
+  setPlanReview,
+} from "../session/model.ts";
 
 /**
  * What a strip shows. Kept here rather than beside a component, because the
@@ -96,6 +106,7 @@ export type ConsoleEvent =
   | { t: "agents"; event: AgentsEvent }
   | { t: "update"; event: UpdateEvent }
   | { t: "approval"; event: ApprovalEvent }
+  | { t: "plan_review"; event: PlanReviewEvent }
   | { t: "error"; event: ClientErrorEvent }
   | { t: "say"; event: SayEvent }
   | { t: "unauthorized"; event: UnauthorizedEvent }
@@ -105,6 +116,7 @@ export type ConsoleEvent =
   | { t: "prompt"; agentId: AgentId; text: string }
   /** Local: a clearance this device just settled. */
   | { t: "decide"; agentId: AgentId; requestId: string; choice: ApprovalChoice }
+  | { t: "plan_decide"; agentId: AgentId; requestId: string; choice: PlanReviewChoice }
   | { t: "dismiss" };
 
 /**
@@ -141,6 +153,16 @@ export function apply(state: ConsoleState, event: ConsoleEvent): ConsoleState {
       return { ...next, notice: `${name} needs a clearance.` };
     }
 
+    case "plan_review": {
+      const { agentId, requestId, message, choices } = event.event;
+      const next = withSession(state, agentId, (session) =>
+        setPlanReview(session, { requestId, message, choices }),
+      );
+      if (agentId === state.selected) return next;
+      const name = state.agents.find((agent) => agent.id === agentId)?.name ?? "An agent";
+      return { ...next, notice: `${name} needs a plan review.` };
+    }
+
     case "error": {
       const { code, message } = event.event;
       if (code !== undefined && SCOPE_CODES[code]) {
@@ -173,6 +195,9 @@ export function apply(state: ConsoleState, event: ConsoleEvent): ConsoleState {
       return withSession(state, event.agentId, (session) =>
         resolveApproval(session, event.requestId, event.choice),
       );
+
+    case "plan_decide":
+      return withSession(state, event.agentId, (session) => resolvePlanReview(session, event.requestId));
 
     case "dismiss":
       return state.notice === null ? state : { ...state, notice: null };

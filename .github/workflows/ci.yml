@@ -5,6 +5,7 @@ on:
       branches: [main]
       paths:
          - "packages/**"
+         - "control-plane/**"
          - "crates/**"
          - "scripts/**"
          - "bazel/**"
@@ -30,6 +31,7 @@ on:
       branches: [main]
       paths:
          - "packages/**"
+         - "control-plane/**"
          - "crates/**"
          - "scripts/**"
          - "bazel/**"
@@ -321,6 +323,28 @@ jobs:
               # the whole group here would red this job on an unrelated break.
               bun test scripts/release.test.ts
 
+   test_control_plane:
+      name: Test control-plane (ompd) workspace (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test control-plane packages (TS)
+           # Each control-plane package runs as its own `bun test` process
+           # (see ci-test-ts.ts's controlPlanePackages comment): `app` globally
+           # registers happy-dom for its process lifetime, which corrupts
+           # `fetch`-based daemon/core tests if they ever shared a process.
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+           run: bun run ci:test:ts:control-plane
+
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
@@ -461,6 +485,7 @@ jobs:
          needs.rust_validate.result == 'success' &&
          needs.native_addons.result == 'success' &&
          needs.test_workspace.result == 'success' &&
+         needs.test_control_plane.result == 'success' &&
          needs.test_coding_agent_singleton.result == 'success' &&
          needs.test_ts_native.result == 'success' &&
          needs.test_coding_agent_ui.result == 'success' &&
@@ -468,7 +493,7 @@ jobs:
          needs.test_coding_agent_native.result == 'success' &&
          needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
          needs.install_methods.result == 'success' }}
-      needs: [release_metadata, check, rust_validate, native_addons, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+      needs: [release_metadata, check, rust_validate, native_addons, test_workspace, test_control_plane, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
       runs-on: ubuntu-22.04
       steps:
          - run: echo "release validation green"

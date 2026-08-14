@@ -24,6 +24,7 @@ import type {
   ApprovalChoice,
   ApprovalScope,
   ClientFrame,
+  PlanReviewChoice,
   ServerFrame,
   WebViewAction,
   WebViewActionResult,
@@ -102,6 +103,7 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   prompt: true,
   cancel: true,
   decide: true,
+  plan_decide: true,
   // A lost result is a lost answer: the agent never learns whether the
   // navigate/click/type it dispatched actually happened, which is the same
   // "silently believed something occurred" failure a lost `decide` is.
@@ -110,6 +112,11 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   // registration that never left is restored by the reconnect that follows.
   webview_register: false,
   webview_unregister: false,
+  // Normal TUI control frames are emitted only by the terminal client, never
+  // by this app-facing client. Losing one here is not a user instruction.
+  tui_register: false,
+  tui_acp: false,
+  tui_acp_ready: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -194,6 +201,13 @@ export interface ApprovalEvent {
   input: unknown;
 }
 
+export interface PlanReviewEvent {
+  agentId: AgentId;
+  requestId: string;
+  message: string;
+  choices: readonly PlanReviewChoice[];
+}
+
 export interface ClientErrorEvent {
   message: string;
   code?: string;
@@ -257,6 +271,7 @@ export interface ClientEventMap {
   agents: AgentsEvent;
   update: UpdateEvent;
   approval: ApprovalEvent;
+  plan_review: PlanReviewEvent;
   error: ClientErrorEvent;
   say: SayEvent;
   speech: SpeechEvent;
@@ -482,6 +497,10 @@ export class OmpdClient {
         ? { t: "decide", agentId, requestId, choice }
         : { t: "decide", agentId, requestId, choice, scope };
     this.send(frame);
+  }
+
+  decidePlan(agentId: AgentId, requestId: string, choice: PlanReviewChoice): void {
+    this.send({ t: "plan_decide", agentId, requestId, choice });
   }
 
   // -- connection lifecycle -------------------------------------------------
@@ -743,6 +762,14 @@ export class OmpdClient {
           title: frame.title,
           tool: frame.tool,
           input: frame.input,
+        });
+        return;
+      case "plan_review":
+        this.emit("plan_review", {
+          agentId: frame.agentId,
+          requestId: frame.requestId,
+          message: frame.message,
+          choices: frame.choices,
         });
         return;
       case "error":

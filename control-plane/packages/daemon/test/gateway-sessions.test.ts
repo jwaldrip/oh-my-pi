@@ -49,6 +49,7 @@ interface Harness {
   base: string;
   pair(scopes: string[]): Promise<string>;
   http(path: string, init?: RequestInit, token?: string): Promise<Response>;
+  gateway: Gateway;
 }
 
 async function harness(opts: { withSessionIndex?: boolean } = {}): Promise<Harness> {
@@ -116,6 +117,7 @@ async function harness(opts: { withSessionIndex?: boolean } = {}): Promise<Harne
 
   return {
     base,
+    gateway: gw,
     pair: async (scopes) => {
       const res = await fetch(`${base}/v1/pair`, {
         method: "POST",
@@ -268,6 +270,60 @@ describe("POST /v1/sessions/:id/archive and /unarchive", () => {
       sessions: Array<{ id: string }>;
     };
     expect(afterUnarchive.sessions.map((s) => s.id)).toContain(SESSION_ID);
+  });
+});
+
+describe("POST /v1/sessions/:id/takeover", () => {
+  test("claims the registered TUI ACP leg and adopts its one live session", async () => {
+    const h = await harness();
+    const token = await h.pair([SCOPE_MANAGE]);
+    const requested = Promise.withResolvers<void>();
+    let deliver: ((raw: string) => void) | undefined;
+    const tunnel = h.gateway.acceptTunnelSession(token, raw => {
+      const frame = JSON.parse(raw);
+      if (typeof frame !== "object" || frame === null || !("t" in frame)) return;
+      if (frame.t === "tui_takeover") {
+        requested.resolve();
+        return;
+      }
+      if (frame.t !== "tui_acp" || typeof frame.raw !== "string") return;
+      const rpc = JSON.parse(frame.raw);
+      if (
+        typeof rpc !== "object" ||
+        rpc === null ||
+        !("id" in rpc) ||
+        (typeof rpc.id !== "string" && typeof rpc.id !== "number")
+      ) {
+        return;
+      }
+      deliver?.(
+        JSON.stringify({
+          t: "tui_acp",
+          sessionId: "live-tui-session",
+          raw: JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: {} }),
+        }),
+      );
+    });
+    if (!tunnel.ok) throw new Error(`could not open paired TUI tunnel: ${tunnel.reason}`);
+    deliver = tunnel.deliver;
+    deliver(
+      JSON.stringify({
+        t: "tui_register",
+        sessionId: "live-tui-session",
+        cwd: "/repo",
+        title: "Live terminal",
+        pid: 4242,
+      }),
+    );
+
+    const takeover = h.http("/v1/sessions/live-tui-session/takeover", { method: "POST" }, token);
+    await requested.promise;
+    deliver(JSON.stringify({ t: "tui_acp_ready", sessionId: "live-tui-session" }));
+
+    const response = await takeover;
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { agent: { acpSessionId: string; cwd: string; state: string } };
+    expect(body.agent).toMatchObject({ acpSessionId: "live-tui-session", cwd: "/repo", state: "idle" });
   });
 });
 
