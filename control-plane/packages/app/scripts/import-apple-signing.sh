@@ -10,7 +10,13 @@ KEYCHAIN_PATH="${OMPD_APPLE_KEYCHAIN_PATH:-${RUNNER_TEMP:-/tmp}/ompd-signing.key
 KEYCHAIN_PASSWORD="${OMPD_APPLE_KEYCHAIN_PASSWORD:-$(openssl rand -base64 32)}"
 P12_PATH="${RUNNER_TEMP:-/tmp}/ompd-dist.p12"
 
-printf '%s' "$OMPD_APPLE_CERT_P12_BASE64" | base64 --decode > "$P12_PATH"
+python3 - <<'PY' > "$P12_PATH"
+import base64, os, sys
+raw = os.environ["OMPD_APPLE_CERT_P12_BASE64"].strip()
+# tolerate whitespace/newlines in secret values
+raw = "".join(raw.split())
+sys.stdout.buffer.write(base64.b64decode(raw))
+PY
 chmod 600 "$P12_PATH"
 wc -c "$P12_PATH" | awk '{print "p12_bytes",$1}'
 

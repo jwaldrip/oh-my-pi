@@ -92,12 +92,17 @@ jobs:
           name: ompd-ios-ipa
           path: control-plane/packages/app/build/ios/ipa/*.ipa
           if-no-files-found: error
+      - name: Require ASC secrets when upload requested
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_ASC_KEY_PATH == ''
+        run: |
+          echo "::error::upload=true but ASC API key secrets are missing (OMPD_ASC_KEY_ID / OMPD_ASC_ISSUER_ID / OMPD_ASC_PRIVATE_KEY). Set secrets or re-run with upload=false for artifact-only."
+          exit 1
       - name: Upload to TestFlight
         if: env.OMPD_UPLOAD == 'true' && env.OMPD_ASC_KEY_PATH != ''
         run: bun run upload:testflight
-      - name: Skip upload notice
-        if: env.OMPD_ASC_KEY_PATH == ''
-        run: echo "ASC API key secrets missing; IPA artifact retained for manual TestFlight upload"
+      - name: Artifact-only notice
+        if: env.OMPD_UPLOAD != 'true'
+        run: echo "upload=false; IPA artifact retained (no TestFlight submit)"
 
   android-play-internal:
     name: Android AAB + Play Internal
@@ -167,12 +172,17 @@ jobs:
       - name: Install Play upload deps
         if: env.OMPD_PLAY_SERVICE_ACCOUNT_JSON != ''
         run: pip install 'google-api-python-client>=2.100' 'google-auth>=2.23'
+      - name: Require Play secrets when upload requested
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_PLAY_SERVICE_ACCOUNT_JSON == ''
+        run: |
+          echo "::error::upload=true but OMPD_PLAY_SERVICE_ACCOUNT_JSON is missing. Set the secret or re-run with upload=false for artifact-only."
+          exit 1
       - name: Upload to Play Internal testing
         if: env.OMPD_UPLOAD == 'true' && env.OMPD_PLAY_SERVICE_ACCOUNT_JSON != ''
         run: bun run upload:play-internal
-      - name: Skip upload notice
-        if: env.OMPD_PLAY_SERVICE_ACCOUNT_JSON == ''
-        run: echo "Play service account secret missing; AAB artifact retained for manual Internal testing upload"
+      - name: Artifact-only notice
+        if: env.OMPD_UPLOAD != 'true'
+        run: echo "upload=false; AAB artifact retained (no Play submit)"
 
   macos-testflight:
     name: macOS archive
@@ -193,6 +203,7 @@ jobs:
       OMPD_ASC_PRIVATE_KEY: ${{ secrets.OMPD_ASC_PRIVATE_KEY }}
       OMPD_APPLE_CERT_P12_BASE64: ${{ secrets.OMPD_APPLE_CERT_P12_BASE64 }}
       OMPD_APPLE_CERT_P12_PASSWORD: ${{ secrets.OMPD_APPLE_CERT_P12_PASSWORD }}
+      OMPD_UPLOAD: ${{ github.event_name == 'push' && 'true' || github.event.inputs.upload }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/bun-install
@@ -236,10 +247,13 @@ jobs:
           name: ompd-macos-export
           path: control-plane/packages/app/build/macos/export/**
           if-no-files-found: error
+      - name: Require ASC secrets when upload requested (macOS)
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_ASC_KEY_PATH == ''
+        run: |
+          echo "::error::upload=true but ASC API key secrets are missing for macOS TestFlight"
+          exit 1
       - name: Upload macOS to App Store Connect / TestFlight
-        if: env.OMPD_ASC_KEY_PATH != ''
-        env:
-          OMPD_UPLOAD: 'true'
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_ASC_KEY_PATH != ''
         run: |
           # Prefer a .pkg; fall back to .dmg/.app zip produced by export
           PKG="$(find build/macos/export -name '*.pkg' | head -1 || true)"
@@ -259,9 +273,9 @@ jobs:
           API_PRIVATE_KEYS_DIR="$(cd "$(dirname "$OMPD_ASC_KEY_PATH")" && pwd)"
           xcrun altool --upload-app             --type macos             --file "$PKG"             --apiKey "$OMPD_ASC_KEY_ID"             --apiIssuer "$OMPD_ASC_ISSUER_ID"
           echo "uploaded macOS build to App Store Connect"
-      - name: Skip macOS ASC upload notice
-        if: env.OMPD_ASC_KEY_PATH == ''
-        run: echo "ASC API key secrets missing; macOS export artifact retained for manual TestFlight upload"
+      - name: Artifact-only notice (macOS)
+        if: env.OMPD_UPLOAD != 'true'
+        run: echo "upload=false; macOS export artifact retained (no ASC submit)"
 
   windows-msix:
     name: Windows MSIX package

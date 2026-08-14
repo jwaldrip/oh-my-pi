@@ -113,9 +113,18 @@ jobs:
       - uses: ./.github/actions/bun-install
       - name: Select Xcode 16+
         run: |
-          # RN 0.81 requires Xcode >= 16.1
-          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          # RN 0.81 requires Xcode >= 16.1. Prefer an install that ships an iOS Simulator runtime.
+          for app in             /Applications/Xcode_16.4.app             /Applications/Xcode_16.3.app             /Applications/Xcode_16.2.app             /Applications/Xcode_16.1.app             /Applications/Xcode_16.app             /Applications/Xcode.app; do
+            if [[ -d "$app/Contents/Developer" ]]; then
+              sudo xcode-select -s "$app/Contents/Developer"
+              if xcrun simctl list runtimes 2>/dev/null | grep -q 'iOS'; then
+                echo "selected $app with iOS runtime"
+                break
+              fi
+            fi
+          done
           xcodebuild -version
+          xcrun simctl list runtimes || true
       - name: CocoaPods
         run: |
           cd ios

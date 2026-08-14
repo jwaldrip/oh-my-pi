@@ -79,3 +79,10 @@ Android release permits cleartext (`usesCleartextTraffic=true`) because the app
 pairs to a user-entered local daemon endpoint over LAN (`ws://` / `http://`).
 Those IPs cannot be pre-declared in a domain allowlist. This matches iOS
 `NSAllowsLocalNetworking`.
+
+## Upload vs artifact-only
+
+`app-store-distribute.yml` takes `upload` (default `true`).
+
+- `upload=true` (default): **fails** if the platform's store credentials are missing. No quiet skip.
+- `upload=false`: builds and uploads GitHub Actions artifacts only; store submit is skipped on purpose.
