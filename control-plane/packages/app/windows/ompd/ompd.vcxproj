@@ -129,6 +129,12 @@
   <ImportGroup Label="ReactNativeWindowsTargets">
     <Import Project="$(ReactNativeWindowsDir)\PropertySheets\External\Microsoft.ReactNative.Composition.CppApp.targets" Condition="Exists('$(ReactNativeWindowsDir)\PropertySheets\External\Microsoft.ReactNative.Composition.CppApp.targets')" />
   </ImportGroup>
+  <!-- Bare PackageReference versions are minimums. Pin NuGet to the npm
+       react-native-windows release so the C++ renderer and JS package match. -->
+  <ItemGroup>
+    <PackageReference Update="Microsoft.ReactNative" Version="[0.81.30]" />
+    <PackageReference Update="Microsoft.ReactNative.Cxx" Version="[0.81.30]" />
+  </ItemGroup>
   <ItemGroup>
   </ItemGroup>
   <Target Name="EnsureReactNativeWindowsTargets" BeforeTargets="PrepareForBuild">
