@@ -99,6 +99,7 @@ const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
 const THINKING_OFF = "off";
 const SESSION_PAGE_SIZE = 50;
+const ACP_MCP_TOOL_APPROVAL_META_KEY = "omp.toolApproval";
 const SPEECH_MODELS_LIST_METHOD = "speech.models.list";
 /**
  * Delay between `session/new` (or `session/load` / `session/resume` /
@@ -493,6 +494,7 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		await this.#adoptInitialSession();
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -1130,6 +1132,27 @@ export class AcpAgent implements Agent {
 			throw error;
 		}
 		return await this.#registerPreparedSession(session, mcpServers);
+	}
+
+	/**
+	 * An interactive TUI can hand its already-open session to this ACP agent.
+	 * Register that exact object before `session/load` is served: opening the
+	 * stored file again would create a second writer for the same JSONL.
+	 *
+	 * The TUI has already configured extensions and MCP on this session. Running
+	 * those setup paths again would duplicate process-wide hooks, so adoption
+	 * only installs ACP's bridge and managed lifecycle record.
+	 */
+	async #adoptInitialSession(): Promise<void> {
+		const session = this.#initialSession;
+		if (!session) return;
+		this.#initialSession = undefined;
+		if (this.#sessions.has(session.sessionId)) {
+			throw new Error(`ACP session already registered: ${session.sessionId}`);
+		}
+		const record = this.#createManagedSessionRecord(session);
+		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		this.#sessions.set(session.sessionId, record);
 	}
 
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -2476,6 +2499,15 @@ export class AcpAgent implements Agent {
 			};
 		}
 
+		for (const server of servers) {
+			manager.setTrustedApproval(
+				server.name,
+				server._meta?.[ACP_MCP_TOOL_APPROVAL_META_KEY] === "allow"
+					? { source: "acp-client", policy: "allow" }
+					: undefined,
+			);
+		}
+
 		const result = await manager.connectServers(configs, sources);
 		if (result.errors.size > 0) {
 			throw new Error(
@@ -2517,8 +2549,17 @@ export class AcpAgent implements Agent {
 		throw new Error(`Unsupported MCP server transport: ${server.type}`);
 	}
 
-	#toNameValueMap(values: Array<{ name: string; value: string }>): { [name: string]: string } {
+	/**
+	 * ACP carries env and headers as `{ name, value }[]`. Headers are optional
+	 * on the wire, and a host that has none omits the field rather than sending
+	 * `[]`. The previous loop assumed the array was always present, which is
+	 * how a loopback HTTP MCP server without headers (the WebView bridge) made
+	 * every `session/new` fail with "undefined is not an object (evaluating
+	 * 'values')" before a single tool was ever listed.
+	 */
+	#toNameValueMap(values: Array<{ name: string; value: string }> | undefined): { [name: string]: string } {
 		const mapped: { [name: string]: string } = {};
+		if (values === undefined) return mapped;
 		for (const value of values) {
 			mapped[value.name] = value.value;
 		}

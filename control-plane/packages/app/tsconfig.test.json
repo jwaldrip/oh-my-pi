@@ -1,0 +1,9 @@
+{
+  // Tests need bun's globals; the app must not see them, or a `Bun.*` call
+  // would typecheck its way into a shipped bundle. Hence two projects.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun", "react"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"]
+}

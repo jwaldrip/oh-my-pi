@@ -6,6 +6,10 @@ export const acpHelp = {
 
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
 
+export const clientHelp = {
+	description: "Attach to a running ompd as a client and view its live agents, without owning one",
+} satisfies CommandMetadata;
+
 export const authBrokerHelp = {
 	description: "Manage the omp auth-broker (credential vault)",
 } satisfies CommandMetadata;

@@ -20,10 +20,17 @@ async function canonicalProjectDir(projectDir: string): Promise<string> {
 	}
 }
 
+/** Session identity this presence record may carry, if the caller has one open. */
+export interface DaemonProjectPresenceSession {
+	sessionId: string;
+	title?: string;
+}
+
 /** Register this omp process so project daemons survive while it remains alive. */
 export async function registerDaemonProjectPresence(
 	projectDir: string,
 	runtimeOverride?: string,
+	session?: DaemonProjectPresenceSession,
 ): Promise<DaemonProjectPresence> {
 	const canonical = await canonicalProjectDir(projectDir);
 	const runtimeDir = runtimeOverride ?? daemonRuntimeDir(canonical);
@@ -31,7 +38,20 @@ export async function registerDaemonProjectPresence(
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
-	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
+	await Bun.write(
+		presencePath,
+		JSON.stringify({
+			pid: process.pid,
+			id,
+			projectDir: canonical,
+			// Optional: an older omp on this machine never writes these, and any
+			// reader must treat their absence as "alive, session unknown" rather
+			// than as a malformed record (see hasLiveDaemonProjectPresence below,
+			// which never inspects them).
+			...(session?.sessionId ? { sessionId: session.sessionId } : {}),
+			...(session?.title ? { title: session.title } : {}),
+		}),
+	);
 	await fs.chmod(presencePath, 0o600);
 	let closed = false;
 	const close = async (): Promise<void> => {

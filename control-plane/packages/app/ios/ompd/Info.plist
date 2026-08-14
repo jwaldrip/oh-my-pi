@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>ompsession</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>OMP Session Handoff</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>sh.ompd.session</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>OMP Session Handoff</string>
+			<key>UTTypeIdentifier</key>
+			<string>sh.ompd.session</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>ompsession</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/vnd.ompd.session+json</string>
+			</dict>
+		</dict>
+	</array>
+	<key>CFBundleDisplayName</key>
+	<string>ompd</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- `ompd://collab/<roomId>` is the explicit fallback to the Universal Link. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>sh.ompd.collab</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ompd</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<!-- A daemon on the operator's own LAN is reached over ws://, because it
+		     has no certificate for a private address and nothing would issue
+		     one. The exception is scoped to local networking rather than opened
+		     for everything, so a hub over the internet still has to be wss://. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- iOS 14 and later gate a connection to an address on the local network
+	     behind an explicit grant. Without this string the prompt cannot be
+	     shown, and the first pairing against a LAN address fails with a
+	     connection error that looks like a daemon that is not running. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ompd connects to the OMP daemon running on your own computer, over your local network.</string>
+	<key>RCTNewArchEnabled</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+</dict>
+</plist>

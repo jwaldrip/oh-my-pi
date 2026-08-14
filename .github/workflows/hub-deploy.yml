@@ -1,0 +1,80 @@
+# Builds and deploys the ompd hub. NOT RUN: this workflow has never executed
+# and nothing described here exists in any GCP project yet.
+#
+# Manual dispatch only. The hub brokers access to machines that execute code,
+# so it does not deploy itself on a push to a branch.
+name: hub-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [staging, production]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # The redis-backed backplane is the part that only works or fails for
+      # real against a real Redis, so the deploy path runs it against one
+      # rather than against the memory implementation.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - run: bun install --frozen-lockfile
+      - name: Test the tunnel and the hub
+        env:
+          OMPD_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: bun test control-plane/packages/tunnel control-plane/packages/hub
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push
+        run: |
+          gcloud builds submit \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --tag "${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd/hub:${{ github.sha }}" \
+            --file control-plane/packages/hub/deploy/Dockerfile \
+            .
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Apply
+        working-directory: control-plane/packages/hub/deploy
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          terraform apply -auto-approve \
+            -var "project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var "region=${{ vars.GCP_REGION }}" \
+            -var "network_id=${{ vars.GCP_NETWORK_ID }}" \
+            -var "connector_id=${{ vars.GCP_VPC_CONNECTOR_ID }}" \
+            -var "image=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd/hub:${{ github.sha }}"

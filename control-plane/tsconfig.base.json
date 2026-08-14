@@ -1,0 +1,22 @@
+{
+  "//": "Shared compiler options for every non-UI control-plane package. The app and web packages keep their own, because a React Native and a browser target need libs and JSX settings nothing here wants. `skipLibCheck` matches the fork's own base: the graph reaches @huggingface, onnxruntime, and puppeteer type packages that neither project owns.",
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "lib": ["ES2024", "DOM.AsyncIterable"],
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["bun"]
+  }
+}

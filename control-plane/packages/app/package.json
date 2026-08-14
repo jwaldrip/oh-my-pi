@@ -1,0 +1,47 @@
+{
+  "name": "@ompd/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "react-native start",
+    "ios": "react-native run-ios",
+    "android": "react-native run-android",
+    "windows": "react-native run-windows",
+    "macos": "react-native run-macos",
+    "web": "vite",
+    "build:web": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "bun test --preload ./test/preload-react.ts test/",
+    "check": "bun ../../scripts/check-types.ts tsconfig.json tsconfig.test.json"
+  },
+  "dependencies": {
+    "@fortawesome/fontawesome-svg-core": "7.3.1",
+    "@fortawesome/free-solid-svg-icons": "7.3.1",
+    "@fortawesome/react-native-fontawesome": "1.0.0",
+    "@ompd/core": "workspace:*",
+    "@ompd/tunnel": "workspace:*",
+    "@react-native-async-storage/async-storage": "3.1.1",
+    "react": "19.1.4",
+    "react-dom": "19.1.4",
+    "react-native": "0.81.6",
+    "react-native-keychain": "10.0.0",
+    "react-native-macos": "0.81.9",
+    "react-native-safe-area-context": "5.4.0",
+    "react-native-svg": "15.15.5",
+    "react-native-view-shot": "4.0.3",
+    "react-native-web": "0.21.2",
+    "react-native-webview": "14.0.1",
+    "react-native-windows": "0.81.32"
+  },
+  "devDependencies": {
+    "@react-native/babel-preset": "0.81.6",
+    "@react-native/metro-config": "0.81.6",
+    "@react-native/typescript-config": "0.81.6",
+    "@types/react": "19.1.17",
+    "@types/react-dom": "19.1.11",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "^5.6.0",
+    "vite": "^7.3.1"
+  }
+}

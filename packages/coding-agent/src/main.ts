@@ -21,6 +21,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
+import type { AnyMessage } from "@oh-my-pi/pi-utils/acp";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
@@ -58,7 +59,11 @@ import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
-import { InteractiveMode } from "./modes/interactive-mode";
+import type { AcpAgent } from "./modes/acp/acp-agent";
+import { createAcpConnection } from "./modes/acp/acp-mode";
+import { resolveDaemonAddress, socketUrlFromBase } from "./modes/client/daemon-config";
+import { LiveTuiControlLeg, type TuiAcpTransport } from "./modes/client/tui-control";
+import { InteractiveMode, RemoteTuiTakeoverError } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
@@ -440,6 +445,114 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 	};
 }
 
+/**
+ * Start the ACP server that owns a session only after the normal TUI has
+ * released its terminal. The ACP stream is tunneled over the registered
+ * control WebSocket, so no subprocess ever reopens the same session file.
+ */
+function startLiveTuiAcpServer(session: AgentSession, transport: TuiAcpTransport): Promise<void> {
+	let input: ReadableStreamDefaultController<AnyMessage> | undefined;
+	const readable = new ReadableStream<AnyMessage>({
+		start(controller) {
+			input = controller;
+		},
+	});
+	const writable = new WritableStream<AnyMessage>({
+		write(message) {
+			transport.send(JSON.stringify(message));
+		},
+	});
+	let activeAgent: AcpAgent | undefined;
+	let removeSessionTeardown = postmortem.register("tui-takeover-session", reason => session.dispose({ reason }));
+	transport.onMessage(raw => {
+		let message: unknown;
+		try {
+			message = JSON.parse(raw);
+		} catch {
+			return;
+		}
+		if (!isAcpMessage(message)) return;
+		input?.enqueue(message);
+	});
+	transport.onClose(() => input?.close());
+	const connection = createAcpConnection(
+		{ readable, writable },
+		async () => {
+			throw new Error("a live TUI ACP leg cannot create a second session");
+		},
+		session,
+		agent => {
+			activeAgent = agent;
+			removeSessionTeardown();
+			removeSessionTeardown = postmortem.register("tui-takeover-acp", reason => agent.dispose(reason));
+		},
+	);
+	return connection.closed.then(async () => {
+		removeSessionTeardown();
+		if (activeAgent) {
+			await activeAgent.dispose();
+			return;
+		}
+		await session.dispose();
+	});
+}
+
+/** Keep the ACP parser boundary narrow before forwarding daemon frames. */
+function isAcpMessage(value: unknown): value is AnyMessage {
+	if (typeof value !== "object" || value === null) return false;
+	const message = value as Record<string, unknown>;
+	if (message.jsonrpc !== "2.0") return false;
+	if (typeof message.method === "string") return true;
+	if (!("id" in message)) return false;
+	const id = message.id;
+	if (id !== null && typeof id !== "string" && typeof id !== "number") return false;
+	return (
+		"result" in message ||
+		(typeof message.error === "object" &&
+			message.error !== null &&
+			typeof (message.error as Record<string, unknown>).code === "number" &&
+			typeof (message.error as Record<string, unknown>).message === "string")
+	);
+}
+
+/**
+ * A local TUI behaves exactly as before when no daemon token exists or the
+ * socket cannot connect. A connected daemon gets a reverse ACP leg it can
+ * explicitly claim with its managed takeover route.
+ */
+function connectLiveTuiToDaemon(
+	mode: InteractiveMode,
+	session: AgentSession,
+	onTakeoverStarted: (closed: Promise<void>) => void,
+): LiveTuiControlLeg | undefined {
+	const address = resolveDaemonAddress();
+	const sessionId = session.sessionManager.getSessionId();
+	if (address.token === null || !sessionId) return undefined;
+	const leg = new LiveTuiControlLeg({
+		url: `${socketUrlFromBase(address.baseUrl)}?token=${encodeURIComponent(address.token)}`,
+		session: {
+			id: sessionId,
+			cwd: session.sessionManager.getCwd(),
+			...(session.sessionManager.getSessionName() === undefined
+				? {}
+				: { title: session.sessionManager.getSessionName() }),
+			pid: process.pid,
+		},
+		onTakeover: async transport => {
+			// Build the ACP endpoint before releasing the TUI. A module/load
+			// failure therefore leaves the original interactive owner intact.
+			const closed = startLiveTuiAcpServer(session, transport);
+			onTakeoverStarted(closed);
+			mode.transferUiOwnershipToRemote();
+			// A handoff never overlaps the old input turn. The renderer is gone,
+			// but the existing session continues until its final append settles.
+			await session.waitForIdle();
+		},
+	});
+	leg.start();
+	return leg;
+}
+
 async function runInteractiveMode(
 	session: AgentSession,
 	version: string,
@@ -492,6 +605,8 @@ async function runInteractiveMode(
 		suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 		clearInitialTerminalHistory: true,
 	});
+
+	let remoteOwnershipClosed: Promise<void> | undefined;
 
 	if (setupWizard && playStartupSplash) {
 		await setupWizard.runStartupSplash(mode);
@@ -560,9 +675,23 @@ async function runInteractiveMode(
 		}
 	}
 
+	connectLiveTuiToDaemon(mode, session, closed => {
+		remoteOwnershipClosed = closed;
+	});
+
 	while (true) {
-		const input = await mode.getUserInput();
-		await submitInteractiveInput(mode, session, input);
+		try {
+			const input = await mode.getUserInput();
+			await submitInteractiveInput(mode, session, input);
+		} catch (error) {
+			if (error instanceof RemoteTuiTakeoverError && remoteOwnershipClosed) {
+				await remoteOwnershipClosed;
+				stopThemeWatcher();
+				await postmortem.quit(0);
+				return;
+			}
+			throw error;
+		}
 	}
 }
 
@@ -1526,7 +1655,17 @@ export async function runRootCommand(
 
 	await pluginPreloadPromise;
 	if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-		await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+		const presenceSessionId = sessionManager?.getSessionId();
+		const presenceSession = presenceSessionId
+			? { sessionId: presenceSessionId, title: sessionManager?.getSessionName() }
+			: undefined;
+		await logger.time(
+			"registerDaemonProjectPresence",
+			registerDaemonProjectPresence,
+			cwd,
+			undefined,
+			presenceSession,
+		);
 	}
 
 	scheduleMarketplaceAutoUpdate({

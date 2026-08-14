@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,7 +11,7 @@ import {
 	parseSkillInvocation,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -45,6 +45,27 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 } as const;
 
 describe("skills", () => {
+	// Managed skills (`MANAGED_SKILLS_PROVIDER_ID`) are surfaced unconditionally
+	// by `loadSkills` regardless of the `enable*` toggles (see skills.ts's
+	// `isSourceEnabled`), so every test in this file is exposed to whatever is
+	// actually sitting in the real `~/.omp/agent/managed-skills` on the machine
+	// running the suite. Point `getAgentDir()` at an empty per-test temp dir so
+	// "disabled/empty" assertions are hermetic instead of depending on the
+	// developer's or CI runner's real managed-skills library.
+	let originalAgentDir: string;
+	let tempAgentDir: string;
+
+	beforeEach(async () => {
+		originalAgentDir = getAgentDir();
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-agent-dir-"));
+		setAgentDir(tempAgentDir);
+	});
+
+	afterEach(async () => {
+		setAgentDir(originalAgentDir);
+		await removeWithRetries(tempAgentDir);
+	});
+
 	describe("loadSkillsFromDir", () => {
 		const loadFixtureRoot = () => loadSkillsFromDir({ dir: fixturesDir, source: "test" });
 

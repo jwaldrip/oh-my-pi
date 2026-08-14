@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#1b1a17" />
+    <meta name="description" content="Strip bay for ompd agents: dispatch, supervision, and clearance." />
+    <title>ompd bay</title>
+
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="ompd" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    />
+
+    <!--
+      Font Awesome Pro kit. Icons are created once per card or control and never
+      per streamed token, and streaming text is appended into an existing text
+      node, so the kit's mutation observer never sees the hot path.
+    -->
+    <script src="https://kit.fontawesome.com/bcb2ad36f1.js" crossorigin="anonymous"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#log">Skip to the running log</a>
+    <div id="app" data-view="list"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

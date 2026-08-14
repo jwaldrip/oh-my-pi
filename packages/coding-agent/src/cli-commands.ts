@@ -36,6 +36,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.agentsHelp,
 	},
 	{
+		name: "client",
+		load: () => import("./commands/client").then(m => m.default),
+		help: commandHelp.clientHelp,
+	},
+	{
 		name: "bench",
 		load: () => import("./commands/bench").then(m => m.default),
 		help: commandHelp.benchHelp,

@@ -1,0 +1,15 @@
+# approvalMode is deliberately NOT yolo: a non-yolo mode is what keeps OMP's
+# ACP permission wrapper armed, so session/request_permission still fires.
+#
+# Each privileged tool is then set to `allow`, which disarms OMP's *internal*
+# approval gate. That gate has no answerable UI in a headless ACP host and
+# would otherwise deny every call regardless of what the ACP client replied.
+#
+# Net effect: exactly one gate, the ACP permission hook, owned by ompd's policy.
+tools:
+  approvalMode: always-ask
+  approval:
+    bash: allow
+    edit: allow
+    write: allow
+    multi_edit: allow

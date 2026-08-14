@@ -401,7 +401,7 @@ describe("SessionManager legacy session migration persistence", () => {
 		expect(persistedEntries[1].id).toBeDefined();
 		expect(persistedEntries[1].parentId).toBeNull();
 	});
-	it("keeps the last non-empty session resumable after starting a fresh session", async () => {
+	it("does not let an unmaterialized fresh session shadow the last persisted session on disk", async () => {
 		const session = SessionManager.create(tempDir, tempDir);
 		session.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1 });
 		session.appendMessage(makeAssistantMessage());
@@ -414,12 +414,15 @@ describe("SessionManager legacy session migration persistence", () => {
 		expect(freshSessionFile).toBeDefined();
 		expect(fs.existsSync(freshSessionFile!)).toBe(false);
 
-		const resumed = await SessionManager.continueRecent(tempDir, tempDir);
-		try {
-			expect(resumed.getSessionFile()).toBe(previousSessionFile);
-		} finally {
-			await resumed.close();
-			await session.close();
-		}
+		// `SessionManager.continueRecent` deliberately does NOT fall back here: an
+		// unmaterialized `/new` boundary is honored rather than resurrecting the
+		// pre-`/new` transcript (see `new-session-boundary.test.ts`). What this
+		// test actually covers is the lower-level directory scan `continueRecent`
+		// falls back to once no fresh-boundary breadcrumb applies: a fresh,
+		// never-persisted session must not shadow the last real file on disk.
+		const mostRecentOnDisk = await findMostRecentSession(tempDir);
+		expect(mostRecentOnDisk).toBe(previousSessionFile);
+
+		await session.close();
 	});
 });

@@ -1,0 +1,42 @@
+# Build output
+dist/
+
+# Xcode
+build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.xcuserstate
+**/.xcode.env.local
+
+# CocoaPods: vendored on install, never committed
+ios/Pods/
+macos/Pods/
+ios/Podfile.lock
+macos/Podfile.lock
+
+# Android / Gradle
+.gradle/
+android/app/build/
+android/build/
+local.properties
+*.keystore
+!debug.keystore
+.cxx/
+
+# Ruby, for the CocoaPods toolchain
+vendor/
+
+# Metro
+.metro-health-check*

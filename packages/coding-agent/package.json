@@ -50,6 +50,7 @@
   },
   "dependencies": {
     "@babel/parser": "catalog:",
+    "@ompd/core": "workspace:*",
     "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",

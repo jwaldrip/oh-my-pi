@@ -262,9 +262,28 @@ describe("MCP Streamable HTTP POST response resumption", () => {
 		// (stream errors surface as clean EOF client-side), so speak raw HTTP: a
 		// chunked response without the terminal chunk, closed mid-body, makes the
 		// client's body read throw.
+		//
+		// Closing the raw socket in the same callback turn as the write is racy:
+		// closing right after socket.write() (or after queueMicrotask, chained
+		// microtasks, or process.nextTick, all tried and still racy) can make Bun
+		// reject the client's fetch() before it ever exposes a response, so the
+		// event ID from the priming event is never parsed and the resumable-drop
+		// path this test targets never runs. Deferring socket.end() to the next
+		// event-loop turn (setTimeout) was the only close timing that did not
+		// reproduce the failure; see the PR description for the reproduction data.
 		const observed = { posts: 0, lastEventId: null as string | null };
 		const sseChunk = (payload: string): string =>
 			`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n${payload.length.toString(16)}\r\n${payload}\r\n`;
+		// Deferred only for the POST leg: that response is deliberately truncated
+		// (no terminal 0-chunk) and needs the connection close itself to signal
+		// end-of-stream, which is what raced above. The GET/resume response below
+		// is complete and self-terminating (it does include the terminal chunk),
+		// so closing it synchronously via socket.end(payload) was never observed
+		// to race in the same reproduction.
+		const writeTruncatedThenClose = (socket: Bun.Socket, payload: string): void => {
+			socket.write(payload);
+			setTimeout(() => socket.end(), 0);
+		};
 		const listener = Bun.listen({
 			hostname: "127.0.0.1",
 			port: 0,
@@ -274,18 +293,16 @@ describe("MCP Streamable HTTP POST response resumption", () => {
 					if (request.startsWith("POST")) {
 						observed.posts++;
 						// Priming event, then close without the terminal 0-chunk.
-						socket.write(sseChunk("id: stream-1\nretry: 10\ndata:\n\n"));
-						socket.end();
+						writeTruncatedThenClose(socket, sseChunk("id: stream-1\nretry: 10\ndata:\n\n"));
 						return;
 					}
 					if (!request.startsWith("GET")) return;
 					observed.lastEventId = /^Last-Event-ID:\s*(.+)$/im.exec(request)?.[1]?.trim() ?? null;
-					socket.write(
+					socket.end(
 						`${sseChunk(
 							'id: stream-2\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"resumed","inputSchema":{"type":"object"}}]}}\n\n',
 						)}0\r\n\r\n`,
 					);
-					socket.end();
 				},
 			},
 		});

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#141310" />
+    <title>ompd</title>
+    <style>
+      /*
+       * The same binaries the native targets link, declared for the browser.
+       * One source of truth for the typefaces means the web build cannot drift
+       * onto a system face while the Mac app is showing Archivo.
+       */
+      @font-face {
+        font-family: "Archivo-Regular";
+        src: url("/src/design/fonts/Archivo-Regular.ttf") format("truetype");
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "Archivo-Medium";
+        src: url("/src/design/fonts/Archivo-Medium.ttf") format("truetype");
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "Archivo-SemiBold";
+        src: url("/src/design/fonts/Archivo-SemiBold.ttf") format("truetype");
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "IBMPlexMono-Regular";
+        src: url("/src/design/fonts/IBMPlexMono-Regular.ttf") format("truetype");
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "IBMPlexMono-Medium";
+        src: url("/src/design/fonts/IBMPlexMono-Medium.ttf") format("truetype");
+        font-display: swap;
+      }
+
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+        background: #141310;
+      }
+      /* react-native-web measures against the root; without this the app is 0px tall. */
+      #root {
+        display: flex;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/index.web.tsx"></script>
+  </body>
+</html>
