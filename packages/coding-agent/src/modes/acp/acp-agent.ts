@@ -2542,9 +2542,7 @@ export class AcpAgent implements Agent {
 	 * every `session/new` fail with "undefined is not an object (evaluating
 	 * 'values')" before a single tool was ever listed.
 	 */
-	#toNameValueMap(
-		values: Array<{ name: string; value: string }> | undefined,
-	): { [name: string]: string } {
+	#toNameValueMap(values: Array<{ name: string; value: string }> | undefined): { [name: string]: string } {
 		const mapped: { [name: string]: string } = {};
 		if (values === undefined) return mapped;
 		for (const value of values) {

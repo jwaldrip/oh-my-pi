@@ -24,9 +24,11 @@ import { ground, ink, signal, signalWash, space, stroke, TOUCH_TARGET, type } fr
 
 export function PairScreen({
   notice,
+  onCancel,
   onPair,
 }: {
   notice?: string;
+  onCancel?: () => void;
   onPair: (connection: Connection) => void;
 }): JSX.Element {
   const [raw, setRaw] = useState("");
@@ -92,6 +94,11 @@ export function PairScreen({
         >
           <Label color={ready ? signal.sage : ink.faint}>Connect</Label>
         </Pressable>
+        {onCancel === undefined ? null : (
+          <Pressable accessibilityRole="button" onPress={onCancel} style={styles.cancel} testID="pair-cancel">
+            <Label color={ink.plain}>Back to connections</Label>
+          </Pressable>
+        )}
       </View>
     </SafeScreen>
   );
@@ -156,4 +163,5 @@ const styles = StyleSheet.create({
     borderWidth: stroke.hair,
     marginTop: space.snug,
   },
+  cancel: { alignItems: "center", justifyContent: "center", minHeight: TOUCH_TARGET },
 });

@@ -56,7 +56,7 @@ import { homeIdFor } from "./home-id.ts";
 import { HostRegistry } from "./hosts.ts";
 import { ContainerBackend, HostProvisioner, LocalBackend } from "./provisioner/index.ts";
 import { Scheduler } from "./routines/index.ts";
-import { SessionIndex } from "./sessions/index.ts";
+import { SessionIndex } from "./sessions/session-index.ts";
 import { Supervisor } from "./supervisor.ts";
 import { listConnectorCatalog, listSkillCatalog, TaskManager } from "./workspace/index.ts";
 import {

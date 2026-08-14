@@ -110,6 +110,19 @@ describe("approval finality", () => {
   });
 });
 
+describe("webhook secret persistence", () => {
+  test("a secret reference retains only its replacement hash", () => {
+    const s = fresh();
+
+    const first = s.upsertWebhookSecret("whref_nightly", "first-hash");
+    const replacement = s.upsertWebhookSecret("whref_nightly", "replacement-hash");
+
+    expect(first.secretRef).toBe("whref_nightly");
+    expect(s.getWebhookSecret("whref_nightly")).toEqual(replacement);
+    expect(s.getWebhookSecret("missing")).toBeNull();
+  });
+});
+
 describe("redaction at the persistence boundary", () => {
   test("credentials in an update payload never reach sqlite", () => {
     const s = fresh();

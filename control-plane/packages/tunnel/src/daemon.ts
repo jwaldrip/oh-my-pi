@@ -24,6 +24,7 @@
  */
 
 import { SealedChannel } from "./channel.ts";
+import { toBase64Url } from "./bytes.ts";
 import {
   answerClientHandshake,
   type ClientCredential,
@@ -91,6 +92,22 @@ export interface SessionEvent {
   reason?: string;
 }
 
+/** A raw webhook relayed from the public hub to this daemon only. */
+export interface WebhookRequest {
+  requestId: string;
+  routineId: string;
+  secret: string;
+  body: string;
+  contentType?: string;
+}
+
+/** The daemon gateway's response to one relayed webhook. */
+export interface WebhookResponse {
+  status: number;
+  body: string;
+  contentType?: string;
+}
+
 export interface TunnelDaemonOptions {
   hubUrl: string;
   identity: DaemonKeyPair;
@@ -102,6 +119,7 @@ export interface TunnelDaemonOptions {
   onRegistered?: (instanceId: string) => void;
   onRefused?: (code: RefusalCode, message: string) => void;
   onSession?: (event: SessionEvent) => void;
+  onWebhook?: (request: WebhookRequest) => Promise<WebhookResponse>;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
   random?: () => number;
 }
@@ -128,6 +146,7 @@ export class TunnelDaemon {
   readonly #onRegistered: ((instanceId: string) => void) | undefined;
   readonly #onRefused: ((code: RefusalCode, message: string) => void) | undefined;
   readonly #onSession: TunnelDaemonOptions["onSession"];
+  readonly #onWebhook: ((request: WebhookRequest) => Promise<WebhookResponse>) | undefined;
   readonly #schedule: (fn: () => void, ms: number) => { cancel(): void };
   readonly #random: () => number;
 
@@ -149,6 +168,7 @@ export class TunnelDaemon {
     this.#onRegistered = opts.onRegistered;
     this.#onRefused = opts.onRefused;
     this.#onSession = opts.onSession;
+    this.#onWebhook = opts.onWebhook;
     this.#random = opts.random ?? Math.random;
     this.#schedule =
       opts.schedule ??
@@ -253,6 +273,9 @@ export class TunnelDaemon {
       case "ping":
         this.#send({ t: "pong" });
         return;
+      case "webhook_request":
+        await this.#onWebhookRequest(frame);
+        return;
     }
   }
 
@@ -272,6 +295,45 @@ export class TunnelDaemon {
     });
   }
 
+
+  async #onWebhookRequest(frame: Extract<HubToDaemon, { t: "webhook_request" }>): Promise<void> {
+    const handler = this.#onWebhook;
+    if (handler === undefined) {
+      this.#send({
+        t: "webhook_response",
+        requestId: frame.requestId,
+        status: 503,
+        body: toBase64Url(new TextEncoder().encode(JSON.stringify({ error: "webhooks_unavailable" }))),
+        contentType: "application/json",
+      });
+      return;
+    }
+
+    try {
+      const response = await handler({
+        requestId: frame.requestId,
+        routineId: frame.routineId,
+        secret: frame.secret,
+        body: frame.body,
+        contentType: frame.contentType,
+      });
+      this.#send({
+        t: "webhook_response",
+        requestId: frame.requestId,
+        status: response.status,
+        body: response.body,
+        contentType: response.contentType,
+      });
+    } catch {
+      this.#send({
+        t: "webhook_response",
+        requestId: frame.requestId,
+        status: 500,
+        body: toBase64Url(new TextEncoder().encode(JSON.stringify({ error: "webhook_failed" }))),
+        contentType: "application/json",
+      });
+    }
+  }
   async #onData(frame: Extract<HubToDaemon, { t: "data" }>): Promise<void> {
     const session = this.#sessions.get(frame.sessionId);
     if (!session) return;
