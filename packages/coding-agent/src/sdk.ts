@@ -519,8 +519,6 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
-	/** Human-readable subagent assignment shown in Agent Hub. */
-	taskTitle?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/**
@@ -3030,14 +3028,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
-			history:
-				agentKind === "sub"
-					? {
-							taskTitle: options.taskTitle,
-							resolvedModel: options.model ? formatModelStringWithRouting(options.model) : undefined,
-							metrics: { tokens: 0, requests: 0, tools: 0, cost: 0, durationMs: 0 },
-						}
-					: undefined,
 		};
 		registeredAgentRef =
 			options.expectedAgentRef === undefined

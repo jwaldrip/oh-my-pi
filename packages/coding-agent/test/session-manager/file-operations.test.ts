@@ -401,7 +401,7 @@ describe("SessionManager legacy session migration persistence", () => {
 		expect(persistedEntries[1].id).toBeDefined();
 		expect(persistedEntries[1].parentId).toBeNull();
 	});
-	it("keeps the last non-empty session resumable after starting a fresh session", async () => {
+	it("honors the /new boundary when continuing recent after starting a fresh session", async () => {
 		const session = SessionManager.create(tempDir, tempDir);
 		session.appendMessage({ role: "user", content: "hello", timestamp: Date.now() - 1 });
 		session.appendMessage(makeAssistantMessage());
@@ -416,7 +416,8 @@ describe("SessionManager legacy session migration persistence", () => {
 
 		const resumed = await SessionManager.continueRecent(tempDir, tempDir);
 		try {
-			expect(resumed.getSessionFile()).toBe(previousSessionFile);
+			expect(resumed.getSessionFile()).not.toBe(previousSessionFile);
+			expect(resumed.getEntries()).toHaveLength(0);
 		} finally {
 			await resumed.close();
 			await session.close();

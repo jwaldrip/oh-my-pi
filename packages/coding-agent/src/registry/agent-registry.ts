@@ -54,8 +54,6 @@ export interface AgentMetricsSummary {
 /** Historical identity and telemetry that remain available after the live session is disposed. */
 export interface AgentHistorySummary {
 	agent?: string;
-	/** The subagent assignment, separate from its registry/display name. */
-	taskTitle?: string;
 	modelRole?: string;
 	resolvedModel?: string;
 	/** Whether the last resolved model was selected by retry fallback routing. */

@@ -87,7 +87,6 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
-import { AgentRegistry, AgentRegistryAcpBridge } from "./agent-registry-events";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -481,7 +480,6 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
-	#agentRegistryBridge: AgentRegistryAcpBridge | undefined;
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -496,10 +494,6 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
-		this.#agentRegistryBridge ??= new AgentRegistryAcpBridge(AgentRegistry.global(), agents =>
-			this.#connection.notify("notifications/agent_registry", { agents }),
-		);
-		this.#agentRegistryBridge.publish();
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -2603,8 +2597,6 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#disposePromise = (async () => {
-			this.#agentRegistryBridge?.dispose();
-			this.#agentRegistryBridge = undefined;
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
 			await Promise.all(
