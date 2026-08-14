@@ -11,8 +11,9 @@ import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "rea
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { webViewCapability } from "../browser";
 import type { WebViewTarget } from "../console/webview.ts";
-import type { Agent, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
+import type { Agent, ApprovalChoice, ApprovalScope, PlanReviewChoice } from "@ompd/core/contracts";
 import { Composer } from "../components/Composer.tsx";
+import { PlanCard } from "../components/PlanCard.tsx";
 import { StatusReadout } from "../components/StatusReadout.tsx";
 import { Transcript } from "../components/Transcript.tsx";
 import { elapsed, shortenPath } from "../design/format.ts";
@@ -39,6 +40,7 @@ export interface SessionScreenProps {
   onSubmit: (text: string) => void;
   onCancel: () => void;
   onDecide: (requestId: string, choice: ApprovalChoice, scope?: ApprovalScope) => void;
+  onDecidePlan: (requestId: string, choice: PlanReviewChoice, feedback?: string) => void;
   /**
    * Offer this screen's WebView as the agent's action target. Called when the
    * operator opens the browser pane and again after a remount; the daemon
@@ -139,6 +141,14 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
           </Pressable>
         )}
       </View>
+
+      <PlanCard
+        canApprove={props.canApprove}
+        onRespond={props.onDecidePlan}
+        plan={session.plan}
+        refusal={props.refusal}
+        review={session.planReview}
+      />
 
       <Transcript
         entries={session.entries}

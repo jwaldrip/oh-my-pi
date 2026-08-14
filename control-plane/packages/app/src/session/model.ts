@@ -17,7 +17,7 @@
  * is owed the truth that something happened, even when we cannot name it.
  */
 
-import type { ApprovalChoice } from "@ompd/core/contracts";
+import type { ApprovalChoice, PlanReviewChoice } from "@ompd/core/contracts";
 
 // ---------------------------------------------------------------------------
 // State
@@ -34,6 +34,12 @@ export interface PlanEntry {
   content: string;
   priority: string;
   status: PlanStatus;
+}
+
+export interface PlanReview {
+  requestId: string;
+  message: string;
+  choices: readonly PlanReviewChoice[];
 }
 
 export interface Usage {
@@ -128,6 +134,8 @@ export type Entry = UserEntry | AssistantEntry | ToolEntry | ApprovalEntry | Unk
 export interface SessionState {
   readonly entries: readonly Entry[];
   readonly plan: readonly PlanEntry[];
+  /** Present while ACP waits for the operator to review the current plan. */
+  readonly planReview: PlanReview | null;
   readonly usage: Usage | null;
   /** Command names, in the order the agent advertised them. */
   readonly commands: readonly string[];
@@ -146,6 +154,7 @@ const EMPTY_ACTIVITY: Activity = { tools: 0, running: 0, failed: 0 };
 export const EMPTY_SESSION: SessionState = {
   entries: [],
   plan: [],
+  planReview: null,
   usage: null,
   commands: [],
   commandDetails: new Map(),
@@ -526,6 +535,16 @@ export function appendApproval(state: SessionState, approval: Approval): Session
     pendingApprovals: [...state.pendingApprovals, approval],
     ordinal: state.ordinal + 1,
   };
+}
+
+export function setPlanReview(state: SessionState, review: PlanReview): SessionState {
+  if (state.planReview?.requestId === review.requestId) return state;
+  return { ...state, planReview: review };
+}
+
+export function resolvePlanReview(state: SessionState, requestId: string): SessionState {
+  if (state.planReview?.requestId !== requestId) return state;
+  return { ...state, planReview: null };
 }
 
 /** Settles a clearance. The card stays, showing what was decided. */

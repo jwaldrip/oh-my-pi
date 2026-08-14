@@ -38,6 +38,8 @@ import {
   type Policy,
   type PolicyDecision,
   type Store,
+  type PlanReviewChoice,
+  type PlanReviewRequest,
 } from "@ompd/core";
 import type { HostHandle, Provisioner } from "./provisioner/types.ts";
 
@@ -58,6 +60,10 @@ export interface PendingApproval {
   resolve: (choice: { choice: "allow" | "deny"; scope?: "once" | "always"; actor: Actor }) => void;
 }
 
+export interface PendingPlanReview extends PlanReviewRequest {
+  resolve: (choice: PlanReviewChoice) => void;
+}
+
 interface GateResult {
   option: AcpOptionId;
   reason: string;
@@ -67,6 +73,7 @@ export interface SupervisorEvents {
   onUpdate?: (agentId: AgentId, seq: number, update: unknown) => void;
   onAgentsChanged?: (agents: Agent[]) => void;
   onApprovalNeeded?: (p: Omit<PendingApproval, "resolve">) => void;
+  onPlanReviewNeeded?: (p: Omit<PendingPlanReview, "resolve">) => void;
 }
 
 export interface SupervisorOptions {
@@ -217,6 +224,7 @@ export class Supervisor {
   /** ACP session id -> agentId, for routing session/update. */
   #sessionAgent = new Map<string, AgentId>();
   #pending = new Map<string, PendingApproval>();
+  #pendingPlanReviews = new Map<string, PendingPlanReview>();
 
   constructor(opts: SupervisorOptions) {
     this.#store = opts.store;
@@ -282,6 +290,35 @@ export class Supervisor {
 
   pendingApprovals(): Array<Omit<PendingApproval, "resolve">> {
     return [...this.#pending.values()].map(({ resolve: _resolve, ...rest }) => rest);
+  }
+
+  pendingPlanReviews(): Array<Omit<PendingPlanReview, "resolve">> {
+    return [...this.#pendingPlanReviews.values()].map(({ resolve: _resolve, ...rest }) => rest);
+  }
+
+  /**
+   * Answer a plan elicitation. Plan execution is operator-controlled, so this
+   * uses the same approve scope as a tool clearance and never trusts a frame's
+   * claimed device scopes.
+   */
+  decidePlan(requestId: string, choice: PlanReviewChoice, actor: Actor): boolean {
+    let who: Actor;
+    try {
+      who = this.#authorize(actor, SCOPE_APPROVE, "plan.decide");
+    } catch {
+      return false;
+    }
+    const pending = this.#pendingPlanReviews.get(requestId);
+    if (!pending || !pending.choices.includes(choice)) return false;
+    pending.resolve(choice);
+    this.#store.audit({
+      action: "approval.decide",
+      agentId: pending.agentId,
+      actorDeviceId: who.deviceId,
+      outcome: choice === PLAN_APPROVAL_CHOICES[0] ? "ok" : "denied",
+      detail: { requestId, plan: true, choice },
+    });
+    return true;
   }
 
   // -- lifecycle -----------------------------------------------------------
@@ -575,12 +612,8 @@ export class Supervisor {
       return await this.#gateElicitedToolCall(agentId, agent, req);
     }
 
-    // The one compatibility case. Before the client advertised elicitation,
-    // the host could not ask this and took the plan as approved. Declining now
-    // would silently stop plan mode working, and the plan itself mutates
-    // nothing: every tool call it leads to is gated on its own.
     if (offered === PLAN_APPROVAL_KEY && req.message.startsWith(PLAN_APPROVAL_PREFIX)) {
-      return { action: "accept", value: PLAN_APPROVAL_CHOICES[0] };
+      return await this.#requestPlanReview(agentId, req);
     }
 
     // Everything else: extension prompts, free text, confirmations. Declining
@@ -589,6 +622,40 @@ export class Supervisor {
     // invented for a question ompd does not understand.
     this.#onLog?.(`elicitation declined, unrecognised choices: ${JSON.stringify(req.enumValues)}`);
     return { action: "decline" };
+  }
+
+  /**
+   * A plan is not a tool clearance. Its ACP response must be one of the
+   * offered enum values, and an unanswered review must never turn into an
+   * implicit approval.
+   */
+  async #requestPlanReview(agentId: AgentId, req: ElicitationRequest): Promise<ElicitationOutcome> {
+    const requestId = `pln_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const choice = await new Promise<PlanReviewChoice | null>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#pendingPlanReviews.delete(requestId);
+        resolve(null);
+      }, this.#approvalTimeout);
+      const pending: PendingPlanReview = {
+        requestId,
+        agentId,
+        message: req.message,
+        choices: PLAN_APPROVAL_CHOICES,
+        resolve: (selected) => {
+          clearTimeout(timer);
+          this.#pendingPlanReviews.delete(requestId);
+          resolve(selected);
+        },
+      };
+      this.#pendingPlanReviews.set(requestId, pending);
+      this.#events.onPlanReviewNeeded?.({
+        requestId: pending.requestId,
+        agentId: pending.agentId,
+        message: pending.message,
+        choices: pending.choices,
+      });
+    });
+    return choice === null ? { action: "decline" } : { action: "accept", value: choice };
   }
 
   async #gateElicitedToolCall(
