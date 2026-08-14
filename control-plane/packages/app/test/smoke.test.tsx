@@ -120,6 +120,7 @@ describe("the transcript renders from canned frames", () => {
       onSubmit={() => {}}
       onCancel={() => {}}
       onDecide={() => {}}
+      onDecidePlan={() => {}}
       now={NOW}
     />,
   );
@@ -193,6 +194,7 @@ describe("the transcript renders from canned frames", () => {
         onSubmit={() => {}}
         onCancel={() => {}}
         onDecide={() => {}}
+        onDecidePlan={() => {}}
         now={NOW}
       />,
     );
@@ -214,6 +216,7 @@ describe("the transcript renders from canned frames", () => {
         onSubmit={() => {}}
         onCancel={() => {}}
         onDecide={() => {}}
+        onDecidePlan={() => {}}
         now={NOW}
       />,
     );
@@ -237,6 +240,7 @@ describe("the transcript renders from canned frames", () => {
         onSubmit={() => {}}
         onCancel={() => {}}
         onDecide={() => {}}
+        onDecidePlan={() => {}}
         now={NOW}
       />,
     );

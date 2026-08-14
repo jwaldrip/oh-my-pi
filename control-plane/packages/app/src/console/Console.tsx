@@ -119,6 +119,9 @@ export function Console({
         onDecide={(requestId, choice, scope) => {
           actions.decide(agent.id, requestId, choice, scope);
         }}
+        onDecidePlan={(requestId, choice) => {
+          actions.decidePlan(agent.id, requestId, choice);
+        }}
         onMountWebView={(target) => {
           actions.mountWebView(agent.id, target);
         }}

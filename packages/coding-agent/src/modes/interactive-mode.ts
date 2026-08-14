@@ -223,6 +223,14 @@ import type {
 } from "./types";
 import { UiHelpers } from "./utils/ui-helpers";
 
+/** The input loop exits without disposing its live session after remote takeover. */
+export class RemoteTuiTakeoverError extends Error {
+	constructor() {
+		super("TUI ownership transferred to ompd");
+		this.name = "RemoteTuiTakeoverError";
+	}
+}
+
 const STILL_CLOSING_DELAY_MS = 3_000;
 
 const HINT_SHIMMER_PALETTE: ShimmerPalette = {
@@ -593,6 +601,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *  abort the remaining work instead of stacking another no-op call. */
 	get isShuttingDown(): boolean {
 		return this.#isShuttingDown;
+	}
+	#remoteTuiOwnership = false;
+	#pendingInputReject: ((error: Error) => void) | undefined;
+	get isRemotelyControlled(): boolean {
+		return this.#remoteTuiOwnership;
 	}
 	hookSelector: HookSelectorComponent | undefined = undefined;
 	hookInput: HookInputComponent | undefined = undefined;
@@ -1388,19 +1401,29 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
+		if (this.#remoteTuiOwnership) throw new RemoteTuiTakeoverError();
 		if (this.session.getGoalModeState()?.mode === "exiting") {
 			await this.#exitGoalMode({ reason: "completed", silent: true });
 		}
-		const { promise, resolve } = Promise.withResolvers<SubmittedUserInput>();
-		this.onInputCallback = input => {
+		const { promise, resolve, reject } = Promise.withResolvers<SubmittedUserInput>();
+		const onInput = (input: SubmittedUserInput) => {
+			if (this.onInputCallback !== onInput) return;
 			this.onInputCallback = undefined;
+			this.#pendingInputReject = undefined;
 			resolve(input);
 		};
+		this.onInputCallback = onInput;
+		this.#pendingInputReject = reject;
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
 		using _ = new EventLoopKeepalive();
-		return await promise;
+		try {
+			return await promise;
+		} finally {
+			if (this.onInputCallback === onInput) this.onInputCallback = undefined;
+			if (this.#pendingInputReject === reject) this.#pendingInputReject = undefined;
+		}
 	}
 
 	#scheduleLoopAutoSubmit(): void {
@@ -4085,6 +4108,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
 		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
 		return choice === "Yes";
+	}
+
+	/**
+	 * Release terminal and renderer ownership after ompd has requested takeover.
+	 *
+	 * `stop()` tears down UI subscriptions and render timers but leaves the
+	 * AgentSession intact; only `shutdown()` disposes that session. This gives
+	 * the in-process ACP server the one existing writer, never a reopened JSONL.
+	 */
+	transferUiOwnershipToRemote(): void {
+		if (this.#remoteTuiOwnership) return;
+		this.#remoteTuiOwnership = true;
+		this.onInputCallback = undefined;
+		this.#pendingInputReject?.(new RemoteTuiTakeoverError());
+		this.#pendingInputReject = undefined;
+		disposeTerminalTitleState();
+		popTerminalTitle();
+		this.stop();
 	}
 
 	stop(): void {

@@ -78,6 +78,7 @@ function mountScreen(): Harness {
           onSubmit={() => {}}
           onCancel={() => {}}
           onDecide={() => {}}
+          onDecidePlan={() => {}}
           // Fresh closures every render, exactly as `Console` builds them.
           onMountWebView={() => {
             calls.push("mount");

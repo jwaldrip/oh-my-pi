@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useReducer, useRef } from "react";
 import { AppState } from "react-native";
-import type { AgentId, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
+import type { AgentId, ApprovalChoice, ApprovalScope, PlanReviewChoice } from "@ompd/core/contracts";
 import { OmpdClient } from "@ompd/core/ompd-client";
 import type { Connection } from "../platform/connection.ts";
 import { createHubSocketFactory } from "../platform/socket.ts";
@@ -26,6 +26,7 @@ export interface ConsoleActions {
   prompt: (agentId: AgentId, text: string) => void;
   cancel: (agentId: AgentId) => void;
   decide: (agentId: AgentId, requestId: string, choice: ApprovalChoice, scope?: ApprovalScope) => void;
+  decidePlan: (agentId: AgentId, requestId: string, choice: PlanReviewChoice) => void;
   dismiss: () => void;
   /** Offer a mounted WebView as this agent's action target. */
   mountWebView: (agentId: AgentId, target: WebViewTarget) => void;
@@ -92,6 +93,9 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
       client.on("approval", (event) => {
         dispatch({ t: "approval", event });
       }),
+      client.on("plan_review", (event) => {
+        dispatch({ t: "plan_review", event });
+      }),
       client.on("error", (event) => {
         dispatch({ t: "error", event });
       }),
@@ -150,6 +154,10 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
       decide(agentId, requestId, choice, scope) {
         client.decide(agentId, requestId, choice, scope);
         dispatch({ t: "decide", agentId, requestId, choice });
+      },
+      decidePlan(agentId, requestId, choice) {
+        client.decidePlan(agentId, requestId, choice);
+        dispatch({ t: "plan_decide", agentId, requestId, choice });
       },
       dismiss() {
         dispatch({ t: "dismiss" });
