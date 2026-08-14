@@ -2851,7 +2851,7 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 
 		const server = Bun.serve({
 			port: 0,
-			fetch: async (req) => {
+			fetch: async req => {
 				// Minimal Streamable-HTTP MCP surface: initialize and tools/list.
 				// Enough for MCPManager to finish connecting without a real tool body.
 				if (req.method === "POST") {

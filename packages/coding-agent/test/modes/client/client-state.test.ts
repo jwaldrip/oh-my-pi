@@ -213,7 +213,11 @@ describe("reduceClientState: approvals", () => {
 
 describe("reduceClientState: status and error", () => {
 	test("status transitions record the connection state and an optional reason", () => {
-		const state = reduceClientState(createClientState(), { type: "status", status: "reconnecting", reason: "ping timeout" });
+		const state = reduceClientState(createClientState(), {
+			type: "status",
+			status: "reconnecting",
+			reason: "ping timeout",
+		});
 		expect(state.status).toBe("reconnecting");
 		expect(state.statusReason).toBe("ping timeout");
 	});
