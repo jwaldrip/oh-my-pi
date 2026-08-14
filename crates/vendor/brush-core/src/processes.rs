@@ -99,6 +99,17 @@ impl ChildProcess {
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigchld = sys::signal::chld_signal_listener()?;
 
+		// A child can stop (e.g. via `kill -STOP $$`) and deliver its SIGCHLD
+		// before the listeners above are registered, especially under CPU
+		// contention where scheduling this task lags the child's own fork+exec.
+		// Signal delivery is edge-triggered and that SIGCHLD is lost forever,
+		// but the kernel's stopped-child state is still level-queryable via
+		// `waitid`, so check for it once up front instead of only reacting to
+		// a future signal that may never arrive.
+		if self.already_stopped()? {
+			return Ok(ProcessWaitResult::Stopped);
+		}
+
 		let cancelled = async {
 			match &cancel_token {
 				Some(token) => token.cancelled().await,
@@ -126,7 +137,7 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Stopped)
 				},
 				_ = sigchld.recv() => {
-					if sys::signal::poll_for_stopped_children()? {
+					if self.already_stopped()? {
 						break Ok(ProcessWaitResult::Stopped);
 					}
 				},
@@ -136,6 +147,19 @@ impl ChildProcess {
 					// terminated (in which case we'll see the child exit).
 				},
 			}
+		}
+	}
+
+	/// Returns whether this specific child has already stopped, without
+	/// waiting for a future signal. Scoped to `self.pid` so a concurrently
+	/// stopped, unrelated sibling process can never be mistaken for this one
+	/// having stopped; if the pid isn't known, conservatively reports `false`
+	/// rather than falling back to a process-wide (and thus mis-attributable)
+	/// scan.
+	fn already_stopped(&self) -> Result<bool, error::Error> {
+		match self.pid {
+			Some(pid) => sys::signal::poll_for_stopped_child(pid),
+			None => Ok(false),
 		}
 	}
 
