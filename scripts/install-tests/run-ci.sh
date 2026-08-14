@@ -182,10 +182,13 @@ core_tgz="$(find_tarball "$TARBALL_DIR"/ompd-core-*.tgz)"
 coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-coding-agent-*.tgz)"
 collab_web_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-collab-web-*.tgz)"
 
+# `workspace:*` is resolved to the concrete release version in the packed
+# manifest. Keep this assertion so an unresolved workspace protocol cannot
+# send an isolated install to the npm registry.
 core_version="$(jq -er '.version' "$ROOT_DIR/control-plane/packages/core/package.json")"
 coding_agent_core_dependency="$(tar -xOf "$coding_agent_tgz" package/package.json | jq -er '.dependencies["@ompd/core"]')"
-if [ "$coding_agent_core_dependency" != "^$core_version" ]; then
-   echo "Packed coding-agent must depend on @ompd/core as ^$core_version, got: $coding_agent_core_dependency" >&2
+if [ "$coding_agent_core_dependency" != "$core_version" ]; then
+   echo "Packed coding-agent must depend on @ompd/core as $core_version, got: $coding_agent_core_dependency" >&2
    exit 1
 fi
 
