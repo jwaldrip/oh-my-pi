@@ -87,8 +87,8 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
-import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 import { AgentRegistry, AgentRegistryAcpBridge } from "./agent-registry-events";
+import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
 const ACP_PLAN_MODE_ID = "plan";
@@ -496,9 +496,8 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
-		this.#agentRegistryBridge ??= new AgentRegistryAcpBridge(
-			AgentRegistry.global(),
-			(agents) => this.#connection.notify("notifications/agent_registry", { agents }),
+		this.#agentRegistryBridge ??= new AgentRegistryAcpBridge(AgentRegistry.global(), agents =>
+			this.#connection.notify("notifications/agent_registry", { agents }),
 		);
 		this.#agentRegistryBridge.publish();
 		const authMethods: AuthMethod[] = [

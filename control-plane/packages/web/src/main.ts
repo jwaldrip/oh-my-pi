@@ -428,7 +428,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
     const previous = new Map(agentsById);
     agentsById.clear();
     for (const agent of event.agents) agentsById.set(agent.id, agent);
-    agentHub.render(event.agents);
+    agentHub.render(event.agents.filter((agent) => agent.parentAgentId !== undefined));
     bay.render(event.agents.filter((agent) => agent.parentAgentId === undefined));
 
     for (const agent of event.agents) {

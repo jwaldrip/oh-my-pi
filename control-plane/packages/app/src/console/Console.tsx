@@ -67,7 +67,7 @@ export function Console({
 
   const bay = (
     <View style={split ? styles.splitBay : styles.bay}>
-      <AgentHub agents={state.agents} />
+      <AgentHub agents={state.agents.filter((candidate) => candidate.parentAgentId !== undefined)} />
       <View style={styles.fleet}>
         <FleetScreen
           browser={browser}

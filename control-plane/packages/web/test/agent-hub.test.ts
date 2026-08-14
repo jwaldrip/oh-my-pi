@@ -32,6 +32,16 @@ describe("web Agent Hub hierarchy", () => {
     expect(tree[0]?.children[0]?.children[0]?.agent.id).toBe("review");
   });
 
+  test("callers exclude the main agent so it is not duplicated with the Bay strip", () => {
+    // The exact filter main.ts applies before calling agentHub.render(...).
+    const roster = [agent("root"), agent("scout", "root"), agent("review", "scout")];
+    const subagentsOnly = roster.filter((candidate) => candidate.parentAgentId !== undefined);
+    const tree = agentHubTree(subagentsOnly);
+
+    expect(tree.map((node) => node.agent.id)).toEqual(["scout"]);
+    expect(tree[0]?.children[0]?.agent.id).toBe("review");
+  });
+
   test("does not recurse through a cyclic lineage", () => {
     const tree = agentHubTree([agent("a", "b"), agent("b", "a")]);
     expect(tree.map((node) => node.agent.id).sort()).toEqual(["a", "b"]);

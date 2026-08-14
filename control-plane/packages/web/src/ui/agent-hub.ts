@@ -58,10 +58,15 @@ function createsCycle(
   return false;
 }
 
+/**
+ * `render` expects subagents only. The main agent is not shown, matching
+ * OMP's own Agent Hub convention (`docs/agent-hub.md`): its conversation is
+ * the ambient session view, already on screen as the top-level Bay strip.
+ */
 export function createAgentHub(): AgentHubView {
   const count = el("span", { class: "agent-hub-count", text: "0" });
   const list = el("ol", { class: "agent-hub-tree", attrs: { "aria-label": "Agent hierarchy" } });
-  const empty = el("p", { class: "agent-hub-empty", text: "No agents connected." });
+  const empty = el("p", { class: "agent-hub-empty", text: "No subagents." });
   const element = el("section", {
     class: "agent-hub",
     attrs: { "aria-label": "Agent Hub" },

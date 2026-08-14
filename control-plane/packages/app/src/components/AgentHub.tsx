@@ -40,6 +40,11 @@ export function agentHubTree(agents: readonly Agent[]): AgentHubNode[] {
 }
 
 export interface AgentHubProps {
+  /**
+   * Subagents only. The main agent is not listed here, matching OMP's own
+   * Agent Hub convention (`docs/agent-hub.md`): its conversation is the
+   * ambient session view, already on screen as the top-level Fleet row.
+   */
   agents: readonly Agent[];
   /** A fixed clock makes runtime output deterministic for callers and tests. */
   now?: number;
@@ -72,7 +77,7 @@ export function AgentHub({ agents, now = Date.now(), testID = "agent-hub" }: Age
       </View>
       {tree.length === 0 ? (
         <Body color={ink.muted} testID="agent-hub-empty">
-          No agents connected.
+          No subagents.
         </Body>
       ) : (
         tree.map((node) => <AgentHubBranch key={node.agent.id} node={node} depth={0} now={now} />)
