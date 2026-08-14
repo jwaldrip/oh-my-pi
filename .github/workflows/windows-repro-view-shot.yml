@@ -2,14 +2,19 @@ name: Windows minimal repro - react-native-view-shot New Architecture
 
 # Isolated proof, tracked separately from the app's own CI: generates a fresh
 # React Native Windows 0.81 New Architecture app via the official RNW
-# generator (`react-native-windows-init`, not this repo's customized `ompd`
-# scaffold) with react-native-view-shot as its only third-party native
-# dependency, then builds it. See PR #8 and
+# generator (`@react-native-community/cli init-windows`, not this repo's
+# customized `ompd` scaffold) with react-native-view-shot as its only
+# third-party native dependency, then builds it. See PR #8 and
 # `.github/workflows/windows-build.yml` for context: react-native-view-shot
 # has no New Architecture (Fabric) Windows implementation in any published
 # version (checked through 5.1.1) or on its GitHub `master` branch. This
 # workflow proves that in complete isolation from this repo's own build
 # configuration and toolchain overrides.
+#
+# Note: the standalone `react-native-windows-init` package only supports
+# react-native-windows <= 0.75; RNW 0.76+ projects add the platform via
+# `npm install react-native-windows` followed by `init-windows` from
+# `@react-native-community/cli`, which is how this workflow does it.
 #
 # Temporary: remove the `push` trigger (and this file) once the finding is
 # confirmed and recorded on the PR; `workflow_dispatch` alone cannot be
@@ -45,11 +50,16 @@ jobs:
         working-directory: ReproApp
         run: |
           npm install
+      - name: Install react-native-windows
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npm install --save-exact react-native-windows@0.81.30
       - name: Generate the React Native Windows project via the official generator
         shell: pwsh
         working-directory: ReproApp
         run: |
-          npx --yes react-native-windows-init@0.81.6 --version 0.81.30 --language cpp --overwrite --no-telemetry
+          npx --yes @react-native-community/cli init-windows --template cpp-app --overwrite
       - name: Assert the generated project is New Architecture (RnwNewArch=true)
         shell: pwsh
         working-directory: ReproApp
