@@ -7,7 +7,7 @@
  * are played one at a time in that sequence.
  */
 
-import type { CollabVoiceFrame, CollabVoiceNoteFrame } from "@ompd/core";
+import type { CollabVoiceFrame, CollabVoiceNoteFrame } from "@ompd/core/contracts";
 
 export interface CollabAudioPlayer {
   play(frame: CollabVoiceNoteFrame): Promise<void>;

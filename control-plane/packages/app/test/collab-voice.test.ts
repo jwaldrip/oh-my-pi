@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { CollabVoiceFrame, CollabVoiceNoteFrame } from "@ompd/core";
+import type { CollabVoiceFrame, CollabVoiceNoteFrame } from "@ompd/core/contracts";
 import { CollabVoiceQueue, type CollabAudioPlayer } from "../src/voice/collab-voice.ts";
 
 const ROOM_ID = "room_0123456789";
