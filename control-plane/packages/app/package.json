@@ -11,7 +11,7 @@
     "web": "vite",
     "build:web": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
-    "test": "bun test --preload ./test/preload-react.ts test/",
+    "test": "bun test test/",
     "check": "bun ../../scripts/check-types.ts tsconfig.json tsconfig.test.json"
   },
   "dependencies": {

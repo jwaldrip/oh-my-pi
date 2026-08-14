@@ -16,18 +16,27 @@
 import { mock } from "bun:test";
 import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
+const appRequire = createRequire(import.meta.url);
+const workspaceRequire = createRequire(new URL("../../../../package.json", import.meta.url));
 
-// Resolve from this file's location (the app package), not from the workspace
-// root bun happened to start in.
-const react = require("react");
-const jsxRuntime = require("react/jsx-runtime");
-const jsxDevRuntime = require("react/jsx-dev-runtime");
-const reactDom = require("react-dom");
-const reactDomClient = require("react-dom/client");
+// App code is intentionally on RN's exact React 19.1.4, while the monorepo
+// catalog supplies React 19.2.7 for unrelated web packages. RNW is hoisted to
+// the workspace, so its own bare imports resolve there. Mock its resolved
+// module paths as well as app-facing specifiers to make the test renderer,
+// RNW, and app components use the native-compatible instance.
+const react = appRequire("react");
+const jsxRuntime = appRequire("react/jsx-runtime");
+const jsxDevRuntime = appRequire("react/jsx-dev-runtime");
+const reactDom = appRequire("react-dom");
+const reactDomClient = appRequire("react-dom/client");
 
-mock.module("react", () => react);
-mock.module("react/jsx-runtime", () => jsxRuntime);
-mock.module("react/jsx-dev-runtime", () => jsxDevRuntime);
-mock.module("react-dom", () => reactDom);
-mock.module("react-dom/client", () => reactDomClient);
+function mockAppAndWorkspace(specifier: string, value: Record<string, unknown>): void {
+  mock.module(specifier, () => value);
+  mock.module(workspaceRequire.resolve(specifier), () => ({ ...value, default: value }));
+}
+
+mockAppAndWorkspace("react", react);
+mockAppAndWorkspace("react/jsx-runtime", jsxRuntime);
+mockAppAndWorkspace("react/jsx-dev-runtime", jsxDevRuntime);
+mockAppAndWorkspace("react-dom", reactDom);
+mockAppAndWorkspace("react-dom/client", reactDomClient);
