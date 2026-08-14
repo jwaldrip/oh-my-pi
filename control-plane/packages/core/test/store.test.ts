@@ -348,3 +348,71 @@ describe("interrupted runs", () => {
     expect(s.failInterruptedRuns("the daemon exited again")).toBe(0);
   });
 });
+
+describe("queued intents", () => {
+  test("preserves deterministic FIFO order with equal created_at timestamps", () => {
+    const s = fresh();
+    const sameTime = "2026-08-14T12:00:00.000Z";
+    s.enqueueQueuedIntent({
+      id: "qi_1",
+      agentId: "agt_1",
+      actorDeviceId: "dev_1",
+      action: "prompt",
+      payload: { text: "first" },
+      createdAt: sameTime,
+    });
+    s.enqueueQueuedIntent({
+      id: "qi_2",
+      agentId: "agt_1",
+      actorDeviceId: "dev_1",
+      action: "prompt",
+      payload: { text: "second" },
+      createdAt: sameTime,
+    });
+    s.enqueueQueuedIntent({
+      id: "qi_3",
+      agentId: "agt_1",
+      actorDeviceId: "dev_1",
+      action: "prompt",
+      payload: { text: "third" },
+      createdAt: sameTime,
+    });
+
+    const pending = s.listPendingQueuedIntents();
+    expect(pending.map((intent) => intent.id)).toEqual(["qi_1", "qi_2", "qi_3"]);
+  });
+
+  test("claim transitions pending to claimed, and markDelivered requires claimed status", () => {
+    const s = fresh();
+    const at = "2026-08-14T12:00:00.000Z";
+    s.enqueueQueuedIntent({
+      id: "qi_claim_me",
+      agentId: "agt_1",
+      actorDeviceId: "dev_1",
+      action: "prompt",
+      payload: { text: "hello" },
+      createdAt: at,
+    });
+
+    // Acking an unclaimed (pending) intent does nothing -- pending rows remain pending
+    expect(s.markQueuedIntentsDelivered(["qi_claim_me"])).toBe(0);
+    expect(s.listPendingQueuedIntents().map((intent) => intent.id)).toEqual(["qi_claim_me"]);
+
+    // Atomic claim transitions to claimed
+    const claimed = s.claimQueuedIntent("qi_claim_me");
+    expect(claimed?.status).toBe("claimed");
+    expect(claimed?.id).toBe("qi_claim_me");
+
+    // Second claim fails
+    expect(s.claimQueuedIntent("qi_claim_me")).toBeNull();
+
+    // It is no longer returned in pending list
+    expect(s.listPendingQueuedIntents()).toEqual([]);
+
+    // Now markDelivered succeeds
+    expect(s.markQueuedIntentsDelivered(["qi_claim_me"])).toBe(1);
+
+    // Re-delivering already delivered row returns 0
+    expect(s.markQueuedIntentsDelivered(["qi_claim_me"])).toBe(0);
+  });
+});

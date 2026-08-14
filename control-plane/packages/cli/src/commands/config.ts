@@ -72,12 +72,12 @@ export async function configSetCommand(
   // plain string, so a typed value has to be built before `loadConfig` (which
   // only ever sees what a config file could already contain) can judge it.
   let value: unknown = cmd.value;
-  if (cmd.key === "port") {
+  if (cmd.key === "port" || cmd.key === "intentPollIntervalMs") {
     value = Number(cmd.value);
-    if (!Number.isInteger(value)) throw new UsageError(`port must be an integer, got ${cmd.value}`);
-  } else if (cmd.key === "keepAwake") {
+    if (!Number.isInteger(value)) throw new UsageError(`${cmd.key} must be an integer, got ${cmd.value}`);
+  } else if (cmd.key === "keepAwake" || cmd.key === "replica") {
     if (cmd.value !== "true" && cmd.value !== "false") {
-      throw new UsageError(`keepAwake must be true or false, got ${cmd.value}`);
+      throw new UsageError(`${cmd.key} must be true or false, got ${cmd.value}`);
     }
     value = cmd.value === "true";
   }

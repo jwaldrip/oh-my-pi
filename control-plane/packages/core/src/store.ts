@@ -19,6 +19,9 @@ import type {
   CollabVoiceNoteMetadata,
   CollabVoiceParticipant,
   Device,
+  QueuedIntent,
+  QueuedIntentAction,
+  QueuedIntentStatus,
   Routine,
   Run,
   Task,
@@ -97,6 +100,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_agent ON tasks(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_created ON tasks(created_at DESC);
+
+-- Writes received by a replica for a session it does not own. The replica
+-- stores durable intent only; a delegate is the sole process that executes it.
+CREATE TABLE IF NOT EXISTS queued_intents (
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, actor_device_id TEXT NOT NULL,
+  action TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL,
+  status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS queued_intents_pending
+  ON queued_intents(status, agent_id, created_at);
 
 -- Every OMP session ever written to ~/.omp/agent/sessions/, keyed by the
 -- session uuid parsed from its jsonl filename -- deliberately not by
@@ -180,6 +193,17 @@ interface TaskRow {
   updated_at: string;
   result: string | null;
   labels: string;
+}
+
+interface QueuedIntentRow {
+  seq: number;
+  id: string;
+  agent_id: string;
+  actor_device_id: string;
+  action: string;
+  payload: string;
+  created_at: string;
+  status: string;
 }
 
 export interface UpdateRecord {
@@ -763,6 +787,89 @@ export class Store {
     return rows.map(rowToTask);
   }
 
+  // -- Federation queued intents --------------------------------------------
+
+  /**
+   * Persist a replica's accepted write before reporting that it was queued.
+   * This is executable durable state, not an audit record: mutating text here
+   * would make the delegate execute something other than the accepted intent.
+   */
+  enqueueQueuedIntent(intent: Omit<QueuedIntent, "status" | "seq">): QueuedIntent {
+    const queued: QueuedIntent = { ...intent, status: "pending" };
+    const row = this.#db
+      .query(
+        `INSERT INTO queued_intents (id,agent_id,actor_device_id,action,payload,created_at,status)
+         VALUES (?,?,?,?,?,?,?)
+         RETURNING rowid as seq`,
+      )
+      .get(
+        queued.id,
+        queued.agentId,
+        queued.actorDeviceId,
+        queued.action,
+        JSON.stringify(queued.payload),
+        queued.createdAt,
+        queued.status,
+      ) as { seq: number };
+    return { ...queued, seq: row.seq };
+  }
+
+  /**
+   * Pending writes are oldest first with a deterministic sequence tie-breaker.
+   * A delegate may restrict the pull to agents it owns; an omitted filter also
+   * includes reserved `new-agent` intents, which no existing agent can name.
+   */
+  listPendingQueuedIntents(agentIds?: readonly AgentId[]): QueuedIntent[] {
+    if (agentIds?.length === 0) return [];
+
+    const rows =
+      agentIds === undefined
+        ? this.#db
+            .query(
+              `SELECT rowid as seq, id, agent_id, actor_device_id, action, payload, created_at, status
+               FROM queued_intents WHERE status='pending' ORDER BY created_at ASC, rowid ASC`,
+            )
+            .all()
+        : this.#db
+            .query(
+              `SELECT rowid as seq, id, agent_id, actor_device_id, action, payload, created_at, status
+               FROM queued_intents
+               WHERE status='pending' AND agent_id IN (${agentIds.map(() => "?").join(",")})
+               ORDER BY created_at ASC, rowid ASC`,
+            )
+            .all(...agentIds);
+    return (rows as QueuedIntentRow[]).map(rowToQueuedIntent);
+  }
+
+  /**
+   * Atomically transition a pending intent to claimed status before execution.
+   * If the intent is already claimed or delivered, returns null.
+   */
+  claimQueuedIntent(id: string): QueuedIntent | null {
+    const row = this.#db
+      .query(
+        `UPDATE queued_intents SET status='claimed'
+         WHERE id=? AND status='pending'
+         RETURNING rowid as seq, id, agent_id, actor_device_id, action, payload, created_at, status`,
+      )
+      .get(id) as QueuedIntentRow | null;
+    return row ? rowToQueuedIntent(row) : null;
+  }
+
+  /**
+   * Acking is idempotent and advances claimed rows to delivered.
+   * Pending rows cannot be marked delivered without first being claimed.
+   */
+  markQueuedIntentsDelivered(ids: readonly string[]): number {
+    if (ids.length === 0) return 0;
+    return this.#db
+      .query(
+        `UPDATE queued_intents SET status='delivered'
+         WHERE status='claimed' AND id IN (${ids.map(() => "?").join(",")})`,
+      )
+      .run(...ids).changes;
+  }
+
   // -- sessions --------------------------------------------------------------
   //
   // `SessionIndex` in @ompd/daemon owns building the full session catalog
@@ -1003,5 +1110,18 @@ function rowToTask(row: TaskRow): Task {
     updatedAt: row.updated_at,
     result: row.result ?? undefined,
     labels: JSON.parse(row.labels),
+  };
+}
+
+function rowToQueuedIntent(row: QueuedIntentRow): QueuedIntent {
+  return {
+    seq: row.seq,
+    id: row.id,
+    agentId: row.agent_id,
+    actorDeviceId: row.actor_device_id,
+    action: row.action as QueuedIntentAction,
+    payload: JSON.parse(row.payload),
+    createdAt: row.created_at,
+    status: row.status as QueuedIntentStatus,
   };
 }

@@ -35,6 +35,7 @@ import {
   type EndpointOffer,
   type HostSpec,
   type PersistCollabVoiceNoteInput,
+  type QueuedIntent,
   type Run,
   type ServerFrame,
   type SessionLiveStatus,
@@ -49,7 +50,13 @@ import {
 } from "@ompd/core";
 import type { SessionIndex } from "../sessions/session-index.ts";
 import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
-import { Supervisor, UnauthorizedError, type PendingApproval, type PendingPlanReview } from "../supervisor.ts";
+import {
+  createAgentId,
+  Supervisor,
+  UnauthorizedError,
+  type PendingApproval,
+  type PendingPlanReview,
+} from "../supervisor.ts";
 import { DeviceAuth, PairingBacklogError, PairingError } from "./auth.ts";
 import type { GatewayEvents } from "./events.ts";
 import { MODE_OPTION_ID, type SessionConfig } from "../hosts.ts";
@@ -261,9 +268,24 @@ export interface TaskCatalog {
   cancel(id: string, actor: Actor): Promise<Task>;
 }
 
+/**
+ * Replica-only write buffering and the credential a local delegate presents
+ * while pulling it. A non-replica can expose no queue and remains a normal
+ * direct-execution gateway.
+ */
+export interface FederationIntentQueue {
+  replica: boolean;
+  syncToken: string;
+}
+
 export interface GatewayOptions {
   supervisor: Supervisor;
   store: Store;
+  /**
+   * Set only on the cloud replica. The sync token serves `/v1/sync/intents`;
+   * it is deliberately distinct from paired-device bearer credentials.
+   */
+  federation?: FederationIntentQueue;
   /**
    * The same `GatewayEvents` instance handed to the supervisor as its event
    * sink. Without it the HTTP surface still works and the socket still accepts
@@ -472,6 +494,7 @@ export type TunnelSessionResult =
 export class Gateway {
   #sup: Supervisor;
   #store: Store;
+  #federation: FederationIntentQueue | undefined;
   #auth: DeviceAuth;
   #events: GatewayEvents | undefined;
   #host: string;
@@ -510,6 +533,8 @@ export class Gateway {
     this.#sup = opts.supervisor;
     this.#store = opts.store;
     this.#collab = new CollabRooms(this.#store);
+    if (opts.federation?.syncToken.trim() === "") throw new Error("federation sync token is required");
+    this.#federation = opts.federation;
     this.#auth = new DeviceAuth({ store: opts.store, pairingTtlMs: opts.pairingTtlMs });
     this.#events = opts.events;
     this.#host = opts.host ?? DEFAULT_HOST;
@@ -816,6 +841,72 @@ export class Gateway {
     this.#auth.revoke(deviceId);
   }
 
+  /**
+   * Agent ownership is a live supervisor binding. A mirrored row is readable
+   * through this gateway but cannot execute until its owning delegate pulls it.
+   */
+  #queuesForDelegate(agentId: AgentId): boolean {
+    return this.#federation?.replica === true && this.#store.getAgent(agentId) !== null && !this.#sup.ownsAgent(agentId);
+  }
+
+  #enqueueIntent(
+    agentId: AgentId,
+    actor: Actor,
+    action: QueuedIntent["action"],
+    payload: unknown,
+  ): QueuedIntent {
+    return this.#store.enqueueQueuedIntent({
+      id: `qi_${crypto.randomUUID().replace(/-/g, "")}`,
+      agentId,
+      actorDeviceId: actor.deviceId,
+      action,
+      payload,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  async #syncIntents(req: Request, path: string): Promise<Response> {
+    const federation = this.#federation;
+    if (federation === undefined) return Response.json({ error: "not_found" }, { status: 404 });
+    const header = req.headers.get("authorization");
+    if (header !== `Bearer ${federation.syncToken}`) {
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
+
+    if (path === "/v1/sync/intents" && req.method === "GET") {
+      return Response.json({ intents: this.#store.listPendingQueuedIntents() });
+    }
+    if (path === "/v1/sync/intents/claim" && req.method === "POST") {
+      let body: { id?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.id !== "string" || body.id.length === 0) {
+        return Response.json({ error: "id must be a non-empty string" }, { status: 400 });
+      }
+      const claimed = this.#store.claimQueuedIntent(body.id);
+      if (!claimed) {
+        return Response.json({ error: "not_pending" }, { status: 409 });
+      }
+      return Response.json({ ok: true, intent: claimed });
+    }
+    if (path === "/v1/sync/intents/ack" && req.method === "POST") {
+      let body: { ids?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (!Array.isArray(body.ids) || !body.ids.every((id) => typeof id === "string" && id.length > 0)) {
+        return Response.json({ error: "ids must be a non-empty string array" }, { status: 400 });
+      }
+      return Response.json({ delivered: this.#store.markQueuedIntentsDelivered(body.ids) });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
   // -- http ------------------------------------------------------------------
 
   async #fetch(req: Request, server: Server<SocketState>): Promise<Response | undefined> {
@@ -901,6 +992,14 @@ export class Gateway {
       return new Response("expected a websocket upgrade", { status: 426 });
     }
 
+    if (
+      path === "/v1/sync/intents" ||
+      path === "/v1/sync/intents/claim" ||
+      path === "/v1/sync/intents/ack"
+    ) {
+      return this.#syncIntents(req, path);
+    }
+
     const actor = bearer === null ? null : this.#auth.resolveActor(bearer);
     if (!actor) return Response.json({ error: "unauthorized" }, { status: 401 });
     const scopes = new Set(actor.scopes);
@@ -927,6 +1026,18 @@ export class Gateway {
       if (typeof body.name !== "string" || typeof body.cwd !== "string") {
         return Response.json({ error: "name and cwd are required" }, { status: 400 });
       }
+      if (this.#federation?.replica === true) {
+        const agentId = createAgentId();
+        const intent = this.#enqueueIntent(agentId, actor, "new-agent", {
+          name: body.name,
+          cwd: body.cwd,
+          host: body.host,
+          routineId: body.routineId,
+          labels: body.labels,
+        });
+        return Response.json({ intent }, { status: 202 });
+      }
+
       try {
         const agent = await this.#sup.createAgent(
           {
@@ -1041,6 +1152,12 @@ export class Gateway {
       }
       if (typeof body.text !== "string" || body.text.length === 0) {
         return Response.json({ error: "text is required" }, { status: 400 });
+      }
+
+      const agentId = promptRoute[1] ?? "";
+      if (this.#queuesForDelegate(agentId)) {
+        const intent = this.#enqueueIntent(agentId, actor, "prompt", { text: body.text });
+        return Response.json({ intent }, { status: 202 });
       }
 
       try {
@@ -1892,6 +2009,11 @@ export class Gateway {
         // Announced before it is sent, so whoever is tracking how a device is
         // talking to an agent learns it typed even if the prompt then fails.
         this.#onTextPrompt?.(frame.agentId, this.#actorOf(ws));
+        if (this.#queuesForDelegate(frame.agentId)) {
+          this.#enqueueIntent(frame.agentId, this.#actorOf(ws), "prompt", { text: frame.text });
+          return;
+        }
+
         // Deliberately not awaited: a turn outlives the frame that started it,
         // and the socket has to stay responsive to `cancel` while it runs.
         void this.#sup.prompt(frame.agentId, frame.text, this.#actorOf(ws)).catch((err: unknown) => {
@@ -1915,6 +2037,11 @@ export class Gateway {
           });
           return;
         }
+        if (this.#queuesForDelegate(frame.agentId)) {
+          this.#enqueueIntent(frame.agentId, this.#actorOf(ws), "cancel", {});
+          return;
+        }
+
         void this.#sup.cancel(frame.agentId, this.#actorOf(ws)).catch((err: unknown) => {
           this.#send(ws, {
             t: "error",
@@ -1947,6 +2074,24 @@ export class Gateway {
       }
 
       case "decide": {
+        if (!ws.data.scopes.has(SCOPE_APPROVE)) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unauthorized",
+            message: "decision requires approve scope",
+          });
+          return;
+        }
+        if (this.#queuesForDelegate(frame.agentId)) {
+          this.#enqueueIntent(frame.agentId, this.#actorOf(ws), "decide", {
+            requestId: frame.requestId,
+            choice: frame.choice,
+            scope: frame.scope ?? "once",
+          });
+          return;
+        }
+
         // The frame contributes a request id and a choice. Everything about who
         // is asking comes from the socket's resolved identity, and the
         // supervisor re-reads the device row before honouring any of it, so a
