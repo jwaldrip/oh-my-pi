@@ -12,6 +12,7 @@
  */
 
 import {
+  AcpClient,
   DEFAULT_PROMPT_TIMEOUT_MS,
   parseApprovalPrompt,
   spawnLocalHost,
@@ -138,6 +139,21 @@ export interface ResumeAgentInput {
   host?: HostSpec;
   routineId?: string;
   labels?: Record<string, string>;
+}
+
+/** The gateway's one-socket ACP transport to an already-running TUI. */
+export interface LiveTuiAcpTransport {
+  send(raw: string): void;
+  onMessage(listener: (raw: string) => void): void;
+  onClose(listener: () => void): void;
+  close(): void;
+}
+
+export interface TakeOverTuiSessionInput {
+  sessionId: string;
+  name: string;
+  cwd: string;
+  pid: number;
 }
 
 interface HostEntry {
@@ -334,6 +350,74 @@ export class Supervisor {
       await sessionEntry.host.client.loadSession(input.sessionId, input.cwd);
       return input.sessionId;
     });
+  }
+
+  /**
+   * Claim the ACP leg owned by one already-running TUI.
+   *
+   * The TUI created its AgentSession before the daemon was involved. `loadSession`
+   * is therefore an in-process adoption by the ACP server, not a second OMP
+   * process reopening that session's JSONL.
+   */
+  async takeOverTuiSession(
+    input: TakeOverTuiSessionInput,
+    transport: LiveTuiAcpTransport,
+    actor: Actor,
+  ): Promise<Agent> {
+    const who = this.#authorize(actor, SCOPE_MANAGE, "agent.takeover");
+    const heldBy = this.#sessionAgent.get(input.sessionId);
+    if (heldBy) throw new Error(`session ${input.sessionId} is already held by agent ${heldBy}`);
+
+    const key = `tui:${input.sessionId}`;
+    if (this.#hosts.has(key)) throw new Error(`session ${input.sessionId} is already being taken over`);
+
+    const client = new AcpClient(raw => transport.send(raw), {
+      onPermission: req => this.#onPermission(req),
+      onElicitation: req => this.#onElicitation(req),
+      onUpdate: (sessionId, update) => this.#onUpdate(sessionId, update),
+      onLog: this.#onLog,
+      promptTimeoutMs: this.#promptTimeout,
+      onClose: () => this.#onHostClosed(key),
+    });
+    transport.onMessage(raw => client.ingest(`${raw}\n`));
+    transport.onClose(() => client.close({ code: null, stderr: "TUI control socket closed" }));
+
+    const spec: HostSpec = { kind: "local" };
+    const host: LocalHost = { client, pid: input.pid, kill: () => transport.close() };
+    const entry: HostEntry = {
+      key,
+      host,
+      spec,
+      ref: { kind: "local", id: key, spec },
+      handle: undefined,
+      agents: new Set(),
+    };
+    // Register before `initialize`: if the TUI socket closes while its
+    // initialize response is in flight, the AcpClient close callback can
+    // remove this entry instead of leaving a dead host in the table.
+    this.#hosts.set(key, entry);
+    try {
+      await client.initialize();
+    } catch (err) {
+      await this.#releaseHost(entry);
+      throw err;
+    }
+    this.#store.audit({
+      action: "host.provision",
+      outcome: "ok",
+      detail: { kind: "live-tui", pid: input.pid, hostId: key },
+    });
+    return await this.#bindAgentToSession(
+      { name: input.name, cwd: input.cwd, sessionId: input.sessionId },
+      spec,
+      entry,
+      who,
+      { takeover: "live-tui" },
+      async sessionEntry => {
+        await sessionEntry.host.client.loadSession(input.sessionId, input.cwd);
+        return input.sessionId;
+      },
+    );
   }
 
   /**

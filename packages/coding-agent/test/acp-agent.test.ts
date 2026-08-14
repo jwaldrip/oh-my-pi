@@ -595,6 +595,25 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("adopts the supplied live session before loadSession so takeover never opens its jsonl twice", async () => {
+		const harness = await createHarness();
+		const live = harness.sessions[0]!;
+
+		await harness.agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: {},
+		} as Parameters<typeof harness.agent.initialize>[0]);
+		await harness.agent.loadSession({
+			sessionId: live.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		expect(harness.sessions).toHaveLength(1);
+
+		await harness.agent.dispose();
+	});
+
 	it("advertises plan mode and emits schema-valid mode updates", async () => {
 		const harness = await createHarness();
 		Settings.instance.set("plan.enabled", true);

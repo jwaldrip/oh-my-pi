@@ -97,6 +97,11 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   // navigate/click/type it dispatched actually happened, which is the same
   // "silently believed something occurred" failure a lost `decide` is.
   webview_result: true,
+  // Normal TUI control frames are emitted only by the terminal client, never
+  // by this app-facing client. Losing one here is not a user instruction.
+  tui_register: false,
+  tui_acp: false,
+  tui_acp_ready: false,
 };
 
 // ---------------------------------------------------------------------------

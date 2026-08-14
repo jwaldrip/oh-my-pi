@@ -493,6 +493,7 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		await this.#adoptInitialSession();
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -1130,6 +1131,27 @@ export class AcpAgent implements Agent {
 			throw error;
 		}
 		return await this.#registerPreparedSession(session, mcpServers);
+	}
+
+	/**
+	 * An interactive TUI can hand its already-open session to this ACP agent.
+	 * Register that exact object before `session/load` is served: opening the
+	 * stored file again would create a second writer for the same JSONL.
+	 *
+	 * The TUI has already configured extensions and MCP on this session. Running
+	 * those setup paths again would duplicate process-wide hooks, so adoption
+	 * only installs ACP's bridge and managed lifecycle record.
+	 */
+	async #adoptInitialSession(): Promise<void> {
+		const session = this.#initialSession;
+		if (!session) return;
+		this.#initialSession = undefined;
+		if (this.#sessions.has(session.sessionId)) {
+			throw new Error(`ACP session already registered: ${session.sessionId}`);
+		}
+		const record = this.#createManagedSessionRecord(session);
+		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		this.#sessions.set(session.sessionId, record);
 	}
 
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
