@@ -181,6 +181,8 @@ const DEFAULT_VERSION = "0.1.0";
 /** Frames a socket may burst, and its steady-state allowance. */
 const RATE_BURST = 50;
 const RATE_PER_SECOND = 10;
+/** ACP owns streaming backpressure; only cap an individual tunneled JSON-RPC frame. */
+const MAX_TUI_ACP_FRAME_BYTES = 32 * 1024 * 1024;
 
 /** The only scopes a device row may carry. Anything else is a typo, not a grant. */
 const KNOWN_SCOPES: readonly string[] = [SCOPE_READ, SCOPE_PROMPT, SCOPE_MANAGE, SCOPE_APPROVE];
@@ -363,6 +365,23 @@ export interface GatewayOptions {
   onWebViewResult?: (agentId: AgentId, requestId: string, result: WebViewActionResult) => boolean;
 }
 
+interface LiveTuiSocket {
+  sessionId: string;
+  cwd: string;
+  title: string | undefined;
+  pid: number;
+  agentId: AgentId | undefined;
+  onAcpMessage: ((raw: string) => void) | undefined;
+  onAcpClose: (() => void) | undefined;
+}
+
+interface PendingTuiTakeover {
+  socket: GatewaySocket;
+  actor: Actor;
+  resolve: (agent: Agent) => void;
+  reject: (error: Error) => void;
+}
+
 interface SocketState {
   deviceId: string;
   scopes: Set<string>;
@@ -402,6 +421,8 @@ interface SocketState {
    */
   revoked: boolean;
   voice: VoiceHandler | null;
+  /** Present only on the one socket serving a normal live TUI. */
+  tui: LiveTuiSocket | null;
 }
 
 /**
@@ -469,6 +490,7 @@ export class Gateway {
   #sockets = new Set<GatewaySocket>();
   /** Most recently registered live WebView socket for each agent. */
   #webviews = new Map<AgentId, GatewaySocket>();
+  #tuiTakeovers = new Map<string, PendingTuiTakeover>();
   #unsubscribeSay: (() => void) | undefined;
   #unsubscribeRevoked: (() => void) | undefined;
   #unsubscribe: (() => void) | undefined;
@@ -547,10 +569,9 @@ export class Gateway {
         if (ws.data.deviceId !== deviceId) continue;
         ws.data.revoked = true;
         this.#send(ws, { t: "error", code: "unauthorized", message: "this device has been revoked" });
-        // Dropped from the push set so nothing further is streamed to it, and
-        // left open rather than closed: see the note on `revoked`.
-        this.#sockets.delete(ws);
-        this.#unregisterWebViews(ws);
+        // Keep the TCP socket inert for Bun's stop behaviour, but revoke an
+        // ACP leg immediately so a removed device cannot keep owning a TUI.
+        this.#close(ws);
       }
     });
   }
@@ -594,13 +615,7 @@ export class Gateway {
     this.#unsubscribeSay = undefined;
     this.#unsubscribeRevoked?.();
     this.#unsubscribeRevoked = undefined;
-    for (const ws of this.#sockets) {
-      void ws.data.voice?.close();
-      ws.data.voice = null;
-      this.#unregisterWebViews(ws);
-    }
-    this.#sockets.clear();
-    this.#webviews.clear();
+    for (const ws of [...this.#sockets]) this.#close(ws);
     // `stop(true)` closes live connections itself. Closing each socket here
     // first and then awaiting it deadlocks on Bun 1.3.4: the promise never
     // settles. Measured, not guessed. Clients therefore see an abnormal close
@@ -692,6 +707,7 @@ export class Gateway {
       bucket: new TokenBucket({ capacity: RATE_BURST, refillPerSecond: RATE_PER_SECOND }),
       revoked: false,
       voice: null,
+      tui: null,
     };
   }
 
@@ -1371,6 +1387,20 @@ export class Gateway {
       return Response.json({ groups: index.grouped(parsed.query) });
     }
 
+    const sessionTakeoverRoute = /^\/v1\/sessions\/([^/]+)\/takeover$/.exec(path);
+    if (sessionTakeoverRoute && req.method === "POST") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      try {
+        const agent = await this.#takeOverLiveTui(sessionTakeoverRoute[1] ?? "", actor);
+        return Response.json({ agent }, { status: 201 });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "TUI takeover failed" },
+          { status: 409 },
+        );
+      }
+    }
+
     const sessionArchiveRoute = /^\/v1\/sessions\/([^/]+)\/archive$/.exec(path);
     if (sessionArchiveRoute && req.method === "POST") {
       if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
@@ -1464,6 +1494,7 @@ export class Gateway {
     try {
       key = decodeURIComponent(pathname);
     } catch {
+
       // Malformed percent-encoding cannot name an embedded key.
       return null;
     }
@@ -1483,6 +1514,52 @@ export class Gateway {
     if (shell === undefined) return null;
     return embeddedResponse(shell, "/index.html");
   }
+  async #takeOverLiveTui(sessionId: string, actor: Actor): Promise<Agent> {
+    const socket = [...this.#sockets].find(ws => ws.data.tui?.sessionId === sessionId);
+    const tui = socket?.data.tui;
+    if (!socket || !tui) throw new Error(`no connected TUI owns session ${sessionId}`);
+    if (tui.agentId) throw new Error(`session ${sessionId} is already managed as agent ${tui.agentId}`);
+    if (this.#tuiTakeovers.has(sessionId)) throw new Error(`session ${sessionId} takeover is already pending`);
+
+    return await new Promise<Agent>((resolve, reject) => {
+      this.#tuiTakeovers.set(sessionId, { socket, actor, resolve, reject });
+      this.#send(socket, { t: "tui_takeover", sessionId });
+    });
+  }
+
+  async #completeLiveTuiTakeover(ws: GatewaySocket, sessionId: string): Promise<void> {
+    const pending = this.#tuiTakeovers.get(sessionId);
+    const tui = ws.data.tui;
+    if (!pending || pending.socket !== ws || !tui || tui.sessionId !== sessionId) {
+      this.#send(ws, { t: "error", code: "bad_frame", message: "unexpected TUI takeover acknowledgement" });
+      return;
+    }
+    this.#tuiTakeovers.delete(sessionId);
+    try {
+      const agent = await this.#sup.takeOverTuiSession(
+        { sessionId, name: tui.title ?? `TUI ${sessionId}`, cwd: tui.cwd, pid: tui.pid },
+        {
+          send: raw => this.#send(ws, { t: "tui_acp", sessionId, raw }),
+          onMessage: listener => {
+            tui.onAcpMessage = listener;
+          },
+          onClose: listener => {
+            tui.onAcpClose = listener;
+          },
+          close: () => ws.close(),
+        },
+        pending.actor,
+      );
+      tui.agentId = agent.id;
+      pending.resolve(agent);
+    } catch (err) {
+      pending.reject(err instanceof Error ? err : new Error("TUI takeover failed"));
+      // The renderer has already stopped. Closing the control transport makes
+      // its in-process ACP server dispose the adopted session instead of
+      // stranding a headless process that the daemon never registered.
+      ws.close();
+    }
+  }
 
   // -- websocket -------------------------------------------------------------
 
@@ -1499,6 +1576,19 @@ export class Gateway {
   #close(ws: GatewaySocket): void {
     this.#sockets.delete(ws);
     this.#unregisterWebViews(ws);
+    for (const [sessionId, pending] of this.#tuiTakeovers) {
+      if (pending.socket !== ws) continue;
+      this.#tuiTakeovers.delete(sessionId);
+      pending.reject(new Error(`TUI disconnected during takeover of session ${sessionId}`));
+    }
+    const tui = ws.data.tui;
+    ws.data.tui = null;
+    const closeAcp = tui?.onAcpClose;
+    if (tui) {
+      tui.onAcpClose = undefined;
+      tui.onAcpMessage = undefined;
+    }
+    closeAcp?.();
     void ws.data.voice?.close();
     ws.data.voice = null;
   }
@@ -1521,11 +1611,6 @@ export class Gateway {
       this.#send(ws, { t: "error", code: "unauthorized", message: "this device has been revoked" });
       return;
     }
-    if (!ws.data.bucket.take()) {
-      this.#send(ws, { t: "error", code: "rate_limited", message: "too many frames" });
-      return;
-    }
-
     let parsed: unknown;
     try {
       parsed = JSON.parse(typeof message === "string" ? message : message.toString());
@@ -1543,6 +1628,26 @@ export class Gateway {
     const frameType = parsed.t;
     if (typeof frameType !== "string") {
       this.#send(ws, { t: "error", code: "unknown_frame", message: "frame type is not a string" });
+      return;
+    }
+
+    const tui = ws.data.tui;
+    let registeredTuiAcp = false;
+    let tuiAcpRaw = "";
+    if (frameType === "tui_acp" && tui !== null && "sessionId" in parsed && "raw" in parsed) {
+      const sessionId = parsed.sessionId;
+      const raw = parsed.raw;
+      if (sessionId === tui.sessionId && typeof raw === "string") {
+        registeredTuiAcp = true;
+        tuiAcpRaw = raw;
+      }
+    }
+    if (registeredTuiAcp && Buffer.byteLength(tuiAcpRaw, "utf8") > MAX_TUI_ACP_FRAME_BYTES) {
+      this.#send(ws, { t: "error", code: "frame_too_large", message: "ACP frame exceeds 32 MiB" });
+      return;
+    }
+    if (!registeredTuiAcp && !ws.data.bucket.take()) {
+      this.#send(ws, { t: "error", code: "rate_limited", message: "too many frames" });
       return;
     }
 
@@ -1566,6 +1671,62 @@ export class Gateway {
 
   #handle(ws: GatewaySocket, frame: ClientFrame, frameType: string): void {
     switch (frame.t) {
+      case "tui_register": {
+        if (!ws.data.scopes.has(SCOPE_MANAGE)) {
+          this.#send(ws, { t: "error", code: "unauthorized", message: "TUI registration requires manage scope" });
+          return;
+        }
+        if (
+          typeof frame.sessionId !== "string" ||
+          frame.sessionId.length === 0 ||
+          typeof frame.cwd !== "string" ||
+          frame.cwd.length === 0 ||
+          (frame.title !== undefined && typeof frame.title !== "string") ||
+          !Number.isSafeInteger(frame.pid) ||
+          frame.pid <= 0
+        ) {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "invalid TUI registration" });
+          return;
+        }
+        const registeredElsewhere = [...this.#sockets].some(
+          socket => socket !== ws && socket.data.tui?.sessionId === frame.sessionId,
+        );
+        if (registeredElsewhere || (ws.data.tui !== null && ws.data.tui.sessionId !== frame.sessionId)) {
+          this.#send(ws, { t: "error", code: "session_busy", message: "that TUI session is already registered" });
+          return;
+        }
+        ws.data.tui = {
+          sessionId: frame.sessionId,
+          cwd: frame.cwd,
+          title: frame.title,
+          pid: frame.pid,
+          agentId: undefined,
+          onAcpMessage: undefined,
+          onAcpClose: undefined,
+        };
+        return;
+      }
+
+      case "tui_acp": {
+        const tui = ws.data.tui;
+        if (!tui || frame.sessionId !== tui.sessionId || typeof frame.raw !== "string") {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "ACP frame has no registered TUI" });
+          return;
+        }
+        tui.onAcpMessage?.(frame.raw);
+        return;
+      }
+
+      case "tui_acp_ready": {
+        const tui = ws.data.tui;
+        if (!tui || frame.sessionId !== tui.sessionId) {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "takeover acknowledgement has no registered TUI" });
+          return;
+        }
+        void this.#completeLiveTuiTakeover(ws, frame.sessionId);
+        return;
+      }
+
       case "ping":
         this.#send(ws, { t: "pong" });
         return;

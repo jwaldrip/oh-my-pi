@@ -305,6 +305,12 @@ export type ClientFrame =
   | { t: "webview_unregister"; agentId: AgentId }
   /** The outcome of a `webview_action` this client's WebView was asked to perform. */
   | { t: "webview_result"; agentId: AgentId; requestId: string; result: WebViewActionResult }
+  /** A normal TUI offers its already-open session for a managed takeover. */
+  | { t: "tui_register"; sessionId: string; cwd: string; title?: string; pid: number }
+  /** ACP JSON-RPC carried over the registered TUI's single control socket. */
+  | { t: "tui_acp"; sessionId: string; raw: string }
+  /** The TUI has stopped rendering and its in-process ACP server is ready. */
+  | { t: "tui_acp_ready"; sessionId: string }
   | { t: "ping" };
 
 export type ServerFrame =
@@ -335,6 +341,10 @@ export type ServerFrame =
   | { t: "error"; agentId?: AgentId; message: string; code?: string }
   /** Ask a client's embedded WebView to perform an action, already cleared by the policy engine. */
   | { t: "webview_action"; agentId: AgentId; requestId: string; action: WebViewAction }
+  /** Command a registered normal TUI to release its renderer for ACP takeover. */
+  | { t: "tui_takeover"; sessionId: string }
+  /** ACP JSON-RPC carried over the registered TUI's single control socket. */
+  | { t: "tui_acp"; sessionId: string; raw: string }
   | { t: "pong" };
 
 // ---------------------------------------------------------------------------
