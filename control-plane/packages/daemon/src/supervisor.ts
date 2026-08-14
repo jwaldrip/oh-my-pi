@@ -124,6 +124,11 @@ export interface SupervisorOptions {
 }
 
 export interface CreateAgentInput {
+  /**
+   * Reserved by a replica before it queues `new-agent`, so the owning delegate
+   * creates the identity the replica already published.
+   */
+  id?: AgentId;
   name: string;
   cwd: string;
   host?: HostSpec;
@@ -166,6 +171,11 @@ export interface TakeOverTuiSessionInput {
   name: string;
   cwd: string;
   pid: number;
+}
+
+/** Allocate the only agent id shape accepted by both direct and queued creation. */
+export function createAgentId(): AgentId {
+  return `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
 }
 
 interface HostEntry {
@@ -272,6 +282,26 @@ export class Supervisor {
 
   listAgents(): Agent[] {
     return this.#store.listAgents();
+  }
+
+  /**
+   * A mirrored agent may have a durable store row but no ACP host in this
+   * process. Ownership is the live supervisor binding, never `host.kind`:
+   * container and cloud hosts are still owned by this daemon.
+   */
+  ownsAgent(agentId: AgentId): boolean {
+    const hostId = this.#agentHost.get(agentId);
+    return hostId !== undefined && this.#hosts.has(hostId);
+  }
+
+  /**
+   * Re-authorize an actor against the live device row. Used by the federation
+   * drainer so a reserved-id new-agent short-circuit still proves the
+   * originating device is known, unrevoked, and holds manage scope before
+   * the intent is acknowledged as delivered.
+   */
+  authorize(actor: Actor, scope: string, action: string, agentId?: AgentId): Actor {
+    return this.#authorize(actor, scope, action, agentId);
   }
 
   /**
@@ -495,7 +525,8 @@ export class Supervisor {
     auditDetail: Record<string, unknown>,
     openSession: (entry: HostEntry, agentId: AgentId) => Promise<string>,
   ): Promise<Agent> {
-    const id: AgentId = `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const id = "id" in input && input.id !== undefined ? input.id : createAgentId();
+    if (this.#store.getAgent(id)) throw new Error(`agent ${id} already exists`);
     const now = new Date().toISOString();
 
     const agent: Agent = {

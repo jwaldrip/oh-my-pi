@@ -51,6 +51,7 @@ import { createTunnelDialer } from "./tunnel/dial.ts";
 import { identityPath, loadIdentity } from "./tunnel/identity.ts";
 import { reachableEndpoints } from "./endpoints.ts";
 import { EvolutionEngine, ProposalStore } from "./evolution/index.ts";
+import { QueuedIntentDrainer, type IntentPeer } from "./federation/queued-intents.ts";
 import { Gateway, GatewayEvents, type VoiceHandler } from "./gateway/index.ts";
 import { homeIdFor } from "./home-id.ts";
 import { HostRegistry } from "./hosts.ts";
@@ -189,6 +190,13 @@ export interface OmpdOptions {
   spawnHost?: (opts: SpawnLocalHostOptions) => LocalHost;
   /** Approval deadline seam for deterministic composition tests. */
   approvalTimeoutMs?: number;
+  /**
+   * Optional replica queue owned by another daemon. Its presence turns this
+   * daemon into the local delegate that periodically drains that peer.
+   */
+  intentPeer?: IntentPeer;
+  /** Delegate poll cadence for `intentPeer`; defaults to the drainer cadence. */
+  intentPollIntervalMs?: number;
   /** Power-assertion seam, so a test never spawns a real `caffeinate`. */
   spawnAwake?: (command: string[]) => AwakeProcess;
   /** Skips speech-engine probing, which shells out. */
@@ -342,6 +350,8 @@ export class Ompd {
   #sessionIndex: SessionIndex;
   #evolution: EvolutionEngine;
   #gateway: Gateway;
+  #queuedIntentDrainer: QueuedIntentDrainer | undefined;
+  #intentPollIntervalMs: number | undefined;
   /**
    * The port the gateway actually bound, read back from `listen()`.
    *
@@ -471,6 +481,14 @@ export class Ompd {
         return [mcpServerDescriptor(server, agentId)];
       },
     });
+    if (opts.intentPeer !== undefined) {
+      this.#queuedIntentDrainer = new QueuedIntentDrainer({
+        supervisor: this.#supervisor,
+        peer: opts.intentPeer,
+        onError: (error) => this.#onLog(`queued intent drain failed: ${error.message}`),
+      });
+      this.#intentPollIntervalMs = opts.intentPollIntervalMs;
+    }
     requestWebViewApproval = ({ agentId, tool, title, action }) =>
       this.#supervisor.gateAction({ agentId, tool, title, input: action });
 
@@ -770,6 +788,10 @@ export class Ompd {
       this.#onLog?.(`settled ${interrupted} run(s) left mid-flight by a previous daemon`);
     }
     this.#scheduler.start();
+    if (this.#queuedIntentDrainer !== undefined) {
+      if (this.#intentPollIntervalMs === undefined) this.#queuedIntentDrainer.start();
+      else this.#queuedIntentDrainer.start(this.#intentPollIntervalMs);
+    }
 
     return { port, url, endpoints: this.#reachableEndpoints(), bootstrap };
   }
@@ -796,6 +818,7 @@ export class Ompd {
 
     try {
       // 1. No new scheduled work.
+      this.#queuedIntentDrainer?.stop();
       this.#scheduler.stop();
       // 2. Settle the runs already in flight, before anything they depend on
       //    goes away: cancelling a turn needs the host serving it, and a run

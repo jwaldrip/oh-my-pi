@@ -2,6 +2,7 @@ export * from "./awake.ts";
 export * from "./home-id.ts";
 export * from "./daemon.ts";
 export * from "./evolution/index.ts";
+export * from "./federation/queued-intents.ts";
 export * from "./hosts.ts";
 export * from "./supervisor.ts";
 export * from "./gateway/index.ts";

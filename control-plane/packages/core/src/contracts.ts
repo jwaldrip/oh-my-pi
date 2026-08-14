@@ -57,6 +57,33 @@ export interface Agent {
 }
 
 // ---------------------------------------------------------------------------
+// Federation queued intents
+// ---------------------------------------------------------------------------
+
+/**
+ * A write accepted by a replica but reserved for the daemon that owns the
+ * session. The replica may persist and relay it; only the delegate executes it.
+ */
+export type QueuedIntentAction = "prompt" | "decide" | "cancel" | "new-agent";
+export type QueuedIntentStatus = "pending" | "delivered";
+
+export interface QueuedIntent {
+  id: string;
+  /**
+   * The owned agent. For `new-agent`, this is reserved by the replica before
+   * it queues the request so the delegate creates the same identity.
+   */
+  agentId: AgentId;
+  /** The paired device that the replica already authorized. */
+  actorDeviceId: string;
+  action: QueuedIntentAction;
+  /** Action-specific, wire-safe input; narrowed again by the delegate. */
+  payload: unknown;
+  createdAt: string;
+  status: QueuedIntentStatus;
+}
+
+// ---------------------------------------------------------------------------
 // Hosts
 // ---------------------------------------------------------------------------
 
