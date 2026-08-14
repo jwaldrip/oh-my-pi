@@ -1,60 +1,70 @@
 /**
- * The whole app: pair, or take the position.
+ * The whole app: pair, choose a saved daemon, or take the position.
  *
- * There is no router. Two screens and one selection do not need one, and a
- * navigation library is a second source of truth about which agent is open.
+ * There is no router. The boot state is the one source of truth for whether
+ * the operator is pairing, changing daemon, or working in a Console.
  */
 
 import type { JSX } from "react";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Console } from "./console/Console.tsx";
 import { SafeScreen } from "./design/SafeScreen.tsx";
-import { ink } from "./design/tokens.ts";
-import type { Connection } from "./platform/connection.ts";
-import { clearConnection, loadConnection, saveConnection } from "./platform/connection.ts";
+import { ground, ink, stroke, type } from "./design/tokens.ts";
+import type { Connection, ConnectionList } from "./platform/connection.ts";
+import { clearConnection, loadConnections, saveConnection, setActiveConnection } from "./platform/connection.ts";
+import { ConnectionSwitcherScreen } from "./screens/ConnectionSwitcherScreen.tsx";
 import { PairScreen } from "./screens/PairScreen.tsx";
 
-type Boot = { phase: "loading" } | { phase: "pair"; notice?: string } | { phase: "console"; connection: Connection };
+type Boot =
+  | { phase: "loading" }
+  | { phase: "pair"; notice?: string; returnToSwitcher?: ConnectionList }
+  | { phase: "switch"; connections: ConnectionList }
+  | { phase: "console"; connections: ConnectionList };
 
 export function App(): JSX.Element {
   const [boot, setBoot] = useState<Boot>({ phase: "loading" });
 
+  const showConnections = useCallback((connections: ConnectionList, notice?: string) => {
+    const active = connections.connections.find((entry) => entry.id === connections.activeId);
+    setBoot(active === undefined ? { phase: "pair", notice } : { phase: "console", connections });
+  }, []);
+
+  const reloadConnections = useCallback(async (notice?: string) => {
+    showConnections(await loadConnections(), notice);
+  }, [showConnections]);
+
   useEffect(() => {
     let cancelled = false;
-    void loadConnection()
-      .then((connection) => {
-        if (cancelled) return;
-        setBoot(connection === null ? { phase: "pair" } : { phase: "console", connection });
+    void loadConnections()
+      .then((connections) => {
+        if (!cancelled) showConnections(connections);
       })
       .catch((cause: unknown) => {
-        if (cancelled) return;
-        setBoot({ phase: "pair", notice: describe(cause) });
+        if (!cancelled) setBoot({ phase: "pair", notice: describe(cause) });
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showConnections]);
 
-  /**
-   * The store is written before the console opens, not alongside it. A pairing
-   * that only lives in React state is lost on the next cold start, which is
-   * how a phone ends up looking unpaired after a restart that did nothing wrong.
-   */
+  /** The store is written before the Console opens, never only into React state. */
   const pair = useCallback(async (connection: Connection) => {
     await saveConnection(connection);
-    setBoot({ phase: "console", connection });
-  }, []);
+    await reloadConnections();
+  }, [reloadConnections]);
 
-  /**
-   * The daemon has confirmed the token is dead. Keeping it would leave the app
-   * reconnecting forever on a credential that will never work again.
-   */
-  const unpair = useCallback(async (notice?: string) => {
-    await clearConnection();
-    setBoot({ phase: "pair", notice });
-  }, []);
+  const activate = useCallback(async (id: string) => {
+    await setActiveConnection(id);
+    await reloadConnections();
+  }, [reloadConnections]);
+
+  /** A rejected token removes only its own pairing, preserving every other daemon. */
+  const unpair = useCallback(async (id: string, notice?: string) => {
+    await clearConnection(id);
+    await reloadConnections(notice);
+  }, [reloadConnections]);
 
   let body: JSX.Element;
   if (boot.phase === "loading") {
@@ -64,15 +74,55 @@ export function App(): JSX.Element {
       </SafeScreen>
     );
   } else if (boot.phase === "pair") {
-    body = <PairScreen notice={boot.notice} onPair={pair} />;
+    body = (
+      <PairScreen
+        notice={boot.notice}
+        onCancel={
+          boot.returnToSwitcher === undefined ? undefined : () => setBoot({ phase: "switch", connections: boot.returnToSwitcher! })
+        }
+        onPair={pair}
+      />
+    );
+  } else if (boot.phase === "switch") {
+    body = (
+      <ConnectionSwitcherScreen
+        connections={boot.connections}
+        onAdd={() => setBoot({ phase: "pair", returnToSwitcher: boot.connections })}
+        onBack={() => showConnections(boot.connections)}
+        onSelect={activate}
+      />
+    );
   } else {
-    // Keyed on the durable halves of the connection so a re-pair with a new
-    // daemon rebuilds the console rather than leaving the old socket open.
-    const key =
-      boot.connection.transport === "direct"
-        ? `${boot.connection.url}:${boot.connection.token.length}`
-        : `${boot.connection.hubUrl}:${boot.connection.daemonId}:${boot.connection.token.length}`;
-    body = <Console key={key} connection={boot.connection} onUnpair={unpair} />;
+    const active = boot.connections.connections.find((entry) => entry.id === boot.connections.activeId);
+    if (active === undefined) {
+      body = <PairScreen onPair={pair} />;
+    } else {
+      const key =
+        active.connection.transport === "direct"
+          ? `${active.id}:${active.connection.url}:${active.connection.token.length}`
+          : `${active.id}:${active.connection.hubUrl}:${active.connection.daemonId}:${active.connection.token.length}`;
+      body = (
+        <View style={styles.consoleShell}>
+          <Console
+            key={key}
+            connection={active.connection}
+            onUnpair={(notice) => {
+              void unpair(active.id, notice);
+            }}
+          />
+          <SafeAreaView edges={["bottom"]} style={styles.switcherSafe}>
+            <Pressable
+              accessibilityLabel="Switch connections"
+              onPress={() => setBoot({ phase: "switch", connections: boot.connections })}
+              style={styles.switcher}
+              testID="open-connection-switcher"
+            >
+              <Text style={styles.switcherText}>Connections</Text>
+            </Pressable>
+          </SafeAreaView>
+        </View>
+      );
+    }
   }
 
   return <SafeAreaProvider>{body}</SafeAreaProvider>;
@@ -84,4 +134,12 @@ function describe(cause: unknown): string {
 
 const styles = StyleSheet.create({
   boot: { alignItems: "center", justifyContent: "center" },
+  consoleShell: { flex: 1 },
+  switcherSafe: { backgroundColor: ground.raised, borderColor: ground.edge, borderTopWidth: stroke.hair },
+  switcher: {
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 48,
+  },
+  switcherText: { ...type.label, color: ink.bright },
 });
