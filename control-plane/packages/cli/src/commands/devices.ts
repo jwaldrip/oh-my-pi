@@ -10,6 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Device } from "@ompd/core";
+import { describeEndpoint, type EndpointOffer, type EndpointReach } from "@ompd/core/pairing";
 import type { Command } from "../args.ts";
 import { api, type CliContext } from "../client.ts";
 import { age, table } from "../format.ts";
@@ -32,6 +33,51 @@ interface RotateResponse {
 
 interface DevicesResponse {
   devices?: Device[];
+}
+
+interface EndpointsResponse {
+  offers?: EndpointOffer[];
+}
+
+/** Nearest reach first, since that is the one most operators will actually pick. */
+const REACH_ORDER: readonly EndpointReach[] = ["same-machine", "same-network", "anywhere"];
+
+/**
+ * Where a device can point, fetched fresh rather than guessed.
+ *
+ * A loopback address used to be printed here directly, which means something
+ * different on every machine it is copied to and nothing at all on a phone.
+ * The daemon is the only thing that knows its own reachable addresses, so
+ * asking it is the only way this line is ever right. A failure here is
+ * reported, never thrown: whatever it returns, the caller still has to print
+ * the token, which is the half of this output that cannot be produced again.
+ */
+export async function fetchEndpointOffers(ctx: CliContext): Promise<EndpointOffer[] | null> {
+  try {
+    const response = await api<EndpointsResponse>(ctx, "/v1/endpoints");
+    return response.offers ?? [];
+  } catch (err) {
+    ctx.err(
+      `  could not list reachable endpoints: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+function printEndpointOffers(ctx: CliContext, offers: EndpointOffer[]): void {
+  if (offers.length === 0) {
+    ctx.out("  the daemon reported no reachable endpoints");
+    return;
+  }
+  for (const reach of REACH_ORDER) {
+    const forReach = offers.filter((offer) => offer.reach === reach);
+    if (forReach.length === 0) continue;
+    ctx.out(`  ${reach}`);
+    for (const offer of forReach) {
+      ctx.out(`    ${describeEndpoint(offer.endpoint)}`);
+      ctx.out(`      ${offer.note}`);
+    }
+  }
 }
 
 export async function pairCommand(
@@ -62,6 +108,10 @@ export async function pairCommand(
   ctx.out(`    ompd approve ${response.code} --scopes ${cmd.scopes.join(",")}`);
   ctx.out("");
   ctx.out("  the code expires in 10 minutes and can be spent once");
+  ctx.out("");
+  ctx.out("  where the device will point once approved:");
+  const pairOffers = await fetchEndpointOffers(ctx);
+  if (pairOffers !== null) printEndpointOffers(ctx, pairOffers);
   return 0;
 }
 
@@ -89,6 +139,15 @@ export async function approveCommand(
   ctx.out("  This token is shown once and is not recoverable. The daemon keeps only its");
   ctx.out("  hash. Copy it now; if you lose it, rotate or pair again.");
   ctx.out("  It lasts until you revoke the device or rotate the token.");
+
+  // A separate call, and a separate paragraph: the token above is the
+  // secret, the endpoints below are where to point the device holding it,
+  // and a failure fetching the second must never cost the operator the
+  // first, which the daemon cannot produce again.
+  ctx.out("");
+  ctx.out("  the token above is a secret; the endpoints below are not:");
+  const approveOffers = await fetchEndpointOffers(ctx);
+  if (approveOffers !== null) printEndpointOffers(ctx, approveOffers);
   return 0;
 }
 

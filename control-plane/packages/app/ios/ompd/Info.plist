@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Hello App Display Name</string>
+	<string>ompd</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -28,11 +28,19 @@
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<false/>
+		<!-- A daemon on the operator's own LAN is reached over ws://, because it
+		     has no certificate for a private address and nothing would issue
+		     one. The exception is scoped to local networking rather than opened
+		     for everything, so a hub over the internet still has to be wss://. -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
+	<!-- iOS 14 and later gate a connection to an address on the local network
+	     behind an explicit grant. Without this string the prompt cannot be
+	     shown, and the first pairing against a LAN address fails with a
+	     connection error that looks like a daemon that is not running. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ompd connects to the OMP daemon running on your own computer, over your local network.</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

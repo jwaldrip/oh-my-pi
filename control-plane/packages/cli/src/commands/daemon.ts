@@ -9,6 +9,7 @@
 
 import { existsSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { describeEndpoint, type EndpointOffer } from "@ompd/core/pairing";
 import {
   endpointPath,
   ensureHome,
@@ -28,6 +29,7 @@ import {
 } from "../client.ts";
 import { duration } from "../format.ts";
 import { selfExec } from "../install.ts";
+import { fetchEndpointOffers } from "./devices.ts";
 
 /** How long a backgrounded start waits for its child to answer `/v1/health`. */
 const READY_TIMEOUT_MS = 15_000;
@@ -92,19 +94,57 @@ async function health(ctx: CliContext, base: string): Promise<HealthResponse | n
   return live.kind === "none" ? null : live.health;
 }
 
-function pairingInstructions(url: string, tokenPath: string): string[] {
-  return [
-    `  web UI       ${url}/`,
+/**
+ * What a device is told at startup, built from what the daemon actually bound.
+ *
+ * This used to print `${url} is loopback` unconditionally. Started with
+ * `--host 0.0.0.0` it therefore called a daemon that was published to the whole
+ * network private, which is the one sentence in this output nobody can afford
+ * to have wrong. It also offered `0.0.0.0` as a URL to open on a phone, and
+ * that is a bind sentinel rather than a destination: it means "every
+ * interface" to a listening socket and nothing at all to a browser.
+ *
+ * So the reachable set comes from the daemon rather than from string surgery
+ * on the bind address, and the security sentence follows what that set says.
+ */
+function pairingInstructions(url: string, tokenPath: string, offers: readonly EndpointOffer[]): string[] {
+  const sameNetwork = offers.filter((offer) => offer.reach === "same-network");
+  const anywhere = offers.filter((offer) => offer.reach === "anywhere");
+  const lines = [
+    `  bound at     ${url} (the address it listens on, not necessarily one to open)`,
     `  token        ${tokenPath} (local operator, mode 0600)`,
     "",
     "  pair a phone:",
     "    ompd pair <name> --scopes read,prompt",
     "    ompd approve <code> --scopes read,prompt",
-    "    then open the web UI on the phone and paste the daemon URL and token",
+    "  approve prints the token once, and the endpoints below beside it.",
     "",
-    `  ${url} is loopback. Reaching it from a phone is a separate, deliberate`,
-    "  act: see docs/running.md, which leads with Tailscale for a reason.",
   ];
+
+  if (sameNetwork.length === 0 && anywhere.length === 0) {
+    lines.push(
+      "  Bound to loopback, so nothing off this machine can reach it. Set a reachable",
+      "  address with `ompd config set host <address>`, or a hub with",
+      "  `ompd config set hubUrl wss://<host>`, and restart.",
+    );
+    return lines;
+  }
+
+  if (sameNetwork.length > 0) {
+    lines.push(
+      "  Reachable from this network at:",
+      ...sameNetwork.map((offer) => `    ${describeEndpoint(offer.endpoint)}`),
+      "  Anything that can reach those addresses can ask this daemon to run code as",
+      "  you, and only a paired token stands in front of it.",
+    );
+  }
+  if (anywhere.length > 0) {
+    lines.push(
+      "  Reachable from anywhere through:",
+      ...anywhere.map((offer) => `    ${describeEndpoint(offer.endpoint)}`),
+    );
+  }
+  return lines;
 }
 
 export async function startCommand(ctx: CliContext, cmd: Extract<Command, { kind: "start" }>): Promise<number> {
@@ -130,7 +170,7 @@ export async function startCommand(ctx: CliContext, cmd: Extract<Command, { kind
 
   const info = await daemon.start();
   ctx.out(`${BANNER_PREFIX} ${info.url}`);
-  for (const line of pairingInstructions(info.url, daemon.tokenPath)) ctx.out(line);
+  for (const line of pairingInstructions(info.url, daemon.tokenPath, info.endpoints)) ctx.out(line);
 
   // The daemon owns the process from here. Signal handlers call `stop` and
   // exit, so this never resolves on a normal run.
@@ -235,7 +275,13 @@ async function backgroundStart(
     if (published !== null && (await health(ctx, published)) !== null) {
       for (const line of startupLines(logPath, logFrom)) ctx.out(line);
       ctx.out(`${BANNER_PREFIX} ${published}`);
-      for (const line of pairingInstructions(published, join(ctx.home, "token"))) ctx.out(line);
+      for (const line of pairingInstructions(
+        published,
+        join(ctx.home, "token"),
+        (await fetchEndpointOffers(ctx)) ?? [],
+      )) {
+        ctx.out(line);
+      }
       ctx.out("");
       ctx.out(`  logs         ${logPath}`);
       return 0;

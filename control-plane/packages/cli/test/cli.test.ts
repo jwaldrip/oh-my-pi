@@ -513,6 +513,25 @@ describe("argv parsing", () => {
   test("an unknown verb names itself", () => {
     expect(() => parseCommand(["frobnicate"])).toThrow(/unknown command frobnicate/);
   });
+
+  test("config parses the bare form, get, and set", () => {
+    expect(parseCommand(["config"])).toEqual({ kind: "config", action: "list" });
+    expect(parseCommand(["config", "get", "hubUrl"])).toEqual({
+      kind: "config",
+      action: "get",
+      key: "hubUrl",
+    });
+    expect(parseCommand(["config", "set", "hubUrl", "wss://hub.example.com"])).toEqual({
+      kind: "config",
+      action: "set",
+      key: "hubUrl",
+      value: "wss://hub.example.com",
+    });
+    expect(() => parseCommand(["config", "get"])).toThrow(/missing <key>/);
+    expect(() => parseCommand(["config", "set", "hubUrl"])).toThrow(/missing <value>/);
+    expect(() => parseCommand(["config", "get", "hubUrl", "extra"])).toThrow(/config get takes 1 argument/);
+    expect(() => parseCommand(["config", "frobnicate"])).toThrow(/unknown config action frobnicate/);
+  });
 });
 
 describe("missing token", () => {
@@ -621,6 +640,55 @@ describe("approve", () => {
     // the request needed one.
     expect(h.calls[0]?.authorization).toBeNull();
   });
+
+  test("prints reachable endpoints under the token, grouped by reach", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/pairings/approve": { body: { token: "tok_x" } },
+        "GET /v1/endpoints": {
+          body: {
+            offers: [
+              {
+                endpoint: { transport: "direct", url: "ws://10.4.1.221:7777/v1/socket" },
+                reach: "same-network",
+                note: "reachable from this Wi-Fi",
+              },
+              {
+                endpoint: { transport: "hub", hubUrl: "wss://hub.example.com", daemonId: "dmn_1" },
+                reach: "anywhere",
+                note: "reachable from anywhere the hub is",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(await run(["approve", "123456", "--scopes", "read"], h.ctx)).toBe(0);
+    const out = h.stdout();
+    expect(out).toContain("same-network");
+    expect(out).toContain("ws://10.4.1.221:7777/v1/socket");
+    expect(out).toContain("reachable from this Wi-Fi");
+    expect(out).toContain("anywhere");
+    expect(out).toContain("wss://hub.example.com (daemon dmn_1)");
+    expect(out).toContain("reachable from anywhere the hub is");
+    // Token and endpoints are printed as two separate things, and the line
+    // between them says which one is the secret.
+    expect(out).toContain("the token above is a secret; the endpoints below are not");
+  });
+
+  test("a failed endpoints lookup never costs the token, which cannot be produced again", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/pairings/approve": { body: { token: "tok_irrecoverable" } },
+        "GET /v1/endpoints": { status: 500, body: { error: "boom" } },
+      },
+    });
+
+    expect(await run(["approve", "123456", "--scopes", "read"], h.ctx)).toBe(0);
+    expect(h.stdout()).toContain("tok_irrecoverable");
+    expect(h.stderr()).toContain("could not list reachable endpoints");
+  });
 });
 
 describe("rotate", () => {
@@ -692,6 +760,96 @@ describe("rotate", () => {
 
     expect(await run(["rotate"], h.ctx)).toBe(1);
     expect(h.stderr()).toContain("rotated nothing");
+  });
+});
+
+describe("config", () => {
+  test("set persists a validated value 0600 and says a restart is needed", async () => {
+    const h = harness();
+    expect(await run(["config", "set", "hubUrl", "wss://hub.example.com"], h.ctx)).toBe(0);
+    expect(h.stdout()).toContain("set hubUrl");
+    expect(h.stdout()).toContain("wss://hub.example.com");
+    expect(h.stdout()).toContain("restart it to pick");
+
+    const path = join(h.home, "config.json");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ hubUrl: "wss://hub.example.com" });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  test("set rejects a hubUrl that is not ws or wss, using the daemon's own message, and writes nothing", async () => {
+    const h = harness();
+    expect(await run(["config", "set", "hubUrl", "http://x"], h.ctx)).toBe(1);
+    expect(h.stderr()).toContain("ws:// or wss:// URL");
+    expect(existsSync(join(h.home, "config.json"))).toBe(false);
+  });
+
+  test("set preserves keys it did not touch", async () => {
+    const h = harness();
+    const path = join(h.home, "config.json");
+    writeFileSync(path, JSON.stringify({ host: "0.0.0.0", port: 9999 }));
+
+    expect(await run(["config", "set", "hubUrl", "wss://hub.example.com"], h.ctx)).toBe(0);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+      host: "0.0.0.0",
+      port: 9999,
+      hubUrl: "wss://hub.example.com",
+    });
+  });
+
+  test("set coerces port to a number and keepAwake to a boolean", async () => {
+    const h = harness();
+    const path = join(h.home, "config.json");
+
+    expect(await run(["config", "set", "port", "8080"], h.ctx)).toBe(0);
+    expect(await run(["config", "set", "keepAwake", "false"], h.ctx)).toBe(0);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ port: 8080, keepAwake: false });
+  });
+
+  test("set rejects a port that is not a number, as a usage error", async () => {
+    const h = harness();
+    expect(await run(["config", "set", "port", "not-a-port"], h.ctx)).toBe(2);
+    expect(h.stderr()).toContain("port must be an integer, got not-a-port");
+    expect(existsSync(join(h.home, "config.json"))).toBe(false);
+  });
+
+  test("set rejects an unknown key by name and lists the known ones", async () => {
+    const h = harness();
+    expect(await run(["config", "set", "bogus", "x"], h.ctx)).toBe(2);
+    expect(h.stderr()).toContain("unknown config key bogus");
+    expect(h.stderr()).toContain("host");
+    expect(h.stderr()).toContain("hubUrl");
+    expect(existsSync(join(h.home, "config.json"))).toBe(false);
+  });
+
+  test("get rejects an unknown key the same way set does", async () => {
+    const h = harness();
+    expect(await run(["config", "get", "bogus"], h.ctx)).toBe(2);
+    expect(h.stderr()).toContain("unknown config key bogus");
+  });
+
+  test("get prints the effective value, defaults included, with nothing else on the line", async () => {
+    const h = harness();
+    expect(await run(["config", "get", "host"], h.ctx)).toBe(0);
+    expect(h.stdout()).toBe("127.0.0.1");
+  });
+
+  test("get prints a value that was set, not the default", async () => {
+    const h = harness();
+    writeFileSync(join(h.home, "config.json"), JSON.stringify({ host: "0.0.0.0" }));
+    expect(await run(["config", "get", "host"], h.ctx)).toBe(0);
+    expect(h.stdout()).toBe("0.0.0.0");
+  });
+
+  test("list marks which values came from the file and which are defaults", async () => {
+    const h = harness();
+    writeFileSync(join(h.home, "config.json"), JSON.stringify({ hubUrl: "wss://hub.example.com" }));
+
+    expect(await run(["config"], h.ctx)).toBe(0);
+    const out = h.stdout();
+    expect(out).toContain("hubUrl");
+    expect(out).toContain("wss://hub.example.com");
+    expect(out).toMatch(/hubUrl\s+wss:\/\/hub\.example\.com\s+file/);
+    expect(out).toMatch(/host\s+127\.0\.0\.1\s+default/);
   });
 });
 

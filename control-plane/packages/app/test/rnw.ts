@@ -28,9 +28,73 @@
 import { mock } from "bun:test";
 import { createElement } from "react";
 import type { ReactNode } from "react";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+
+// One registration for the whole suite. Individual tests used to register and
+// unregister themselves, which is how a second file in the same process died
+// with "Happy DOM has already been globally registered".
+if (!(globalThis as { __ompdHappyDom?: boolean }).__ompdHappyDom) {
+  GlobalRegistrator.register();
+  (globalThis as { __ompdHappyDom?: boolean }).__ompdHappyDom = true;
+}
 
 const web = await import("react-native-web");
-mock.module("react-native", () => web);
+
+/** Live hardware-back handlers. Tests read and clear this set. */
+export type BackHandlerFn = () => boolean;
+const handlers = new Set<BackHandlerFn>();
+
+/** Drop every armed hardware-back handler. Call from afterEach. */
+export function resetBackHandlers(): void {
+  handlers.clear();
+}
+
+/** How many hardware-back handlers are currently armed. */
+export function backHandlerCount(): number {
+  return handlers.size;
+}
+
+/**
+ * Fire every armed hardware-back handler and return each claim result.
+ * An empty array means nothing was listening.
+ */
+export function pressHardwareBack(): boolean[] {
+  return [...handlers].map((handler) => handler());
+}
+
+/** Window size seen by `useWindowDimensions`. RNW refuses Dimensions.set in the browser. */
+let windowSize = { width: 390, height: 844, scale: 1, fontScale: 1 };
+
+/** Point `useWindowDimensions` at a specific width for the next render. */
+export function setWindowWidth(width: number): void {
+  windowSize = { ...windowSize, width };
+}
+
+/** Restore the phone-width default after a wide render. */
+export function resetWindowSize(): void {
+  windowSize = { width: 390, height: 844, scale: 1, fontScale: 1 };
+}
+
+mock.module("react-native", () => ({
+  ...web,
+  // happy-dom has no app lifecycle. A no-op subscription keeps useConsole's
+  // foreground-reconnect effect from throwing on unmount.
+  AppState: {
+    addEventListener: () => ({ remove: () => {} }),
+    currentState: "active",
+  },
+  BackHandler: {
+    addEventListener: (_event: string, handler: BackHandlerFn) => {
+      handlers.add(handler);
+      return {
+        remove: () => {
+          handlers.delete(handler);
+        },
+      };
+    },
+  },
+  useWindowDimensions: () => windowSize,
+}));
 
 /** `react-native-svg`'s element names, mapped onto their DOM equivalents. */
 const SVG_ELEMENTS = ["Svg", "Path", "Rect", "Circle", "Ellipse", "Line", "G", "Defs", "Mask", "ClipPath"] as const;
@@ -63,4 +127,11 @@ mock.module("react-native-view-shot", () => ({
   captureRef: () => Promise.reject(new Error("captureRef is unavailable under bun test")),
 }));
 
-export {};
+// Zero insets under bun test: there is no system chrome in happy-dom, and the
+// real package reaches into native modules bun cannot load. Screens still
+// mount their SafeScreen shell so a missing provider would fail the same way
+// it would on device.
+mock.module("react-native-safe-area-context", () => ({
+  SafeAreaProvider: ({ children }: { children?: ReactNode }) => children ?? null,
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));

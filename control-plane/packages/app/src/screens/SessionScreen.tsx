@@ -7,7 +7,8 @@
  */
 
 import { useEffect, useRef, useState, type JSX } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { webViewCapability } from "../browser";
 import type { WebViewTarget } from "../console/webview.ts";
 import type { Agent, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
@@ -16,6 +17,7 @@ import { StatusReadout } from "../components/StatusReadout.tsx";
 import { Transcript } from "../components/Transcript.tsx";
 import { elapsed, shortenPath } from "../design/format.ts";
 import { Glyph } from "../design/icons.tsx";
+import { SafeScreen } from "../design/SafeScreen.tsx";
 import { Data, Kicker, Label, Title } from "../design/text.tsx";
 import { agentSignal, ground, ink, signal, space, stroke, TOUCH_TARGET } from "../design/tokens.ts";
 import type { ConnectionState } from "@ompd/core/ompd-client";
@@ -52,6 +54,7 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
   const { agent, session, connection } = props;
   const tone = signal[agentSignal(agent.state)];
   const busy = agent.state === "busy";
+  const insets = useSafeAreaInsets();
 
   const [browserOpen, setBrowserOpen] = useState(false);
   const driver = useRef<WebViewTarget | null>(null);
@@ -90,16 +93,19 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
   }, [browserOpen, agent.id]);
 
   return (
-    <View style={styles.screen} testID="session">
+    <SafeScreen edges={{ top: true, bottom: false, left: true, right: true }} testID="session">
       <View style={[styles.head, { borderBottomColor: tone }]}>
         <Pressable
           testID="session-back"
           accessibilityRole="button"
-          accessibilityLabel="Back to the bay"
+          accessibilityLabel="Back to sessions"
           onPress={props.onBack}
-          style={styles.back}
+          style={({ pressed }) => [styles.back, pressed && { backgroundColor: ground.active }]}
         >
           <Glyph name="back" size={14} color={ink.plain} />
+          <Label color={ink.plain} testID="session-back-label">
+            Sessions
+          </Label>
         </Pressable>
 
         <View style={styles.ident}>
@@ -127,7 +133,7 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
             onPress={() => {
               setBrowserOpen((open) => !open);
             }}
-            style={styles.back}
+            style={styles.iconHit}
           >
             <Glyph name="browser" size={14} color={browserOpen ? tone : ink.muted} />
           </Pressable>
@@ -156,18 +162,23 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
         clearances={props.fleetClearances}
       />
 
-      <Composer
-        enabled={connection === "connected"}
-        busy={busy}
-        onSubmit={props.onSubmit}
-        onCancel={props.onCancel}
-      />
-    </View>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={0}
+        style={{ paddingBottom: insets.bottom }}
+      >
+        <Composer
+          enabled={connection === "connected"}
+          busy={busy}
+          onSubmit={props.onSubmit}
+          onCancel={props.onCancel}
+        />
+      </KeyboardAvoidingView>
+    </SafeScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: ground.base },
   head: {
     flexDirection: "row",
     alignItems: "center",
@@ -177,7 +188,17 @@ const styles = StyleSheet.create({
     backgroundColor: ground.surface,
     borderBottomWidth: stroke.heavy,
   },
-  back: { width: TOUCH_TARGET, height: TOUCH_TARGET, alignItems: "center", justifyContent: "center" },
+  // Labeled on purpose. An icon alone under a thumb is how an operator ends up
+  // trapped in a session with no idea the bay is one tap away.
+  back: {
+    minHeight: TOUCH_TARGET,
+    minWidth: TOUCH_TARGET,
+    paddingHorizontal: space.snug,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.tight,
+  },
+  iconHit: { width: TOUCH_TARGET, height: TOUCH_TARGET, alignItems: "center", justifyContent: "center" },
   ident: { flex: 1, gap: space.hair },
   meta: { flexDirection: "row", alignItems: "center", gap: space.snug },
   origin: { flexShrink: 1 },

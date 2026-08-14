@@ -96,6 +96,20 @@ export function fromUtf8(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
 }
 
+/**
+ * The same bytes, typed as something WebCrypto will accept.
+ *
+ * `Uint8Array` defaults to `Uint8Array<ArrayBufferLike>`, which includes a
+ * `SharedArrayBuffer` backing, and `BufferSource` does not. Under Bun's types
+ * that difference never surfaces; under the DOM lib the app compiles against
+ * it rejects every `crypto.subtle` call in this package. The bytes here are
+ * always `ArrayBuffer`-backed at runtime, so the common path is a cast with no
+ * copy, and the shared-memory case is copied rather than asserted away.
+ */
+export function bufferSource(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  return bytes.buffer instanceof ArrayBuffer ? (bytes as Uint8Array<ArrayBuffer>) : new Uint8Array(bytes);
+}
+
 export function toHex(bytes: Uint8Array): string {
   let out = "";
   for (const byte of bytes) out += byte.toString(16).padStart(2, "0");

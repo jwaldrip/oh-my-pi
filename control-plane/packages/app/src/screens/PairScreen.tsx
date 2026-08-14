@@ -4,15 +4,22 @@
  * `notice` explains why the operator is looking at this screen again rather
  * than at their agents. A pairing form with no explanation, after a console
  * that was working a second ago, reads as the app having lost its mind.
+ *
+ * There is no prefilled endpoint. `ws://127.0.0.1` used to sit here as a
+ * starting point, and on a phone loopback is the phone: it looked like an
+ * answer and was never one. The daemon is the only thing that knows its own
+ * address, so this screen asks for exactly what `ompd approve` prints rather
+ * than guessing at it.
  */
 
 import type { JSX } from "react";
 import { useState } from "react";
 import { Pressable, StyleSheet, TextInput, View } from "react-native";
+import { parseEndpoint } from "@ompd/core/pairing";
 import { Glyph } from "../design/icons.tsx";
+import { SafeScreen } from "../design/SafeScreen.tsx";
 import { Body, Display, Kicker, Label } from "../design/text.tsx";
 import type { Connection } from "../platform/connection.ts";
-import { SUGGESTED_SOCKET_URL } from "../platform/connection.ts";
 import { ground, ink, signal, signalWash, space, stroke, TOUCH_TARGET, type } from "../design/tokens.ts";
 
 export function PairScreen({
@@ -22,12 +29,13 @@ export function PairScreen({
   notice?: string;
   onPair: (connection: Connection) => void;
 }): JSX.Element {
-  const [url, setUrl] = useState(SUGGESTED_SOCKET_URL);
+  const [raw, setRaw] = useState("");
   const [token, setToken] = useState("");
-  const ready = url.trim().length > 0 && token.trim().length > 0;
+  const endpoint = parseEndpoint(raw);
+  const ready = endpoint !== null && token.trim().length > 0;
 
   return (
-    <View style={styles.screen} testID="pair">
+    <SafeScreen style={styles.screen} testID="pair">
       <View style={styles.form}>
         <Kicker color={ink.muted}>ompd</Kicker>
         <Display heading>Take the position</Display>
@@ -42,10 +50,24 @@ export function PairScreen({
         )}
 
         <Body color={ink.plain}>
-          Run ompd device pair on the machine running the daemon, then paste the token it prints.
+          On the machine running the daemon: ompd pair for a code, then ompd approve that code. It prints
+          a token and the endpoints this device can reach. Paste both here.
         </Body>
 
-        <Field label="Daemon socket" value={url} onChange={setUrl} testID="pair-url" />
+        <Field label="Daemon endpoint" value={raw} onChange={setRaw} testID="pair-endpoint" />
+        {raw.trim().length === 0 ? null : (
+          <Label color={endpoint === null ? signal.ochre : ink.muted} testID="pair-endpoint-kind">
+            {endpoint === null
+              ? "Not a daemon endpoint"
+              : // A hub relay's base URL reads exactly like a direct socket's own
+                // address, so without naming the transport back a paste from a
+                // daemon behind NAT would look identical to one on the same
+                // machine, and only fail once a phone actually tried it.
+                endpoint.transport === "direct"
+                ? "Direct socket"
+                : `Hub relay, daemon ${endpoint.daemonId}`}
+          </Label>
+        )}
         <Field label="Device token" value={token} onChange={setToken} secure testID="pair-token" />
 
         <Pressable
@@ -54,7 +76,13 @@ export function PairScreen({
           accessibilityState={{ disabled: !ready }}
           disabled={!ready}
           onPress={() => {
-            onPair({ url: url.trim(), token: token.trim(), scopes: [] });
+            if (endpoint === null) return;
+            const trimmedToken = token.trim();
+            onPair(
+              endpoint.transport === "direct"
+                ? { transport: "direct", url: endpoint.url, token: trimmedToken, scopes: [] }
+                : { transport: "hub", hubUrl: endpoint.hubUrl, daemonId: endpoint.daemonId, token: trimmedToken, scopes: [] },
+            );
           }}
           style={({ pressed }) => [
             styles.submit,
@@ -65,7 +93,7 @@ export function PairScreen({
           <Label color={ready ? signal.sage : ink.faint}>Connect</Label>
         </Pressable>
       </View>
-    </View>
+    </SafeScreen>
   );
 }
 
@@ -101,7 +129,7 @@ function Field({
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: ground.base, justifyContent: "center", padding: space.loose },
+  screen: { justifyContent: "center", padding: space.loose },
   form: { gap: space.step, maxWidth: 480, width: "100%", alignSelf: "center" },
   notice: {
     flexDirection: "row",

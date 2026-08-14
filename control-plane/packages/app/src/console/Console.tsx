@@ -11,7 +11,7 @@
  */
 
 import type { JSX } from "react";
-import { useEffect, useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer, useRef } from "react";
 import { StyleSheet, View } from "react-native";
 import { Toast } from "../components/Toast.tsx";
 import { useSplitLayout } from "../design/layout.ts";
@@ -22,7 +22,7 @@ import { FleetScreen } from "../screens/FleetScreen.tsx";
 import { SessionScreen } from "../screens/SessionScreen.tsx";
 import { browserSessionsOf, fleetClearances, sessionFor } from "./state.ts";
 import { useConsole } from "./useConsole.ts";
-
+import { useHardwareBack } from "./useHardwareBack.ts";
 export function Console({
   connection,
   onUnpair,
@@ -47,12 +47,22 @@ export function Console({
   const agent = state.agents.find((candidate) => candidate.id === state.selected) ?? null;
 
   // Wide enough for both and nothing open is a hole rather than a choice, so
-  // the top strip is taken. On a phone, opening a log is a deliberate act.
+  // the top strip is taken once. Only once: an operator who backed out of a
+  // session on a tablet is not asking the bay to immediately reopen the same
+  // log. Phones never hit this path because `split` is false there.
+  const didAutoSelect = useRef(false);
   useEffect(() => {
-    if (!split || state.selected !== null) return;
+    if (!split || state.selected !== null || didAutoSelect.current) return;
     const top = state.agents[0];
-    if (top !== undefined) actions.select(top.id);
+    if (top === undefined) return;
+    didAutoSelect.current = true;
+    actions.select(top.id);
   }, [split, state.selected, state.agents, actions]);
+
+  // Android hardware back is the system way back to the bay on a phone. On a
+  // split layout the bay is already on screen, so claiming back would steal the
+  // OS gesture for no gain.
+  useHardwareBack(!split && state.selected !== null, actions.back);
 
   const bay = (
     <FleetScreen

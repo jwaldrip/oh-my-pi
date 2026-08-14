@@ -26,6 +26,7 @@ import { GroupHeader } from "../components/GroupHeader.tsx";
 import { SessionRow } from "../components/SessionRow.tsx";
 import { SortBar } from "../components/SortBar.tsx";
 import { Glyph } from "../design/icons.tsx";
+import { SafeScreen } from "../design/SafeScreen.tsx";
 import { Body, Display, Kicker, Label } from "../design/text.tsx";
 import { ground, ink, signal, space, stroke, TOUCH_TARGET } from "../design/tokens.ts";
 
@@ -67,7 +68,7 @@ export function FleetScreen({
   const initialNumToRender = rows * 2 + 50;
 
   return (
-    <View style={styles.screen} testID="fleet">
+    <SafeScreen testID="fleet">
       <View style={styles.head}>
         <Glyph name="bay" size={16} color={ink.plain} />
         <Display heading testID="fleet-title">
@@ -158,7 +159,7 @@ export function FleetScreen({
           ListEmptyComponent={<Empty />}
         />
       )}
-    </View>
+    </SafeScreen>
   );
 }
 
@@ -173,7 +174,6 @@ function Empty(): JSX.Element {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: ground.base },
   head: {
     flexDirection: "row",
     alignItems: "center",

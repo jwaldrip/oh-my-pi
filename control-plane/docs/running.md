@@ -313,6 +313,33 @@ yourself `approve`.
 Rotating the local operator rewrites `~/.ompd/token`, wherever the rotation was
 driven from. Rotate it from your phone and the CLI on the machine keeps working.
 
+## Three ways to reach it
+
+A daemon can offer a client three kinds of endpoint. `GET /v1/endpoints` is
+how it says which are actually available right now, and only one of the three
+is proven end to end in this repo.
+
+**Loopback, same machine.** The daemon's default bind, and the only path this
+repo's tests exercise with real client traffic: the CLI and the local web UI,
+run on the same Mac the daemon runs on. A phone is a separate device and
+cannot reach another machine's loopback interface at all, which is exactly why
+the other two options exist. Proven.
+
+**A LAN address, same network.** `ompd config set host <lan-ip>`, then restart
+the daemon, binds an interface other machines on the network can reach instead
+of `127.0.0.1`, and that is exactly the risk: it publishes a daemon that runs
+arbitrary code as this user to anything on that network segment that can reach
+the interface, paired or not, the instant the port is listening. Not proven
+against a second machine anywhere in this repo. If you want the same reach
+without opening an interface to the whole network, use Tailscale below instead.
+
+**A hub, anywhere.** A base URL plus the daemon's pinned `daemonId`, relayed by
+`@ompd/hub` (`docs/hub.md`). Requires a *deployed* hub, and none is deployed:
+`docs/hub.md` names exactly what is missing. Until one exists, this path
+reaches nothing. It does not change "The Mac has to be awake" below: a hub
+gets past NAT and past not knowing an address, not past macOS actually being
+asleep.
+
 ## Reach it from outside
 
 **The daemon binds `127.0.0.1` and nothing about running it changes that.**

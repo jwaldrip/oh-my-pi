@@ -12,6 +12,7 @@ import { AppState } from "react-native";
 import type { AgentId, ApprovalChoice, ApprovalScope } from "@ompd/core/contracts";
 import { OmpdClient } from "@ompd/core/ompd-client";
 import type { Connection } from "../platform/connection.ts";
+import { createHubSocketFactory } from "../platform/socket.ts";
 import { apply, emptyConsole } from "./state.ts";
 import type { ConsoleState } from "./state.ts";
 import { routeWebViewAction } from "./webview.ts";
@@ -32,6 +33,22 @@ export interface ConsoleActions {
   unmountWebView: (agentId: AgentId) => void;
 }
 
+/**
+ * A direct connection dials the socket the device was handed. A hub
+ * connection has no socket of its own: it goes through the pinned daemon's
+ * relay instead, which is why it needs its own `createSocket`.
+ */
+function buildClient(connection: Connection): OmpdClient {
+  if (connection.transport === "direct") {
+    return new OmpdClient({ url: connection.url, token: connection.token });
+  }
+  return new OmpdClient({
+    url: connection.hubUrl,
+    token: connection.token,
+    createSocket: createHubSocketFactory({ daemonId: connection.daemonId }),
+  });
+}
+
 export function useConsole(connection: Connection): [ConsoleState, ConsoleActions] {
   const [state, dispatch] = useReducer(apply, connection.scopes, emptyConsole);
 
@@ -39,7 +56,7 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
   // socket per render is a reconnect loop that looks like a flaky daemon.
   const clientRef = useRef<OmpdClient | null>(null);
   if (clientRef.current === null) {
-    clientRef.current = new OmpdClient({ url: connection.url, token: connection.token });
+    clientRef.current = buildClient(connection);
   }
   const client = clientRef.current;
 

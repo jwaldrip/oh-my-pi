@@ -18,7 +18,7 @@
  * treat any of them as a torn session rather than papering over one.
  */
 
-import { fromBase64Url, toBase64Url, utf8 } from "./bytes.ts";
+import { bufferSource, fromBase64Url, toBase64Url, utf8 } from "./bytes.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 
 const KEY_BITS = 256;
@@ -60,10 +60,10 @@ export interface ChannelKeys {
  * sealed frame fails to open.
  */
 export async function deriveChannelKeys(sharedSecret: Uint8Array, transcript: Uint8Array): Promise<ChannelKeys> {
-  const ikm = await crypto.subtle.importKey("raw", sharedSecret, "HKDF", false, ["deriveBits"]);
+  const ikm = await crypto.subtle.importKey("raw", bufferSource(sharedSecret), "HKDF", false, ["deriveBits"]);
   const derive = async (label: string): Promise<CryptoKey> => {
     const bits = await crypto.subtle.deriveBits(
-      { name: "HKDF", hash: "SHA-256", salt: transcript, info: utf8(label) },
+      { name: "HKDF", hash: "SHA-256", salt: bufferSource(transcript), info: bufferSource(utf8(label)) },
       ikm,
       KEY_BITS,
     );
@@ -130,9 +130,14 @@ export class SealedChannel {
     if (this.#sendCounter >= MAX_COUNTER) throw new ChannelError("channel exhausted");
     const counter = this.#sendCounter++;
     const sealed = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: nonceFor(counter), additionalData: aadFor(counter), tagLength: TAG_BYTES * 8 },
+      {
+        name: "AES-GCM",
+        iv: bufferSource(nonceFor(counter)),
+        additionalData: bufferSource(aadFor(counter)),
+        tagLength: TAG_BYTES * 8,
+      },
       this.#sendKey,
-      utf8(plaintext),
+      bufferSource(utf8(plaintext)),
     );
     return toBase64Url(new Uint8Array(sealed));
   }
@@ -145,9 +150,14 @@ export class SealedChannel {
     let plaintext: ArrayBuffer;
     try {
       plaintext = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: nonceFor(counter), additionalData: aadFor(counter), tagLength: TAG_BYTES * 8 },
+        {
+          name: "AES-GCM",
+          iv: bufferSource(nonceFor(counter)),
+          additionalData: bufferSource(aadFor(counter)),
+          tagLength: TAG_BYTES * 8,
+        },
         this.#recvKey,
-        raw,
+        bufferSource(raw),
       );
     } catch {
       // Indistinguishable on purpose: a forged tag, a replayed frame, and a

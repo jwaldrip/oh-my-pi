@@ -2527,8 +2527,19 @@ export class AcpAgent implements Agent {
 		throw new Error(`Unsupported MCP server transport: ${server.type}`);
 	}
 
-	#toNameValueMap(values: Array<{ name: string; value: string }>): { [name: string]: string } {
+	/**
+	 * ACP carries env and headers as `{ name, value }[]`. Headers are optional
+	 * on the wire, and a host that has none omits the field rather than sending
+	 * `[]`. The previous loop assumed the array was always present, which is
+	 * how a loopback HTTP MCP server without headers (the WebView bridge) made
+	 * every `session/new` fail with "undefined is not an object (evaluating
+	 * 'values')" before a single tool was ever listed.
+	 */
+	#toNameValueMap(
+		values: Array<{ name: string; value: string }> | undefined,
+	): { [name: string]: string } {
 		const mapped: { [name: string]: string } = {};
+		if (values === undefined) return mapped;
 		for (const value of values) {
 			mapped[value.name] = value.value;
 		}

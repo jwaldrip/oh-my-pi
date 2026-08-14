@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./contracts": "./src/contracts.ts",
     "./ompd-client": "./src/ompd-client.ts",
-    "./policy": "./src/policy.ts"
+    "./policy": "./src/policy.ts",
+    "./pairing": "./src/pairing.ts"
   },
   "scripts": {
     "check": "bun ../../scripts/check-types.ts tsconfig.json"

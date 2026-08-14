@@ -65,7 +65,11 @@ interface TasksResponse {
 
 export function useCowork(connection: Connection, cwd: string, defaultAgentId: string | null): [CoworkState, CoworkActions] {
   const [state, setState] = useState<CoworkState>(EMPTY_STATE);
-  const root = restRoot(connection.url);
+  // Cowork's routes are plain REST, and a hub is a relay for the socket
+  // protocol only: there is no HTTP surface behind it to hang these on, so a
+  // hub connection has no root and every fetch below fails closed instead of
+  // guessing at one.
+  const root = connection.transport === "direct" ? restRoot(connection.url) : null;
 
   const authFetch = useCallback(
     (path: string, init?: RequestInit): Promise<Response> => {

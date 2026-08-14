@@ -28,6 +28,7 @@ import {
   type AgentId,
   type ClientFrame,
   type ConnectorSummary,
+  type EndpointOffer,
   type HostSpec,
   type Run,
   type ServerFrame,
@@ -254,6 +255,14 @@ export interface GatewayOptions {
    * frames, but nothing is pushed.
    */
   events?: GatewayEvents;
+  /**
+   * Where a bug in a request handler is reported.
+   *
+   * Server side only, and deliberately not part of the response: a stack from
+   * this process names filesystem paths and internals that a remote client has
+   * no business reading.
+   */
+  onError?: (err: Error) => void;
   host?: string;
   /** 0 asks the OS for a free port; read the real one back from `listen()`. */
   port?: number;
@@ -332,6 +341,13 @@ export interface GatewayOptions {
    * here" and "this daemon build has no catalogue wired in".
    */
   sessionIndex?: SessionIndex;
+  /**
+   * Reads live endpoint offers from config and identity. Absent, `GET
+   * /v1/endpoints` reports an empty offer list rather than an error: unlike
+   * `skills`/`connectors`/`tasks`, "nothing reachable" is itself a real
+   * answer this route can give, so there is no separate off-signal to draw.
+   */
+  endpoints?: () => EndpointOffer[];
   /**
    * Settles one action previously dispatched to a registered client WebView.
    * Returning false means the request is stale, unknown, or belongs elsewhere.
@@ -433,9 +449,11 @@ export class Gateway {
   #connectors: ConnectorCatalog | undefined;
   #tasks: TaskCatalog | undefined;
   #sessionIndex: SessionIndex | undefined;
+  #endpoints: (() => EndpointOffer[]) | undefined;
   #onWebViewResult: GatewayOptions["onWebViewResult"];
   #onWebViewUnavailable: GatewayOptions["onWebViewUnavailable"];
   #staticRoot: string | undefined;
+  #onError: GatewayOptions["onError"];
   /** Set by `listen`, so uptime measures serving rather than construction. */
   #startedAtMs: number | undefined;
 
@@ -465,10 +483,12 @@ export class Gateway {
     this.#connectors = opts.connectors;
     this.#tasks = opts.tasks;
     this.#sessionIndex = opts.sessionIndex;
+    this.#endpoints = opts.endpoints;
     this.#onWebViewResult = opts.onWebViewResult;
     this.#onWebViewUnavailable = opts.onWebViewUnavailable;
     // Resolved once so the traversal check below compares two absolute paths.
     this.#staticRoot = opts.staticRoot === undefined ? undefined : resolve(opts.staticRoot);
+    this.#onError = opts.onError;
 
     this.#unsubscribe = this.#events?.add({
       onUpdate: (agentId, seq, update) => {
@@ -533,6 +553,16 @@ export class Gateway {
       hostname: this.#host,
       port: this.#port,
       fetch: (req, server) => this.#fetch(req, server),
+      /**
+       * A request handler that throws is a bug in this daemon, and Bun's own
+       * 500 body says only "Internal error" with the stack going nowhere. That
+       * is indistinguishable from a route that deliberately answered 500,
+       * which has already cost real time to tell apart.
+       */
+      error: (err: Error) => {
+        this.#onError?.(err);
+        return Response.json({ error: "internal_error" }, { status: 500 });
+      },
       websocket: {
         open: (ws: ServerWebSocket<SocketState>) => this.#open(ws),
         message: (ws: ServerWebSocket<SocketState>, message: string | Buffer) =>
@@ -1026,6 +1056,12 @@ export class Gateway {
     if (path === "/v1/devices" && req.method === "GET") {
       if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
       return Response.json({ devices: this.#store.listDevices() });
+    }
+
+    if (path === "/v1/endpoints" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const offers = this.#endpoints?.() ?? [];
+      return Response.json({ offers });
     }
 
     const deviceRoute = /^\/v1\/devices\/([^/]+)$/.exec(path);

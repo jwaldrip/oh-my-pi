@@ -73,7 +73,15 @@ function EntryRow({
   switch (entry.kind) {
     case "user":
       return (
-        <View style={styles.row} testID={`entry-user-${entry.id}`}>
+        <View
+          style={styles.row}
+          testID={`entry-user-${entry.id}`}
+          // XCUITest finds rows by identifier and reads the prompt from the
+          // accessibility label. Without this, a nested Body Text is often
+          // invisible to the query tree even though it is on screen.
+          accessible
+          accessibilityLabel={`you: ${entry.text}`}
+        >
           <View style={[styles.gutter, { borderLeftColor: ink.faint }]}>
             <Kicker color={ink.muted}>you</Kicker>
           </View>
@@ -83,7 +91,12 @@ function EntryRow({
 
     case "assistant":
       return (
-        <View style={styles.row} testID={`entry-assistant-${entry.id}`}>
+        <View
+          style={styles.row}
+          testID={`entry-assistant-${entry.id}`}
+          accessible
+          accessibilityLabel={`${entry.thought ? "thinking" : "agent"}: ${entry.text}`}
+        >
           <View style={[styles.gutter, { borderLeftColor: entry.thought ? signal.violet : signal.sage }]}>
             <Kicker color={entry.thought ? signal.violet : signal.sage}>
               {entry.thought ? "thinking" : "agent"}

@@ -32,9 +32,9 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "00E356ED1AD99517003FC87E"
-               BuildableName = "ompdTests.xctest"
-               BlueprintName = "ompdTests"
+               BlueprintIdentifier = "386488FB882327E9AAB4B552"
+               BuildableName = "ompdUITests.xctest"
+               BlueprintName = "ompdUITests"
                ReferencedContainer = "container:ompd.xcodeproj">
             </BuildableReference>
          </TestableReference>

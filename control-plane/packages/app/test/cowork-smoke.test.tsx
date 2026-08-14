@@ -3,33 +3,31 @@
  * width.
  *
  * Rendering goes through react-native-web, the shipped web target, the same
- * way `smoke.test.tsx` already proves the console does. `Dimensions.set` is
- * react-native-web's own documented seam for pinning `useWindowDimensions`
- * outside a browser (see `Dimensions.get`'s early return when `canUseDom` is
- * false) — the same hook `useSplitLayout` calls in the shipped app, not a
- * test double for it.
+ * way `smoke.test.tsx` already proves the console does. Window width is pinned
+ * through `rnw.ts`'s `useWindowDimensions` mock rather than `Dimensions.set`,
+ * which RNW rejects once a DOM is present.
  */
 
 import "./rnw.ts";
+import { resetWindowSize, setWindowWidth } from "./rnw.ts";
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 // Type-only, so it is erased before it can pull `react-native` in early.
 import type { ConnectorSummary, SkillSummary, Task } from "../src/cowork/types.ts";
 
 // Dynamic on purpose: bun loads a file's whole static import graph before any
 // module body runs, so a static import here would pull the real `react-native`
-// in before `./rnw.ts` could substitute it. `Dimensions` is read off the
-// mocked `"react-native"` module — not a direct react-native-web subpath —
-// because `rnw.ts`'s mock and a separately-resolved subpath import land on
-// two different module instances with two different `dimensions` singletons,
-// and only the mocked one is what `useSplitLayout` actually reads.
-const { Dimensions } = await import("react-native");
+// in before `./rnw.ts` could substitute it.
 const { CoworkScreen } = await import("../src/screens/CoworkScreen.tsx");
 const { ConnectorsView, PluginsView, SkillsView } = await import("../src/components/CoworkCatalogueViews.tsx");
 const { reduceTasks, EMPTY_TASKS } = await import("../src/cowork/tasks.ts");
 
 const NOW = Date.parse("2026-01-01T00:10:00.000Z");
+
+afterEach(() => {
+  resetWindowSize();
+});
 
 // ---------------------------------------------------------------------------
 // A realistic catalogue: this machine has dozens of real skills and
@@ -146,7 +144,7 @@ const TASKS = reduceTasks(EMPTY_TASKS, {
 });
 
 function renderAt(width: number): string {
-  Dimensions.set({ window: { width, height: 844, scale: 1, fontScale: 1 } });
+  setWindowWidth(width);
   return renderToStaticMarkup(
     <CoworkScreen
       tasks={TASKS}

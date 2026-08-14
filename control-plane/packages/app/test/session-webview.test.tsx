@@ -16,11 +16,7 @@
 
 import "./rnw.ts";
 
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-
-GlobalRegistrator.register();
-
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Agent } from "@ompd/core/contracts";
@@ -122,9 +118,6 @@ function mountScreen(): Harness {
   };
 }
 
-afterAll(() => {
-  GlobalRegistrator.unregister();
-});
 
 describe("the session screen's WebView registration", () => {
   test("a closed pane never registers", () => {

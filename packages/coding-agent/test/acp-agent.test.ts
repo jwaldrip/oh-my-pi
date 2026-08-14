@@ -2796,13 +2796,12 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 	}
 
 	/**
-	 * Regression test: an MCP server that finishes connecting after
-	 * `MCPManager`'s 250ms startup race window used to have its tools
-	 * silently discarded — `#configureMcpServers` only called
-	 * `session.refreshMCPTools` once, synchronously, with whatever
-	 * `connectServers` returned inside the race window. The background
-	 * `onToolsChanged` -> `refreshMCPTools` follow-up now runs through a
-	 * `refreshChain` queue so late connections still land in the session.
+	 * An ACP client can mark a mounted MCP server pre-approved via
+	 * `_meta["omp.toolApproval"]`, delegating the generic wrapper approval to
+	 * whatever gate the client itself already ran (e.g. the WebView bridge's
+	 * own approval). Only that trusted, non-serializable connection field may
+	 * grant this; a server that merely claims `approval: "allow"` in its own
+	 * config must not self-authorize.
 	 */
 	it("marks only an ACP client-authorized MCP connection as pre-approved", async () => {
 		const harness = await createHarness();
@@ -2837,6 +2836,102 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		}
 	}, 15_000);
 
+	/**
+	 * The daemon's WebView MCP descriptor is an HTTP server with a URL and no
+	 * headers. Headers are optional on the ACP wire, so a host that has none
+	 * omits the field rather than sending `[]`. Converting that descriptor used
+	 * to throw "undefined is not an object (evaluating 'values')" inside
+	 * `#toNameValueMap`, which made every `session/new` from ompd fail before a
+	 * single tool was listed. A real loopback HTTP MCP answers here so the
+	 * conversion is exercised end to end, not only as a unit of the mapper.
+	 */
+	it("accepts an HTTP MCP server that omits headers, matching the WebView descriptor", async () => {
+		const harness = await createHarness();
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+
+		const server = Bun.serve({
+			port: 0,
+			fetch: async (req) => {
+				// Minimal Streamable-HTTP MCP surface: initialize and tools/list.
+				// Enough for MCPManager to finish connecting without a real tool body.
+				if (req.method === "POST") {
+					const body = (await req.json()) as { id?: unknown; method?: string };
+					if (body.method === "initialize") {
+						return Response.json({
+							jsonrpc: "2.0",
+							id: body.id ?? null,
+							result: {
+								protocolVersion: "2024-11-05",
+								capabilities: { tools: {} },
+								serverInfo: { name: "ompd-webview", version: "0" },
+							},
+						});
+					}
+					if (body.method === "tools/list") {
+						return Response.json({
+							jsonrpc: "2.0",
+							id: body.id ?? null,
+							result: {
+								tools: [
+									{
+										name: "webview_observe",
+										description: "observe",
+										inputSchema: { type: "object", properties: {} },
+									},
+								],
+							},
+						});
+					}
+					if (body.method === "notifications/initialized") {
+						return new Response(null, { status: 202 });
+					}
+					return Response.json({
+						jsonrpc: "2.0",
+						id: body.id ?? null,
+						error: { code: -32601, message: `Method not found: ${body.method}` },
+					});
+				}
+				return new Response("ok");
+			},
+		});
+
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				// Exact shape of `mcpServerDescriptor` in the daemon: type/url/_meta,
+				// and deliberately no `headers` field.
+				mcpServers: [
+					{
+						name: "ompd-webview",
+						type: "http",
+						url: `http://127.0.0.1:${server.port}/mcp`,
+						_meta: { "omp.toolApproval": "allow" },
+					},
+				],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+
+			await pollUntil(() => {
+				const tools = refreshSpy.mock.calls.at(-1)?.[0];
+				return Array.isArray(tools) && tools.length > 0;
+			});
+			const tools = refreshSpy.mock.calls.at(-1)?.[0] as Array<{ name: string }> | undefined;
+			expect(tools?.some(tool => tool.name.includes("webview_observe"))).toBe(true);
+		} finally {
+			refreshSpy.mockRestore();
+			server.stop(true);
+		}
+	}, 15_000);
+
+	/**
+	 * Regression test: an MCP server that finishes connecting after
+	 * `MCPManager`'s 250ms startup race window used to have its tools
+	 * silently discarded — `#configureMcpServers` only called
+	 * `session.refreshMCPTools` once, synchronously, with whatever
+	 * `connectServers` returned inside the race window. The background
+	 * `onToolsChanged` -> `refreshMCPTools` follow-up now runs through a
+	 * `refreshChain` queue so late connections still land in the session.
+	 */
 	it("delivers a late-connecting server's tools via a queued refreshMCPTools call", async () => {
 		const harness = await createHarness();
 		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");

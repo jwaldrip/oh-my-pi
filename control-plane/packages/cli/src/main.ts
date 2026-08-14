@@ -19,6 +19,11 @@ import {
 } from "./client.ts";
 import { agentsCommand, newCommand, promptCommand, stopAgentCommand } from "./commands/agents.ts";
 import { auditCommand } from "./commands/audit.ts";
+import {
+  configGetCommand,
+  configListCommand,
+  configSetCommand,
+} from "./commands/config.ts";
 import { startCommand, statusCommand } from "./commands/daemon.ts";
 import {
   approveCommand,
@@ -49,6 +54,23 @@ export async function run(argv: string[], ctx: CliContext = defaultContext()): P
         return await startCommand(ctx, command);
       case "status":
         return await statusCommand(ctx);
+      case "config":
+        switch (command.action) {
+          case "list":
+            return await configListCommand(ctx);
+          case "get":
+            return await configGetCommand(ctx, command);
+          case "set":
+            return await configSetCommand(ctx, command);
+          default: {
+            // A variant added later must break the build here rather than fall
+            // through into no response at all. The narrowed value itself is
+            // what gets assigned: reading `.action` off it cannot compile,
+            // because an exhaustive switch has already narrowed it to `never`.
+            const exhaustive: never = command;
+            throw new Error(`unhandled config action ${JSON.stringify(exhaustive)}`);
+          }
+        }
       case "pair":
         return await pairCommand(ctx, command);
       case "approve":

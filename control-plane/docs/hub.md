@@ -5,8 +5,13 @@ nothing inbound reaches it and no amount of port forwarding fixes the sleeping
 half. `docs/fleet.md` argued the shape: daemons dial **out** to a relay and hold
 the connection. This is that, built.
 
-Nothing here is deployed. Deploys run in CI on this project, never from a
-workstation, and the workflow has never been run.
+Nothing here is deployed. `control-plane/packages/hub/deploy/main.tf` and
+`.github/workflows/hub-deploy.yml` exist and describe how to build and apply
+it, but the workflow has never run. It is manual-dispatch only, and it needs
+seven repository variables that are not set today: `GCP_WORKLOAD_IDENTITY_PROVIDER`,
+`GCP_DEPLOY_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_NETWORK_ID`,
+`GCP_VPC_CONNECTOR_ID`, and `TF_STATE_BUCKET`. There is no hub running
+anywhere, and no hostname to point a `hubUrl` at.
 
 ## Shape
 
@@ -73,7 +78,7 @@ a matter of claiming an id and signing for yourself.
 The hub cannot check this and deliberately holds nothing to check it with. It
 verifies only that the daemon is enrolled and currently connected, then relays.
 The client's bearer token travels sealed, is opened by the daemon, and goes to
-`DeviceAuth.authenticate` — the same call the local websocket path makes. One
+`DeviceAuth.authenticate`, the same call the local websocket path makes. One
 implementation, one answer, no second surface to drift.
 
 That is also why a client paired to daemon A cannot reach daemon B: A's token
@@ -147,6 +152,12 @@ never retries.
 
 ## Running it
 
+`ompd config set hubUrl <url>` writes it to `config.json`. The daemon reads
+that file at startup, not while running, so the change takes effect on the
+next restart and not before. It offers a hub endpoint, over `GET
+/v1/endpoints`, only once an identity exists at `<home>/identity`: with no key
+there is nothing to register and nothing to sign a connection with.
+
 ```sh
 # The daemon needs a hub and an identity. The identity is created on first use
 # at <home>/identity and must not be regenerated: it is what clients pinned.
@@ -157,6 +168,12 @@ curl -X POST https://hub.example.com/v1/enroll \
   -H "authorization: Bearer $OMPD_HUB_OPERATOR_TOKEN" \
   -d '{"publicKey":"<from <home>/identity>","label":"laptop"}'
 ```
+
+A client reaches this daemon through the hub with the hub's base URL plus the
+pinned `daemonId`, never by opening `<hubUrl>/v1/link/<daemonId>` directly as a
+plain websocket and reading whatever comes back. That path carries a session
+sealed to this one daemon's key; a socket that skipped the X25519 exchange
+gets ciphertext, not a transcript.
 
 Tests, including the ones that need a real Redis:
 

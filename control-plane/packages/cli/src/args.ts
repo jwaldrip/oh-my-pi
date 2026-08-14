@@ -34,6 +34,9 @@ export type Command =
   | { kind: "version" }
   | { kind: "start"; host?: string; port?: number; foreground: boolean }
   | { kind: "status" }
+  | { kind: "config"; action: "list" }
+  | { kind: "config"; action: "get"; key: string }
+  | { kind: "config"; action: "set"; key: string; value: string }
   | { kind: "pair"; name: string; scopes: string[] }
   | { kind: "approve"; code: string; scopes: string[] }
   | { kind: "devices" }
@@ -76,6 +79,13 @@ daemon
                           run the daemon
   status                  is it running, what is it doing
 
+config
+  config                  print effective configuration, defaults merged with the file
+  config get <key>        print one effective value
+  config set <key> <value>
+                          persist a value to <home>/config.json; validated the same way
+                          the daemon validates it at its own startup
+
 devices
   pair <name> [--scopes read,prompt]
                           begin pairing and print the code to approve
@@ -101,8 +111,9 @@ audit
 
 scopes: ${KNOWN_SCOPES.join(", ")}
 
-The daemon binds loopback. OMPD_URL overrides where the CLI looks for it and
-OMPD_TOKEN overrides the token in ~/.ompd/token.`;
+The daemon binds loopback by default; change it with config set host <address> before
+starting, or make it reachable from elsewhere with config set hubUrl wss://host. OMPD_URL
+overrides where the CLI looks for it and OMPD_TOKEN overrides the token in ~/.ompd/token.`;
 
 interface ParsedTokens {
   positional: string[];
@@ -249,6 +260,32 @@ export function parseCommand(argv: string[]): Command {
     case "status":
       rejectExtra(rest, 0, "status");
       return { kind: "status" };
+
+    case "config": {
+      const sub = rest[0];
+      if (sub === undefined) {
+        rejectExtra(rest, 0, "config");
+        return { kind: "config", action: "list" };
+      }
+      if (sub === "get") {
+        const configArgs = rest.slice(1);
+        rejectExtra(configArgs, 1, "config get");
+        return { kind: "config", action: "get", key: requirePositional(configArgs, 0, "key") };
+      }
+      if (sub === "set") {
+        const configArgs = rest.slice(1);
+        rejectExtra(configArgs, 2, "config set");
+        return {
+          kind: "config",
+          action: "set",
+          key: requirePositional(configArgs, 0, "key"),
+          value: requirePositional(configArgs, 1, "value"),
+        };
+      }
+      throw new UsageError(
+        `unknown config action ${sub}; use config, config get <key>, or config set <key> <value>`,
+      );
+    }
 
     case "pair": {
       rejectExtra(rest, 1, "pair");
