@@ -110,6 +110,11 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   // registration that never left is restored by the reconnect that follows.
   webview_register: false,
   webview_unregister: false,
+  // Normal TUI control frames are emitted only by the terminal client, never
+  // by this app-facing client. Losing one here is not a user instruction.
+  tui_register: false,
+  tui_acp: false,
+  tui_acp_ready: false,
 };
 
 // ---------------------------------------------------------------------------
