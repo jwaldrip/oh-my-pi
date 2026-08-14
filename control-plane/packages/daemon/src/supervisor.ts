@@ -425,6 +425,7 @@ export class Supervisor {
       onPermission: req => this.#onPermission(req),
       onElicitation: req => this.#onElicitation(req),
       onUpdate: (sessionId, update) => this.#onUpdate(sessionId, update),
+      onAgentRegistry: agents => this.#onAgentRegistry(key, agents),
       onLog: this.#onLog,
       promptTimeoutMs: this.#promptTimeout,
       onClose: () => this.#onHostClosed(key),
@@ -448,6 +449,7 @@ export class Supervisor {
       ref: { kind: "local", id: key, spec },
       handle: undefined,
       agents: new Set(),
+      registryAgents: new Map(),
     };
     // Register before `initialize`: if the TUI socket closes while its
     // initialize response is in flight, the AcpClient close callback can
