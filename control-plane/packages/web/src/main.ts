@@ -25,6 +25,7 @@ import type { SessionState } from "./session/model.ts";
 import { createTimeline } from "./session/render.ts";
 import type { TimelineView } from "./session/render.ts";
 import { createBay } from "./ui/bay.ts";
+import { createAgentHub } from "./ui/agent-hub.ts";
 import { createComposer } from "./ui/composer.ts";
 import { el, elapsed, formatMoney, setText, shortenPath } from "./ui/dom.ts";
 import { icon } from "./ui/icons.ts";
@@ -190,6 +191,12 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
       select(agentId);
     },
   });
+  const agentHub = createAgentHub();
+  const bayStack = el("aside", {
+    class: "bay-stack",
+    attrs: { "aria-label": "Agent position" },
+    children: [agentHub.element, bay.element],
+  });
 
   // -- the log column -------------------------------------------------------
 
@@ -272,7 +279,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
   toast.hidden = true;
   let toastTimer: number | undefined;
 
-  host.replaceChildren(position, bay.element, logColumn, rack.element, toast);
+  host.replaceChildren(position, bayStack, logColumn, rack.element, toast);
 
   // The plan panel has two homes and one instance: moving the node keeps its
   // open state and its rows rather than duplicating them per breakpoint.
@@ -430,7 +437,8 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
     const previous = new Map(agentsById);
     agentsById.clear();
     for (const agent of event.agents) agentsById.set(agent.id, agent);
-    bay.render(event.agents);
+    agentHub.render(event.agents.filter((agent) => agent.parentAgentId !== undefined));
+    bay.render(event.agents.filter((agent) => agent.parentAgentId === undefined));
 
     for (const agent of event.agents) {
       const before = previous.get(agent.id);
@@ -562,6 +570,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
   function tick(): void {
     setText(clock, timeFormat.format(new Date()));
     bay.refreshClocks();
+    agentHub.refreshClocks();
     if (selected === null) return;
     const agent = agentsById.get(selected);
     if (agent !== undefined) setText(logClock, elapsed(agent.lastActiveAt));

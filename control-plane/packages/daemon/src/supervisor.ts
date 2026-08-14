@@ -16,6 +16,7 @@ import {
   DEFAULT_PROMPT_TIMEOUT_MS,
   parseApprovalPrompt,
   spawnLocalHost,
+  type AcpAgentRegistrySnapshot,
   type AcpOptionId,
   type ElicitationOutcome,
   type ElicitationRequest,
@@ -183,6 +184,8 @@ interface HostEntry {
   handle: HostHandle | undefined;
   /** Agents served by this host process. */
   agents: Set<AgentId>;
+  /** Mapping from OMP's per-process registry ids to daemon Agent ids. */
+  registryAgents: Map<string, AgentId>;
 }
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
@@ -214,6 +217,12 @@ const PLAN_APPROVAL_PREFIX = "Approve plan ";
 const CHOICE_SEP = "\u0000";
 const TOOL_APPROVAL_KEY = TOOL_APPROVAL_CHOICES.join(CHOICE_SEP);
 const PLAN_APPROVAL_KEY = PLAN_APPROVAL_CHOICES.join(CHOICE_SEP);
+const AGENT_STATE_FROM_REGISTRY: Record<AcpAgentRegistrySnapshot["status"], AgentState> = {
+  running: "busy",
+  idle: "idle",
+  parked: "stopped",
+  aborted: "failed",
+};
 
 /**
  * Ordering for "most restrictive wins" when one call names several targets.
@@ -416,6 +425,7 @@ export class Supervisor {
       onPermission: req => this.#onPermission(req),
       onElicitation: req => this.#onElicitation(req),
       onUpdate: (sessionId, update) => this.#onUpdate(sessionId, update),
+      onAgentRegistry: agents => this.#onAgentRegistry(key, agents),
       onLog: this.#onLog,
       promptTimeoutMs: this.#promptTimeout,
       onClose: () => this.#onHostClosed(key),
@@ -439,6 +449,7 @@ export class Supervisor {
       ref: { kind: "local", id: key, spec },
       handle: undefined,
       agents: new Set(),
+      registryAgents: new Map(),
     };
     // Register before `initialize`: if the TUI socket closes while its
     // initialize response is in flight, the AcpClient close callback can
@@ -985,9 +996,8 @@ export class Supervisor {
       handle = await provisioner.provision(spec, actor);
     }
 
-    // Assigned below, and read only when the host closes, which cannot happen
-    // before this function has returned it.
     let key = "";
+    const pendingRegistrySnapshots: AcpAgentRegistrySnapshot[][] = [];
     const opts: SpawnLocalHostOptions = {
       cwd,
       // A provisioned host resolves omp on the far side, so the daemon's own
@@ -1001,6 +1011,10 @@ export class Supervisor {
       // approval surfaces as a transport error instead of a recorded denial.
       promptTimeoutMs: this.#promptTimeout,
       onUpdate: (sessionId, update) => this.#onUpdate(sessionId, update),
+      onAgentRegistry: (agents) => {
+        if (key) this.#onAgentRegistry(key, agents);
+        else pendingRegistrySnapshots.push(agents);
+      },
       onLog: this.#onLog,
       onClose: () => this.#onHostClosed(key),
     };
@@ -1019,8 +1033,17 @@ export class Supervisor {
     const ref: HostRef = handle?.ref ?? { kind: "local", id: String(host.pid), spec };
     key = handle === undefined ? String(host.pid) : `${ref.kind}:${ref.id}`;
 
-    const entry: HostEntry = { key, host, spec, ref, handle, agents: new Set() };
+    const entry: HostEntry = {
+      key,
+      host,
+      spec,
+      ref,
+      handle,
+      agents: new Set(),
+      registryAgents: new Map(),
+    };
     this.#hosts.set(key, entry);
+    for (const agents of pendingRegistrySnapshots) this.#onAgentRegistry(key, agents);
     this.#store.audit({
       action: "host.provision",
       outcome: "ok",
@@ -1056,6 +1079,74 @@ export class Supervisor {
     const seq = this.#store.appendUpdate(agentId, update);
     this.#events.onUpdate?.(agentId, seq, update);
   }
+  #onAgentRegistry(key: string, snapshots: AcpAgentRegistrySnapshot[]): void {
+    const entry = this.#hosts.get(key);
+    if (!entry) return;
+
+    const unresolved = snapshots.filter((snapshot) => snapshot.kind === "sub");
+    const seen = new Set<string>();
+    let changed = false;
+
+    while (unresolved.length > 0) {
+      let attached = false;
+      for (let index = unresolved.length - 1; index >= 0; index -= 1) {
+        const snapshot = unresolved[index]!;
+        const parentAgentId =
+          (snapshot.parentSessionId === undefined
+            ? undefined
+            : this.#sessionAgent.get(snapshot.parentSessionId)) ??
+          (snapshot.parentId === undefined ? undefined : entry.registryAgents.get(snapshot.parentId));
+        const parent = parentAgentId === undefined ? undefined : this.#store.getAgent(parentAgentId);
+        if (parent == null) continue;
+
+        const agentId = entry.registryAgents.get(snapshot.id) ?? `${parent.id}:sub:${snapshot.id}`;
+        const existing = this.#store.getAgent(agentId);
+        const agent: Agent = {
+          id: agentId,
+          name: snapshot.displayName,
+          state: AGENT_STATE_FROM_REGISTRY[snapshot.status],
+          host: entry.ref,
+          cwd: parent.cwd,
+          createdAt: snapshot.createdAt,
+          lastActiveAt: snapshot.lastActiveAt,
+          routineId: parent.routineId,
+          parentAgentId: parent.id,
+          taskTitle: snapshot.taskTitle,
+          model: snapshot.model,
+          metrics: snapshot.metrics,
+          labels: { ...existing?.labels, source: "omp-subagent" },
+        };
+        if (snapshot.sessionId !== undefined) agent.acpSessionId = snapshot.sessionId;
+        this.#store.upsertAgent(agent);
+        entry.registryAgents.set(snapshot.id, agentId);
+        if (TERMINAL_AGENT_STATES.includes(agent.state)) {
+          entry.agents.delete(agentId);
+          this.#agentHost.delete(agentId);
+          if (snapshot.sessionId !== undefined) this.#sessionAgent.delete(snapshot.sessionId);
+        } else {
+          entry.agents.add(agentId);
+          this.#agentHost.set(agentId, key);
+          if (snapshot.sessionId !== undefined) this.#sessionAgent.set(snapshot.sessionId, agentId);
+        }
+        seen.add(snapshot.id);
+        unresolved.splice(index, 1);
+        attached = true;
+        changed = true;
+      }
+      if (!attached) break;
+    }
+
+    for (const [registryId, agentId] of entry.registryAgents) {
+      if (seen.has(registryId)) continue;
+      const agent = this.#store.getAgent(agentId);
+      if (agent != null && !TERMINAL_AGENT_STATES.includes(agent.state)) {
+        this.#store.setAgentState(agentId, "stopped");
+        changed = true;
+      }
+    }
+    if (changed) this.#events.onAgentsChanged?.(this.listAgents());
+  }
+
 
   /**
    * The ACP stream died on its own: the child crashed, or something outside

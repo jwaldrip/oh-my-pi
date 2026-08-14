@@ -34,6 +34,23 @@ const agent = (id: string): Agent => ({
   labels: {},
 });
 
+describe("agent hub metadata", () => {
+  test("round-trips lineage, assignment, model, and live metrics", () => {
+    const s = fresh();
+    const child = {
+      ...agent("agt_child"),
+      parentAgentId: "agt_parent",
+      taskTitle: "Inspect the permission path",
+      model: "anthropic/claude-sonnet-5",
+      metrics: { usedTokens: 12_340, costAmount: 0.0187, durationMs: 87_000 },
+    };
+
+    s.upsertAgent(child);
+
+    expect(s.getAgent(child.id)).toMatchObject(child);
+  });
+});
+
 describe("update replay", () => {
   test("sequences are dense, ordered, and per-agent", () => {
     const s = fresh();
