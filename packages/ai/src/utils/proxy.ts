@@ -266,12 +266,12 @@ export async function connectProxiedSocket(
 		const tlsOptions = options?.tls;
 		tunnelSocket = tls.connect({
 			...tlsOptions,
-			socket: rawSocket,
+			socket: rawSocket!,
 			servername: tlsOptions?.servername ?? targetHost,
 			ALPNProtocols: tlsOptions?.ALPNProtocols ?? ["h2"],
 		});
-		tunnelSocket.once("secureConnect", onTunnelReady);
-		tunnelSocket.once("error", onTunnelError);
+		tunnelSocket!.once("secureConnect", onTunnelReady);
+		tunnelSocket!.once("error", onTunnelError);
 	};
 	const onProxyReady = (): void => {
 		if (!rawSocket) return;
@@ -307,8 +307,8 @@ export async function connectProxiedSocket(
 				host: proxyHost,
 				port: proxyPort,
 			});
-	rawSocket.once("error", onRawError);
-	rawSocket.once(readyEvent, onProxyReady);
+	rawSocket!.once("error", onRawError);
+	rawSocket!.once(readyEvent, onProxyReady);
 
 	return promise;
 }

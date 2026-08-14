@@ -9,7 +9,8 @@
     "./contracts": "./src/contracts.ts",
     "./ompd-client": "./src/ompd-client.ts",
     "./policy": "./src/policy.ts",
-    "./pairing": "./src/pairing.ts"
+    "./pairing": "./src/pairing.ts",
+    "./handoff-container": "./src/handoff-container.ts"
   },
   "scripts": {
     "check": "bun ../../scripts/check-types.ts tsconfig.json"

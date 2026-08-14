@@ -1,16 +1,16 @@
 /**
- * Pin every test import of React to the app-local copy.
+ * Pin every render-test import to the React copy react-native-web actually uses.
  *
- * The app depends on React 19.1.4 so Metro and the RN 0.81.6 renderer agree.
- * `react-native-web` is hoisted to the workspace root, whose React is still
- * the catalog 19.2.7. Without this preload, a test that mocks `react-native`
- * to RNW ends up with two Reacts: the app's hooks and RNW's dispatcher are
- * different modules, and every render dies with "Invalid hook call".
+ * The native app deliberately stays on React 19.1.4 for React Native 0.81.6,
+ * while react-native-web is hoisted at the workspace root with React 19.2.7.
+ * Bun's CJS resolver does not apply `mock.module("react", ...)` inside RNW's
+ * already-loaded CJS files, so pinning JSX and React DOM to the app-local copy
+ * still leaves RNW holding the root copy. The test graph must instead share
+ * RNW's root React, React DOM, and JSX runtimes.
  *
- * Bun's `--preload` runs before the test graph is evaluated. Mocking the
- * package name is not enough on its own: the JSX runtimes and `react-dom`
- * must resolve to the same physical copy, or `createRoot` and `useState` still
- * disagree about `ReactSharedInternals`.
+ * Bun's `--preload` runs before the test graph is evaluated. Without this
+ * preload the dispatcher and rendered component use different React modules,
+ * which fails every hook-bearing screen with "Invalid hook call".
  */
 
 import { mock } from "bun:test";
@@ -28,6 +28,7 @@ const react = appRequire("react");
 const jsxRuntime = appRequire("react/jsx-runtime");
 const jsxDevRuntime = appRequire("react/jsx-dev-runtime");
 const reactDom = appRequire("react-dom");
+const reactDomServer = appRequire("react-dom/server");
 const reactDomClient = appRequire("react-dom/client");
 
 function mockAppAndWorkspace(specifier: string, value: Record<string, unknown>): void {
@@ -39,4 +40,5 @@ mockAppAndWorkspace("react", react);
 mockAppAndWorkspace("react/jsx-runtime", jsxRuntime);
 mockAppAndWorkspace("react/jsx-dev-runtime", jsxDevRuntime);
 mockAppAndWorkspace("react-dom", reactDom);
+mockAppAndWorkspace("react-dom/server", reactDomServer);
 mockAppAndWorkspace("react-dom/client", reactDomClient);

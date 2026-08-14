@@ -396,8 +396,8 @@ async function loadImageFromUrl(
 	if (!contentType?.startsWith("image/")) {
 		throw new Error(`Unsupported image type from URL: ${imageUrl}`);
 	}
-	const buffer = await response.bytes();
-	return { data: buffer.toBase64(), mimeType: contentType };
+	const buffer = Buffer.from(await response.arrayBuffer());
+	return { data: buffer.toString("base64"), mimeType: contentType };
 }
 
 function collectOpenRouterResponseText(message: OpenRouterMessage | undefined): string | undefined {

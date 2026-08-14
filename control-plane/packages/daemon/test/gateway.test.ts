@@ -42,7 +42,7 @@ import {
 } from "@ompd/core";
 import { Supervisor } from "../src/supervisor.ts";
 import { HostRegistry } from "../src/hosts.ts";
-import { Gateway, GatewayEvents } from "../src/gateway/index.ts";
+import { Gateway, GatewayEvents, type RoutineRunner } from "../src/gateway/index.ts";
 import { createFakeHost, type FakeHostController } from "./fake-host.ts";
 
 /**
@@ -94,6 +94,7 @@ async function harness(
   opts: {
     approvalTimeoutMs?: number;
     onWebViewResult?: (agentId: AgentId, requestId: string, result: WebViewActionResult) => boolean;
+    routines?: RoutineRunner;
   } = {},
 ): Promise<Harness> {
   const path = `/tmp/ompd-gateway-${crypto.randomUUID()}.db`;
@@ -123,6 +124,7 @@ async function harness(
     port: 0,
     sessions: hosts,
     onWebViewResult: opts.onWebViewResult,
+    routines: opts.routines,
   });
   gateways.push(gw);
   const port = await gw.listen();
@@ -618,6 +620,49 @@ describe("health", () => {
     expect(text).not.toContain("secret-project-agent");
     expect(text).not.toContain("secret-repo");
     expect(text).not.toContain(agent.id);
+  });
+});
+
+describe("webhook route", () => {
+  test("uses only a per-routine secret and returns the scheduler run", async () => {
+    const deliveries: Array<{ routineId: string; secret: string }> = [];
+    const h = await harness({
+      routines: {
+        runNow: async () => {
+          throw new Error("manual route was called");
+        },
+        fireWebhook: async (routineId, secret) => {
+          deliveries.push({ routineId, secret });
+          if (secret !== "webhook-secret") return { accepted: false, reason: "forbidden" };
+          return {
+            accepted: true,
+            run: {
+              id: "run_webhook",
+              routineId,
+              state: "succeeded",
+              startedAt: "2026-01-01T00:00:00.000Z",
+              finishedAt: "2026-01-01T00:00:01.000Z",
+            },
+          };
+        },
+      },
+    });
+
+    const accepted = await fetch(`${h.base}/v1/webhooks/rtn_webhook`, {
+      method: "POST",
+      headers: { "x-webhook-secret": "webhook-secret" },
+      body: "raw webhook body",
+    });
+    expect(accepted.status).toBe(202);
+    expect(await accepted.json()).toEqual({ run: expect.objectContaining({ id: "run_webhook" }) });
+    expect(deliveries).toEqual([{ routineId: "rtn_webhook", secret: "webhook-secret" }]);
+
+    const refused = await fetch(`${h.base}/v1/webhooks/rtn_webhook`, {
+      method: "POST",
+      headers: { "x-webhook-secret": "wrong-secret" },
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "webhook_refused" });
   });
 });
 
