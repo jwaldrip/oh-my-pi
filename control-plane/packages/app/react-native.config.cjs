@@ -2,15 +2,13 @@
  * Platform registry for the community CLI.
  *
  * iOS and Android come from `react-native` itself and need no entry here; their
- * host projects are in `ios/` and `android/`.
+ * host projects are in `ios/` and `android/`. macOS is an out-of-tree platform,
+ * so its explicit entry activates `react-native-macos`'s project discovery for
+ * the generated `macos/` host.
  *
- * macOS and Windows are out-of-tree platforms. Their dependencies are installed
- * and pinned, and the JavaScript is already theirs, but the host projects have
- * not been generated: `react-native-macos-init` and the Windows CLI both shell
- * out to `npm install`, which refuses to run inside a bun workspace
- * (`ENOWORKSPACES`). Adding `macos` / `windows` entries here before those
- * directories exist would make `run-macos` fail with a missing directory rather
- * than with the truth, so they are named in the README instead of faked here.
+ * Windows remains unlisted because its host project has not been generated.
+ * The Windows CLI shells out to `npm install`, which refuses to run inside this
+ * Bun workspace (`ENOWORKSPACES`).
  *
  * `assets` is what links the vendored typefaces into a native build. Without it
  * Archivo and IBM Plex Mono exist in the repository and nowhere on a device, and
@@ -20,6 +18,7 @@ module.exports = {
   project: {
     ios: {},
     android: {},
+    macos: {},
   },
   assets: ["./src/design/fonts"],
 };
