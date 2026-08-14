@@ -9,7 +9,6 @@ import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import type { AnyMessage } from "@oh-my-pi/pi-utils/acp";
 import {
 	$env,
 	directoryExists,
@@ -22,6 +21,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
+import type { AnyMessage } from "@oh-my-pi/pi-utils/acp";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
@@ -59,11 +59,11 @@ import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
-import { InteractiveMode, RemoteTuiTakeoverError } from "./modes/interactive-mode";
+import type { AcpAgent } from "./modes/acp/acp-agent";
+import { createAcpConnection } from "./modes/acp/acp-mode";
 import { resolveDaemonAddress, socketUrlFromBase } from "./modes/client/daemon-config";
 import { LiveTuiControlLeg, type TuiAcpTransport } from "./modes/client/tui-control";
-import { createAcpConnection } from "./modes/acp/acp-mode";
-import type { AcpAgent } from "./modes/acp/acp-agent";
+import { InteractiveMode, RemoteTuiTakeoverError } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
@@ -463,9 +463,7 @@ function startLiveTuiAcpServer(session: AgentSession, transport: TuiAcpTransport
 		},
 	});
 	let activeAgent: AcpAgent | undefined;
-	let removeSessionTeardown = postmortem.register("tui-takeover-session", reason =>
-		session.dispose({ reason }),
-	);
+	let removeSessionTeardown = postmortem.register("tui-takeover-session", reason => session.dispose({ reason }));
 	transport.onMessage(raw => {
 		let message: unknown;
 		try {

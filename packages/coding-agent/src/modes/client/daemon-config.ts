@@ -79,8 +79,8 @@ export function resolveDaemonToken(options: ResolveDaemonAddressOptions = {}): s
 
 /** The resolved daemon endpoint and credential a control leg needs as one unit. */
 export interface DaemonAddress {
-  baseUrl: string;
-  token: string | null;
+	baseUrl: string;
+	token: string | null;
 }
 
 /**
@@ -88,10 +88,10 @@ export interface DaemonAddress {
  * daemon using a token read from a different home or environment.
  */
 export function resolveDaemonAddress(options: ResolveDaemonAddressOptions = {}): DaemonAddress {
-  return {
-    baseUrl: resolveDaemonBaseUrl(options),
-    token: resolveDaemonToken(options),
-  };
+	return {
+		baseUrl: resolveDaemonBaseUrl(options),
+		token: resolveDaemonToken(options),
+	};
 }
 
 export const TOKEN_MISSING_GUIDANCE =

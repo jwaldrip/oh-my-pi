@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "bun:test";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ShakeMode } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import {
-	ACP_BUILTIN_SLASH_COMMANDS,
 	executeAcpBuiltinSlashCommand,
+	getAcpBuiltinSlashCommands,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
@@ -59,14 +59,14 @@ describe("/shake dispatch (ACP)", () => {
 	});
 
 	it("is advertised to ACP clients with the mode hint", () => {
-		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "shake");
+		const advertised = getAcpBuiltinSlashCommands().find(c => c.name === "shake");
 		expect(advertised).toBeDefined();
 		expect(advertised?.input?.hint).toBe("[elide|images]");
 	});
 
 	it("advertises /shake images as the image-stripping path and no longer advertises /drop-images", () => {
-		expect(ACP_BUILTIN_SLASH_COMMANDS.some(c => c.name === "shake")).toBe(true);
-		expect(ACP_BUILTIN_SLASH_COMMANDS.some(c => c.name === "drop-images")).toBe(false);
+		expect(getAcpBuiltinSlashCommands().some(c => c.name === "shake")).toBe(true);
+		expect(getAcpBuiltinSlashCommands().some(c => c.name === "drop-images")).toBe(false);
 	});
 });
 

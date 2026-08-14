@@ -125,6 +125,7 @@
     "ci:test:ts": "bun scripts/ci-test-ts.ts all",
     "ci:test:ts:workspace": "bun scripts/ci-test-ts.ts workspace",
     "ci:test:ts:native": "bun scripts/ci-test-ts.ts native",
+    "ci:test:ts:control-plane": "bun scripts/ci-test-ts.ts control-plane",
     "ci:test:coding-agent:singleton": "bun scripts/ci-test-ts.ts coding-agent-singleton",
     "ci:test:coding-agent:ui": "bun scripts/ci-test-ts.ts coding-agent-ui",
     "ci:test:coding-agent:runtime": "bun scripts/ci-test-ts.ts coding-agent-runtime",

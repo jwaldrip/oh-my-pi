@@ -384,10 +384,17 @@ export class Supervisor {
       onClose: () => this.#onHostClosed(key),
     });
     transport.onMessage(raw => client.ingest(`${raw}\n`));
-    transport.onClose(() => client.close({ code: null, stderr: "TUI control socket closed" }));
+    let resolveExited: (code: number) => void = () => {};
+    const exited = new Promise<number>(resolve => {
+      resolveExited = resolve;
+    });
+    transport.onClose(() => {
+      client.close({ code: null, stderr: "TUI control socket closed" });
+      resolveExited(0);
+    });
 
     const spec: HostSpec = { kind: "local" };
-    const host: LocalHost = { client, pid: input.pid, kill: () => transport.close() };
+    const host: LocalHost = { client, pid: input.pid, kill: () => transport.close(), exited };
     const entry: HostEntry = {
       key,
       host,

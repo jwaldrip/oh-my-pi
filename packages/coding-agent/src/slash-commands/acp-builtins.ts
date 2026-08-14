@@ -10,10 +10,28 @@ export type { AcpBuiltinSlashCommandResult } from "./types";
  * filter out extension commands that would shadow a builtin or its alias at
  * dispatch time (e.g. `models` is an alias for `/model`, so an extension
  * registering `models` would appear in the palette but execute the builtin).
+ *
+ * Lazily computed and memoized on first call rather than at module load:
+ * something in `builtin-registry`'s dependency graph transitively imports a
+ * module that imports this file back, so reading `BUILTIN_SLASH_COMMANDS_INTERNAL`
+ * at this module's top level races that cycle and throws "Cannot access ...
+ * before initialization" depending on which side loads first (reproduced via
+ * `bun test test/core/eval-workflow-helpers.integration.test.ts`). Every
+ * caller already reads this from inside a function or test body, well after
+ * both modules have finished loading, so deferring the computation is free.
  */
-export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
-	BUILTIN_SLASH_COMMANDS_INTERNAL.filter(c => c.handle !== undefined).flatMap(c => [c.name, ...(c.aliases ?? [])]),
-);
+let reservedNamesCache: ReadonlySet<string> | undefined;
+export function getAcpBuiltinReservedNames(): ReadonlySet<string> {
+	if (reservedNamesCache === undefined) {
+		reservedNamesCache = new Set(
+			BUILTIN_SLASH_COMMANDS_INTERNAL.filter(c => c.handle !== undefined).flatMap(c => [
+				c.name,
+				...(c.aliases ?? []),
+			]),
+		);
+	}
+	return reservedNamesCache;
+}
 
 /**
  * Whether an extension command named `name` would be captured by ACP builtin
@@ -24,29 +42,37 @@ export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
  * advertised to ACP clients.
  */
 export function isAcpBuiltinShadowedName(name: string): boolean {
-	if (ACP_BUILTIN_RESERVED_NAMES.has(name)) return true;
+	const reserved = getAcpBuiltinReservedNames();
+	if (reserved.has(name)) return true;
 	const colon = name.indexOf(":");
-	return colon !== -1 && ACP_BUILTIN_RESERVED_NAMES.has(name.slice(0, colon));
+	return colon !== -1 && reserved.has(name.slice(0, colon));
 }
 
 /**
  * Commands advertised to ACP clients. Entries without a text-mode `handle`
  * (e.g. `/quit`, `/login`, dashboards) are filtered out so the client doesn't
- * see commands it cannot drive.
+ * see commands it cannot drive. Lazily computed for the same reason as
+ * `getAcpBuiltinReservedNames` above.
  */
-export const ACP_BUILTIN_SLASH_COMMANDS: AvailableCommand[] = BUILTIN_SLASH_COMMANDS_INTERNAL.filter(
-	command => command.handle !== undefined,
-).map(command => {
-	// Honor mode-specific copy: ACP clients receive concise text-mode
-	// descriptions/hints when the spec sets `acpDescription` / `acpInputHint`,
-	// otherwise fall back to the unified `description` / `inlineHint`.
-	const hint = command.acpInputHint ?? command.inlineHint;
-	return {
-		name: command.name,
-		description: command.acpDescription ?? command.description,
-		input: hint ? { hint } : undefined,
-	};
-});
+let slashCommandsCache: AvailableCommand[] | undefined;
+export function getAcpBuiltinSlashCommands(): AvailableCommand[] {
+	if (slashCommandsCache === undefined) {
+		slashCommandsCache = BUILTIN_SLASH_COMMANDS_INTERNAL.filter(command => command.handle !== undefined).map(
+			command => {
+				// Honor mode-specific copy: ACP clients receive concise text-mode
+				// descriptions/hints when the spec sets `acpDescription` / `acpInputHint`,
+				// otherwise fall back to the unified `description` / `inlineHint`.
+				const hint = command.acpInputHint ?? command.inlineHint;
+				return {
+					name: command.name,
+					description: command.acpDescription ?? command.description,
+					input: hint ? { hint } : undefined,
+				};
+			},
+		);
+	}
+	return slashCommandsCache;
+}
 
 /**
  * Dispatch a slash command in ACP/text mode. Returns:

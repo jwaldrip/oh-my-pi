@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	LiveTuiControlLeg,
-	type TuiControlSocket,
-} from "../../../src/modes/client/tui-control";
+import { LiveTuiControlLeg, type TuiControlSocket } from "../../../src/modes/client/tui-control";
 
 class FakeSocket implements TuiControlSocket {
 	readonly sent: string[] = [];
@@ -69,7 +66,7 @@ describe("LiveTuiControlLeg", () => {
 		expect(socket.sent.map(raw => JSON.parse(raw))).toContainEqual({ t: "tui_acp_ready", sessionId: "live-session" });
 
 		acp?.send('{"jsonrpc":"2.0","id":1,"method":"initialize"}');
-		socket.receive({ t: "tui_acp", sessionId: "live-session", raw: "{\"jsonrpc\":\"2.0\",\"id\":1}" });
+		socket.receive({ t: "tui_acp", sessionId: "live-session", raw: '{"jsonrpc":"2.0","id":1}' });
 		expect(socket.sent.map(raw => JSON.parse(raw))).toContainEqual({
 			t: "tui_acp",
 			sessionId: "live-session",

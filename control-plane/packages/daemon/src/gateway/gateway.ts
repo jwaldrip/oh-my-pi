@@ -26,6 +26,7 @@ import {
   SCOPE_PROMPT,
   SCOPE_READ,
   type Actor,
+  type Agent,
   type AgentId,
   type ClientFrame,
   type ConnectorSummary,
