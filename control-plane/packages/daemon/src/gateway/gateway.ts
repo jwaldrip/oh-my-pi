@@ -29,9 +29,12 @@ import {
   type Agent,
   type AgentId,
   type ClientFrame,
+  type CollabVoiceNoteFrame,
+  type CollabVoiceParticipant,
   type ConnectorSummary,
   type EndpointOffer,
   type HostSpec,
+  type PersistCollabVoiceNoteInput,
   type Run,
   type ServerFrame,
   type SessionLiveStatus,
@@ -52,6 +55,7 @@ import type { GatewayEvents } from "./events.ts";
 import { MODE_OPTION_ID, type SessionConfig } from "../hosts.ts";
 import type { CreateTaskInput } from "../workspace/tasks.ts";
 import { TokenBucket } from "./ratelimit.ts";
+import { CollabRoomError, CollabRooms, type CollabConnection } from "../collab/rooms.ts";
 
 /**
  * Content types for the console's asset kinds.
@@ -424,6 +428,8 @@ interface SocketState {
    */
   revoked: boolean;
   voice: VoiceHandler | null;
+  /** Stable member identity used to remove this exact socket from rooms. */
+  collab: CollabConnection | null;
   /** Present only on the one socket serving a normal live TUI. */
   tui: LiveTuiSocket | null;
 }
@@ -486,6 +492,8 @@ export class Gateway {
   #onWebViewUnavailable: GatewayOptions["onWebViewUnavailable"];
   #staticRoot: string | undefined;
   #onError: GatewayOptions["onError"];
+  #collab: CollabRooms;
+
   /** Set by `listen`, so uptime measures serving rather than construction. */
   #startedAtMs: number | undefined;
 
@@ -501,6 +509,7 @@ export class Gateway {
   constructor(opts: GatewayOptions) {
     this.#sup = opts.supervisor;
     this.#store = opts.store;
+    this.#collab = new CollabRooms(this.#store);
     this.#auth = new DeviceAuth({ store: opts.store, pairingTtlMs: opts.pairingTtlMs });
     this.#events = opts.events;
     this.#host = opts.host ?? DEFAULT_HOST;
@@ -717,6 +726,7 @@ export class Gateway {
       bucket: new TokenBucket({ capacity: RATE_BURST, refillPerSecond: RATE_PER_SECOND }),
       revoked: false,
       voice: null,
+      collab: null,
       tui: null,
     };
   }
@@ -743,6 +753,19 @@ export class Gateway {
    */
   hasLiveToken(deviceId: string, token: string): boolean {
     return this.#auth.hasLiveToken(deviceId, token);
+  }
+
+  /**
+   * Fan out a complete agent voice note to an active room. This is in-process
+   * only: no paired client can choose an agent identity by naming it on a
+   * websocket frame.
+   */
+  publishCollabAgentVoiceNote(
+    roomId: string,
+    agent: CollabVoiceParticipant,
+    note: Omit<PersistCollabVoiceNoteInput, "roomId" | "participant">,
+  ): CollabVoiceNoteFrame {
+    return this.#collab.publishAgentVoiceNote(roomId, agent, note);
   }
 
 
@@ -1575,6 +1598,10 @@ export class Gateway {
 
   #open(ws: GatewaySocket): void {
     this.#sockets.add(ws);
+    ws.data.collab = {
+      actor: this.#actorOf(ws),
+      send: (frame) => this.#send(ws, frame),
+    };
     if (this.#voice) ws.data.voice = this.#voice((frame) => this.#send(ws, frame), this.#actorOf(ws));
     this.#send(ws, {
       t: "hello",
@@ -1585,6 +1612,10 @@ export class Gateway {
 
   #close(ws: GatewaySocket): void {
     this.#sockets.delete(ws);
+    if (ws.data.collab !== null) {
+      this.#collab.leaveAll(ws.data.collab);
+      ws.data.collab = null;
+    }
     this.#unregisterWebViews(ws);
     for (const [sessionId, pending] of this.#tuiTakeovers) {
       if (pending.socket !== ws) continue;
@@ -1673,7 +1704,7 @@ export class Gateway {
       // hostile or merely malformed frame must cost one error frame, no more.
       this.#send(ws, {
         t: "error",
-        code: err instanceof UnauthorizedError ? "unauthorized" : "frame_failed",
+        code: err instanceof CollabRoomError ? err.code : err instanceof UnauthorizedError ? "unauthorized" : "frame_failed",
         message: err instanceof Error ? err.message : "frame handling failed",
       });
     }
@@ -1939,6 +1970,48 @@ export class Gateway {
         return;
       }
 
+      case "room_join": {
+        if (!ws.data.scopes.has(SCOPE_READ)) {
+          this.#send(ws, { t: "error", code: "unauthorized", message: "room join requires read scope" });
+          return;
+        }
+        if (typeof frame.roomId !== "string") {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "room join needs a roomId" });
+          return;
+        }
+        this.#collab.join(frame.roomId, this.#collabConnection(ws));
+        return;
+      }
+
+      case "room_leave": {
+        if (typeof frame.roomId !== "string") {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "room leave needs a roomId" });
+          return;
+        }
+        this.#collab.leave(frame.roomId, this.#collabConnection(ws));
+        return;
+      }
+
+      case "room_offer":
+      case "room_answer":
+      case "ice_candidate": {
+        if (!ws.data.scopes.has(SCOPE_PROMPT)) {
+          this.#send(ws, { t: "error", code: "unauthorized", message: "room signaling requires prompt scope" });
+          return;
+        }
+        this.#collab.relaySignal(frame, this.#collabConnection(ws));
+        return;
+      }
+
+      case "collab_voice_note": {
+        if (!ws.data.scopes.has(SCOPE_PROMPT)) {
+          this.#send(ws, { t: "error", code: "unauthorized", message: "voice notes require prompt scope" });
+          return;
+        }
+        this.#collab.publishVoiceNote(frame, this.#collabConnection(ws));
+        return;
+      }
+
       case "audio":
       case "audio_end": {
         if (!ws.data.scopes.has(SCOPE_PROMPT)) {
@@ -1984,6 +2057,15 @@ export class Gateway {
    */
   #actorOf(ws: GatewaySocket): Actor {
     return { deviceId: ws.data.deviceId, scopes: [...ws.data.scopes] };
+  }
+
+  /**
+   * A room membership holds this exact connection object. Reconstructing one
+   * per frame would let a stale socket remove a newer login by the same device.
+   */
+  #collabConnection(ws: GatewaySocket): CollabConnection {
+    if (ws.data.collab === null) throw new Error("collaboration connection was not initialised");
+    return ws.data.collab;
   }
 
   #deliverUpdate(

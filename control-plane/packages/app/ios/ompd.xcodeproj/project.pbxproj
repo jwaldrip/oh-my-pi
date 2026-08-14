@@ -340,6 +340,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = ompd/Info.plist;
+				CODE_SIGN_ENTITLEMENTS = ompd/ompd.entitlements;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -367,6 +368,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = ompd/Info.plist;
+				CODE_SIGN_ENTITLEMENTS = ompd/ompd.entitlements;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

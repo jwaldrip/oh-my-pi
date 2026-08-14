@@ -7,13 +7,15 @@
 
 import type { JSX } from "react";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Console } from "./console/Console.tsx";
 import { SafeScreen } from "./design/SafeScreen.tsx";
 import { ground, ink, stroke, type } from "./design/tokens.ts";
 import type { Connection, ConnectionList } from "./platform/connection.ts";
 import { clearConnection, loadConnections, saveConnection, setActiveConnection } from "./platform/connection.ts";
+import { listenForCollabLinks, type DeepLinkSource } from "./platform/deeplink.ts";
+import { CollabSessionScreen } from "./screens/CollabSessionScreen.tsx";
 import { ConnectionSwitcherScreen } from "./screens/ConnectionSwitcherScreen.tsx";
 import { PairScreen } from "./screens/PairScreen.tsx";
 
@@ -23,8 +25,17 @@ type Boot =
   | { phase: "switch"; connections: ConnectionList }
   | { phase: "console"; connections: ConnectionList };
 
+const nativeDeepLinks: DeepLinkSource = {
+  getInitialURL: () => Linking.getInitialURL(),
+  addEventListener: (event, listener) => Linking.addEventListener(event, listener),
+};
+
 export function App(): JSX.Element {
   const [boot, setBoot] = useState<Boot>({ phase: "loading" });
+  const [collabRoomId, setCollabRoomId] = useState<string | null>(null);
+
+  useEffect(() => listenForCollabLinks(nativeDeepLinks, setCollabRoomId), []);
+
 
   const showConnections = useCallback((connections: ConnectionList, notice?: string) => {
     const active = connections.connections.find((entry) => entry.id === connections.activeId);
@@ -73,10 +84,22 @@ export function App(): JSX.Element {
         <ActivityIndicator color={ink.plain} />
       </SafeScreen>
     );
+  } else if (collabRoomId !== null && boot.phase === "console") {
+    const active = boot.connections.connections.find((entry) => entry.id === boot.connections.activeId);
+    body =
+      active === undefined ? (
+        <PairScreen onPair={pair} />
+      ) : (
+        <CollabSessionScreen
+          roomId={collabRoomId}
+          connection={active.connection}
+          onClose={() => setCollabRoomId(null)}
+        />
+      );
   } else if (boot.phase === "pair") {
     body = (
       <PairScreen
-        notice={boot.notice}
+        notice={collabRoomId === null ? boot.notice : "Pair this device to join the shared room."}
         onCancel={
           boot.returnToSwitcher === undefined ? undefined : () => setBoot({ phase: "switch", connections: boot.returnToSwitcher! })
         }
