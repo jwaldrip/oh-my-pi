@@ -6,7 +6,7 @@
     "module": "Preserve",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "types": ["react", "vite/client"],
+    "types": ["bun", "react", "vite/client"],
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "strict": true,
