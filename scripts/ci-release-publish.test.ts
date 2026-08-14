@@ -51,4 +51,44 @@ describe("published manifest topology", () => {
 			"./*.js": "./src/*.ts",
 		});
 	});
+
+	it("publishes @ompd/core before its coding-agent consumer", async () => {
+		const coreIndex = packages.findIndex(entry => entry.dir === "control-plane/packages/core");
+		const codingAgentIndex = packages.findIndex(entry => entry.dir === "packages/coding-agent");
+		expect(coreIndex).toBeGreaterThan(-1);
+		expect(coreIndex).toBeLessThan(codingAgentIndex);
+
+		const core = packages[coreIndex];
+		const codingAgent = packages[codingAgentIndex];
+		if (!core || !codingAgent) throw new Error("@ompd/core or coding-agent missing from publish set");
+
+		const [coreManifest, codingAgentManifest] = await Promise.all([
+			rewriteManifest(core, false),
+			rewriteManifest(codingAgent, false),
+		]);
+		expect(coreManifest.version).toBe(codingAgentManifest.version);
+		expect(coreManifest.files).toContain("dist/types");
+		expect(coreManifest.exports).toMatchObject({
+			".": {
+				types: "./dist/types/index.d.ts",
+				import: "./src/index.ts",
+			},
+			"./contracts": {
+				types: "./dist/types/contracts.d.ts",
+				import: "./src/contracts.ts",
+			},
+			"./ompd-client": {
+				types: "./dist/types/ompd-client.d.ts",
+				import: "./src/ompd-client.ts",
+			},
+			"./store": {
+				types: "./dist/types/store.d.ts",
+				import: "./src/store.ts",
+			},
+			"./redact": {
+				types: "./dist/types/redact.d.ts",
+				import: "./src/redact.ts",
+			},
+		});
+	});
 });

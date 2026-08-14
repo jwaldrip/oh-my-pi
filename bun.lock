@@ -71,7 +71,7 @@
     },
     "control-plane/packages/core": {
       "name": "@ompd/core",
-      "version": "0.1.0",
+      "version": "17.2.15",
     },
     "control-plane/packages/daemon": {
       "name": "@ompd/daemon",
