@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ompd's primary transport is a user-entered local daemon endpoint (LAN
+  ws:// or http://). Those IPs cannot be pre-declared as domains, so cleartext
+  must be permitted application-wide. This matches iOS NSAllowsLocalNetworking.
+  TLS to public hosts still preferred when offered; this does not force cleartext.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

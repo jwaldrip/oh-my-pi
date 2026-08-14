@@ -97,7 +97,7 @@ jobs:
 
   ios-sim:
     name: iOS simulator UI smoke
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     defaults:
       run:
@@ -105,6 +105,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/bun-install
+      - name: Select Xcode 16+
+        run: |
+          # RN 0.81 requires Xcode >= 16.1
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer ||           sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          xcodebuild -version
       - name: CocoaPods
         run: |
           cd ios

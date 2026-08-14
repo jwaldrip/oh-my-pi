@@ -95,9 +95,6 @@ android {
         versionCode Integer.parseInt(project.findProperty("OMPD_VERSION_CODE") ?: "1")
         versionName project.findProperty("OMPD_VERSION_NAME") ?: "0.1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        // Resolved in AndroidManifest application@usesCleartextTraffic.
-        // Debug/CI Metro needs cleartext to 10.0.2.2; release does not.
-        manifestPlaceholders = [usesCleartextTraffic: "false"]
     }
     signingConfigs {
         debug {
@@ -123,10 +120,8 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
-            manifestPlaceholders = [usesCleartextTraffic: "true"]
         }
         release {
-            manifestPlaceholders = [usesCleartextTraffic: "false"]
             // Prefer upload key when present. Never fall back to debug.keystore.
             if (signingConfigs.release.storeFile != null) {
                 signingConfig signingConfigs.release

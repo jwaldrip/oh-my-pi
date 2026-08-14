@@ -72,3 +72,10 @@ bun run upload:testflight
 
 Device-only pairing proof remains `ompdUITests/PairingUITests` and still requires
 `OMPD_TEST_ENDPOINT`, `OMPD_TEST_TOKEN`, `OMPD_TEST_AGENT_ID`, `OMPD_TEST_NONCE` on a tethered phone.
+
+## Network / cleartext
+
+Android release permits cleartext (`usesCleartextTraffic=true`) because the app
+pairs to a user-entered local daemon endpoint over LAN (`ws://` / `http://`).
+Those IPs cannot be pre-declared in a domain allowlist. This matches iOS
+`NSAllowsLocalNetworking`.
