@@ -17,6 +17,7 @@ import { mock } from "bun:test";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+const workspaceRequire = createRequire(new URL("../../../../package.json", import.meta.url));
 
 // Resolve from this file's location (the app package), not from the workspace
 // root bun happened to start in.
@@ -31,3 +32,10 @@ mock.module("react/jsx-runtime", () => jsxRuntime);
 mock.module("react/jsx-dev-runtime", () => jsxDevRuntime);
 mock.module("react-dom", () => reactDom);
 mock.module("react-dom/client", () => reactDomClient);
+// `react-native-web` resolves its peer from the workspace root. Bun keys that
+// resolved absolute module separately from this package's `react` specifier.
+mock.module(workspaceRequire.resolve("react"), () => ({ ...react, default: react }));
+mock.module(workspaceRequire.resolve("react/jsx-runtime"), () => jsxRuntime);
+mock.module(workspaceRequire.resolve("react/jsx-dev-runtime"), () => jsxDevRuntime);
+mock.module(workspaceRequire.resolve("react-dom"), () => reactDom);
+mock.module(workspaceRequire.resolve("react-dom/client"), () => reactDomClient);

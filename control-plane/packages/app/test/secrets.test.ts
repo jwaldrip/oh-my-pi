@@ -7,16 +7,9 @@
  * `secrets.ts`'s own translation of the library's contract (`false` means
  * refused, a missing item is `null`, a delete that finds nothing is still a
  * success) is correct, and that `connection.ts` built on top of it actually
- * gets the metadata/keystore split right -- not that a hand-rolled fake of
- * our own module agrees with itself. `@react-native-async-storage/async-storage`
- * is stubbed with a plain in-memory map for the same reason `connection.ts`
- * was never testable end to end before this file existed: bun has no native
- * bridge and no IndexedDB, and a real store would leak state across tests.
- *
- * Both mocks are registered before anything under test is imported, the same
- * way `rnw.ts` registers its mocks before the components that need them --
- * ES modules evaluate dependencies in source order, so a `mock.module` call
- * after the fact would be too late.
+ * keeps every pairing's metadata and keychain secret apart. AsyncStorage is
+ * an in-memory map because bun has no native bridge and a real store would
+ * leak state across tests.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
@@ -26,11 +19,14 @@ type FakeKeychainOptions = { service?: string };
 function makeFakeKeychain() {
   const store = new Map<string, string>();
   let failNextWrite = false;
-
+  let failNextReset = false;
   return {
     store,
     failNextWrite(value: boolean) {
       failNextWrite = value;
+    },
+    failNextReset(value: boolean) {
+      failNextReset = value;
     },
     module: {
       ACCESSIBLE: { WHEN_UNLOCKED_THIS_DEVICE_ONLY: "AccessibleWhenUnlockedThisDeviceOnly" },
@@ -51,6 +47,10 @@ function makeFakeKeychain() {
         return { service, storage: "KeystoreAESGCM_NoAuth" };
       },
       resetGenericPassword: async (options?: FakeKeychainOptions) => {
+        if (failNextReset) {
+          failNextReset = false;
+          throw new Error("simulated keychain cleanup failure");
+        }
         store.delete(options?.service ?? "");
         return true;
       },
@@ -82,23 +82,22 @@ const fakeAsyncStorage = makeFakeAsyncStorage();
 mock.module("react-native-keychain", () => fakeKeychain.module);
 mock.module("@react-native-async-storage/async-storage", () => fakeAsyncStorage.module);
 
-// Dynamic on purpose: a static import of any of these three modules would
-// resolve before the two `mock.module` calls above could substitute them,
-// the same reason `fleet-screen.test.tsx` imports `../src/screens/FleetScreen.tsx`
-// dynamically after `./rnw.ts`'s mocks. `Connection` is type-only, so it is
-// erased before it can pull the real module in early.
 import type { Connection } from "../src/platform/connection.ts";
 const secrets = await import("../src/platform/secrets.ts");
 const webSecrets = await import("../src/platform/secrets.web.ts");
-const { clearConnection, loadConnection, saveConnection } = await import("../src/platform/connection.ts");
+const { clearConnection, loadConnection, loadConnections, saveConnection, setActiveConnection } = await import(
+  "../src/platform/connection.ts"
+);
 
 const CONNECTION_KEY = "ompd.connection";
-const TOKEN_KEY = "ompd.connection.token";
+const LEGACY_TOKEN_KEY = "ompd.connection.token";
+const DEFAULT_TOKEN_KEY = "ompd.connection.token.default";
 
 beforeEach(() => {
   fakeKeychain.store.clear();
   fakeAsyncStorage.store.clear();
   fakeKeychain.failNextWrite(false);
+  fakeKeychain.failNextReset(false);
 });
 
 describe("secrets.ts: the native keystore seam", () => {
@@ -121,7 +120,6 @@ describe("secrets.ts: the native keystore seam", () => {
   test("a keystore that refuses the write surfaces as a rejection, not a silent no-op", async () => {
     fakeKeychain.failNextWrite(true);
     await expect(secrets.writeSecret("k2", "sekrit")).rejects.toThrow();
-    // The refused write must not look like it landed.
     expect(await secrets.readSecret("k2")).toBeNull();
   });
 
@@ -151,71 +149,138 @@ describe("secrets.web.ts: the target with no keystore", () => {
 });
 
 const DIRECT: Connection = { transport: "direct", url: "ws://127.0.0.1:7777/v1/socket", token: "tok_abc", scopes: ["read"] };
+const HUB: Connection = {
+  transport: "hub",
+  hubUrl: "wss://hub.example.com",
+  daemonId: "dmn_cloud",
+  token: "tok_cloud",
+  scopes: ["read", "write"],
+};
 
-describe("connection.ts: metadata and token split across two stores", () => {
-  test("saveConnection then loadConnection round-trips the full connection", async () => {
+describe("connection.ts: saved pairing list and keychain secrets", () => {
+  test("saveConnection then loadConnection round-trips the active connection", async () => {
     await saveConnection(DIRECT);
     expect(await loadConnection()).toEqual(DIRECT);
   });
 
-  test("saveConnection never writes the token into AsyncStorage", async () => {
+  test("saving a second pairing preserves the first pairing", async () => {
+    const first = await saveConnection(DIRECT);
+    const second = await saveConnection(HUB, "Cloud");
+
+    const list = await loadConnections();
+    expect(list.activeId).toBe(second.id);
+    expect(list.connections).toEqual([first, second]);
+    await setActiveConnection(first.id);
+    expect(await loadConnection()).toEqual(DIRECT);
+  });
+
+  test("switching the active pairing persists across a reload", async () => {
+    const first = await saveConnection(DIRECT);
+    await saveConnection(HUB, "Cloud");
+
+    await setActiveConnection(first.id);
+    expect((await loadConnections()).activeId).toBe(first.id);
+    expect(await loadConnection()).toEqual(DIRECT);
+  });
+
+  test("saveConnection never writes any token into AsyncStorage", async () => {
     await saveConnection(DIRECT);
     const raw = fakeAsyncStorage.store.get(CONNECTION_KEY);
     expect(raw).toBeDefined();
-    expect(JSON.parse(raw as string)).toEqual({ transport: "direct", url: DIRECT.url, scopes: DIRECT.scopes });
+    expect(JSON.parse(raw as string)).toEqual({
+      activeId: "default",
+      connections: [{ id: "default", label: "Local", connection: { transport: "direct", url: DIRECT.url, scopes: DIRECT.scopes } }],
+    });
     expect(raw).not.toContain(DIRECT.token);
   });
 
-  test("loadConnection returns null when metadata exists but the secret is absent", async () => {
+  test("a metadata row with an absent active secret is not a usable pairing", async () => {
     await saveConnection(DIRECT);
-    fakeKeychain.store.delete(TOKEN_KEY);
+    fakeKeychain.store.delete(DEFAULT_TOKEN_KEY);
     expect(await loadConnection()).toBeNull();
   });
 
-  test("clearConnection deletes the secret even when the metadata row is already gone", async () => {
+  test("clearConnection deletes the secret even when metadata is already gone", async () => {
     await saveConnection(DIRECT);
     fakeAsyncStorage.store.delete(CONNECTION_KEY);
-    expect(fakeKeychain.store.has(TOKEN_KEY)).toBe(true);
+    expect(fakeKeychain.store.has(DEFAULT_TOKEN_KEY)).toBe(true);
 
-    await clearConnection();
+    await clearConnection("default");
 
-    expect(fakeKeychain.store.has(TOKEN_KEY)).toBe(false);
+    expect(fakeKeychain.store.has(DEFAULT_TOKEN_KEY)).toBe(false);
     expect(fakeAsyncStorage.store.has(CONNECTION_KEY)).toBe(false);
   });
 
-  test("clearConnection removes both halves of a normal pairing", async () => {
-    await saveConnection(DIRECT);
-    await clearConnection();
-    expect(await loadConnection()).toBeNull();
-    expect(fakeKeychain.store.has(TOKEN_KEY)).toBe(false);
-    expect(fakeAsyncStorage.store.has(CONNECTION_KEY)).toBe(false);
+  test("clearing the active pairing keeps another saved pairing and makes it active", async () => {
+    const first = await saveConnection(DIRECT);
+    const second = await saveConnection(HUB, "Cloud");
+
+    await clearConnection(second.id);
+
+    expect(await loadConnections()).toEqual({ connections: [first], activeId: first.id });
+    expect(await loadConnection()).toEqual(DIRECT);
   });
 
-  describe("legacy migration: a device paired before the split", () => {
+  describe("legacy migration: a single pairing becomes the Default list entry", () => {
     const legacyBlob = { url: "ws://127.0.0.1:7777/v1/socket", token: "tok_legacy", scopes: ["read", "write"] };
 
-    test("moves the token into the keystore and leaves no token behind in the metadata", async () => {
+    test("moves an inline token into its namespaced keychain entry and leaves no token in metadata", async () => {
       fakeAsyncStorage.store.set(CONNECTION_KEY, JSON.stringify(legacyBlob));
 
       const connection = await loadConnection();
 
-      expect(connection).toEqual({
+      expect(connection).toEqual({ transport: "direct", url: legacyBlob.url, token: legacyBlob.token, scopes: legacyBlob.scopes });
+      expect(fakeKeychain.store.get(DEFAULT_TOKEN_KEY)).toBe(legacyBlob.token);
+      expect(fakeKeychain.store.has(LEGACY_TOKEN_KEY)).toBe(false);
+
+      const rewritten = fakeAsyncStorage.store.get(CONNECTION_KEY);
+      expect(rewritten).toBeDefined();
+      expect(JSON.parse(rewritten as string)).toEqual({
+        activeId: "default",
+        connections: [
+          { id: "default", label: "Default", connection: { transport: "direct", url: legacyBlob.url, scopes: legacyBlob.scopes } },
+        ],
+      });
+      expect(rewritten).not.toContain(legacyBlob.token);
+      expect(await loadConnection()).toEqual(connection);
+    });
+
+    test("migrates the former split-store single pairing exactly once", async () => {
+      fakeAsyncStorage.store.set(
+        CONNECTION_KEY,
+        JSON.stringify({ transport: "direct", url: DIRECT.url, scopes: DIRECT.scopes }),
+      );
+      fakeKeychain.store.set(LEGACY_TOKEN_KEY, DIRECT.token);
+
+      expect(await loadConnections()).toEqual({
+        activeId: "default",
+        connections: [{ id: "default", label: "Default", connection: DIRECT }],
+      });
+      expect(fakeKeychain.store.get(DEFAULT_TOKEN_KEY)).toBe(DIRECT.token);
+      expect(fakeKeychain.store.has(LEGACY_TOKEN_KEY)).toBe(false);
+      expect(await loadConnection()).toEqual(DIRECT);
+    });
+
+    test("does not reject a successful migration when legacy-key cleanup fails", async () => {
+      fakeAsyncStorage.store.set(CONNECTION_KEY, JSON.stringify(legacyBlob));
+      fakeKeychain.store.set(LEGACY_TOKEN_KEY, "orphaned-old-token");
+      fakeKeychain.failNextReset(true);
+
+      expect(await loadConnection()).toEqual({
         transport: "direct",
         url: legacyBlob.url,
         token: legacyBlob.token,
         scopes: legacyBlob.scopes,
       });
-      expect(fakeKeychain.store.get(TOKEN_KEY)).toBe(legacyBlob.token);
-
-      const rewritten = fakeAsyncStorage.store.get(CONNECTION_KEY);
-      expect(rewritten).toBeDefined();
-      const parsedRewritten: unknown = JSON.parse(rewritten as string);
-      expect(parsedRewritten).not.toHaveProperty("token");
-      expect(rewritten).not.toContain(legacyBlob.token);
-
-      // The device must not be silently unpaired: a second load reads the
-      // now-split store and gets the same connection back.
-      expect(await loadConnection()).toEqual(connection);
+      expect(fakeKeychain.store.get(DEFAULT_TOKEN_KEY)).toBe(legacyBlob.token);
+      expect(fakeKeychain.store.get(LEGACY_TOKEN_KEY)).toBe("orphaned-old-token");
+      expect(await loadConnection()).toEqual({
+        transport: "direct",
+        url: legacyBlob.url,
+        token: legacyBlob.token,
+        scopes: legacyBlob.scopes,
+      });
+      expect(fakeKeychain.store.has(LEGACY_TOKEN_KEY)).toBe(false);
     });
 
     test("a failed keystore write during migration leaves the legacy blob intact and rejects", async () => {
@@ -224,14 +289,13 @@ describe("connection.ts: metadata and token split across two stores", () => {
 
       await expect(loadConnection()).rejects.toThrow();
 
-      // The only copy of the token was in this blob; it must still be there,
-      // untouched, rather than half-migrated or dropped.
       expect(fakeAsyncStorage.store.get(CONNECTION_KEY)).toBe(JSON.stringify(legacyBlob));
-      expect(fakeKeychain.store.has(TOKEN_KEY)).toBe(false);
+      expect(fakeKeychain.store.has(DEFAULT_TOKEN_KEY)).toBe(false);
     });
   });
 });
 
 afterEach(() => {
   fakeKeychain.failNextWrite(false);
+  fakeKeychain.failNextReset(false);
 });
