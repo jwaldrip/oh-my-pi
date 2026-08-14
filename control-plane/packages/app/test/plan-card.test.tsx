@@ -15,10 +15,23 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 function typeInto(input: HTMLElement, value: string): void {
   const key = Object.keys(input).find((name) => name.startsWith("__reactProps$"));
   if (key === undefined) throw new Error("no React props on the rendered input");
-  const props = Reflect.get(input, key) as { onChange?: (event: unknown) => void };
-  if (typeof props.onChange !== "function") throw new Error("the rendered input has no onChange handler");
+  const props = Reflect.get(input, key) as {
+    onChange?: (event: unknown) => void;
+    onChangeText?: (text: string) => void;
+  };
   (input as HTMLInputElement).value = value;
-  props.onChange({ target: input, currentTarget: input, nativeEvent: { text: value } });
+  if (typeof props.onChangeText === "function") {
+    props.onChangeText(value);
+  }
+  if (typeof props.onChange === "function") {
+    props.onChange({
+      target: input,
+      currentTarget: input,
+      nativeEvent: { text: value },
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    });
+  }
 }
 
 function renderCard(onRespond: (requestId: string, choice: "Approve and execute" | "Refine plan", feedback?: string) => void) {
@@ -69,6 +82,8 @@ describe("PlanCard", () => {
     expect(input).not.toBeNull();
     act(() => {
       typeInto(input!, "Prefer the live route.");
+    });
+    act(() => {
       (host.querySelector('[data-testid="plan-send-feedback"]') as HTMLElement).click();
     });
     expect(responses).toEqual([["pln_review", "Refine plan", "Prefer the live route."]]);
