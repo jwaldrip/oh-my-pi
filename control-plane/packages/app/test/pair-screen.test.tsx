@@ -12,19 +12,23 @@
  * defect this test exists to catch.
  */
 
-import "./rnw.ts";
+import { resetWindowSize, setWindowWidth } from "./rnw.ts";
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Connection } from "../src/platform/connection.ts";
 
 // Dynamic on purpose, the same way `smoke.test.tsx` and `session-webview.test.tsx`
 // load their screens: bun evaluates a file's whole static import graph before
-// its body runs, so a static import here would pull the real `react-native` in
-// before `./rnw.ts` could substitute it, and the real DOM globals before
-// happy-dom is registered.
+// its body runs, so static imports of either the screen or `StyleSheet` would
+// pull the real `react-native` in before `./rnw.ts` could substitute it, and
+// the real DOM globals before happy-dom is registered.
 const { PairScreen } = await import("../src/screens/PairScreen.tsx");
+const { StyleSheet } = await import("react-native");
+
+/** RNW exposes this stylesheet API at runtime but not in its TypeScript surface. */
+const rnwStyleSheet = StyleSheet as unknown as { getSheet: () => { textContent: string } };
 
 // React 19 reads this to decide whether act() is legal outside a test
 // renderer. It is React's own contract with a test host and no shipped type
@@ -34,6 +38,8 @@ declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+afterEach(resetWindowSize);
+
 
 /**
  * Type into a rendered `TextInput` by invoking the change handler React
@@ -84,6 +90,7 @@ interface Harness {
   endpointInput: HTMLInputElement;
   tokenInput: HTMLInputElement;
   submit: HTMLElement;
+  form: HTMLElement;
   paired: Connection[];
   unmount: () => void;
 }
@@ -101,14 +108,17 @@ function mountPairScreen(): Harness {
   const endpointInput = host.querySelector('[data-testid="pair-endpoint"]');
   const tokenInput = host.querySelector('[data-testid="pair-token"]');
   const submit = host.querySelector('[data-testid="pair-submit"]');
+  const form = host.querySelector('[data-testid="pair-form"]');
   if (!(endpointInput instanceof HTMLInputElement)) throw new Error("no endpoint field rendered");
   if (!(tokenInput instanceof HTMLInputElement)) throw new Error("no token field rendered");
   if (!(submit instanceof HTMLElement)) throw new Error("no submit control rendered");
+  if (!(form instanceof HTMLElement)) throw new Error("no pair form rendered");
 
   return {
     endpointInput,
     tokenInput,
     submit,
+    form,
     paired,
     unmount: () => {
       act(() => {
@@ -120,6 +130,27 @@ function mountPairScreen(): Harness {
 }
 
 describe("PairScreen: Connect is gated on a parseable endpoint and a token", () => {
+  test("form width honors the 390px phone viewport", () => {
+    setWindowWidth(390);
+    const h = mountPairScreen();
+    const maxWidths = [...rnwStyleSheet.getSheet().textContent.matchAll(/max-width:\s*(\d+(?:\.\d+)?)px/gi)].map((m) =>
+      Number(m[1]),
+    );
+
+    expect(maxWidths.every((maxWidth) => maxWidth <= 390)).toBe(true);
+    expect(h.form.style.maxWidth).toBe("");
+
+    h.unmount();
+  });
+  test("keeps the 480px cap for layouts wider than the pairing form", () => {
+    setWindowWidth(768);
+    const h = mountPairScreen();
+    expect(h.form.style.maxWidth).toBe("480px");
+
+    h.unmount();
+  });
+
+
   test("no input at all leaves Connect disabled and inert", () => {
     const h = mountPairScreen();
     expect(readsDisabled(h.submit)).toBe(true);
