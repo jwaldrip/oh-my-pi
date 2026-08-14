@@ -3,32 +3,27 @@
 
   <PropertyGroup Label="Microsoft.ReactNative Experimental Features">
     <!--
-      Required for building a Paper / UWP Architecture project.
+      New Architecture for the app host, Paper compatibility for community modules.
     -->
-    <RnwNewArch>false</RnwNewArch>
+    <RnwNewArch Condition="'$(ProjectName)' == 'ompd'">true</RnwNewArch>
+    <RnwNewArch Condition="'$(ProjectName)' != 'ompd'">false</RnwNewArch>
 
     <!--
-      Build framework from source in legacy Paper mode.
+      Changes compilation to assume use of Microsoft.ReactNative NuGet packages
+      instead of building the framework from source. Defaults to true.
     -->
-    <UseExperimentalNuget>false</UseExperimentalNuget>
+    <UseExperimentalNuget>true</UseExperimentalNuget>
 
-    <!-- Suppress WinAppSDK transitive checks for legacy UWP projects -->
     <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
     <RunCodegenWindows>false</RunCodegenWindows>
     <ReactExperimentalFeaturesSet>true</ReactExperimentalFeaturesSet>
   </PropertyGroup>
 
-  <PropertyGroup>
-    <TargetPlatformVersion Condition="'$(TargetPlatformVersion)' == '' Or '$(TargetPlatformVersion)' == '-1'">10.0.26100.0</TargetPlatformVersion>
-    <TargetPlatformMinVersion Condition="'$(TargetPlatformMinVersion)' == ''">10.0.17763.0</TargetPlatformMinVersion>
-    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0.26100.0</WindowsTargetPlatformVersion>
-    <WindowsTargetPlatformMinVersion Condition="'$(WindowsTargetPlatformMinVersion)' == ''">10.0.17763.0</WindowsTargetPlatformMinVersion>
-  </PropertyGroup>
-
-  <ItemDefinitionGroup>
-    <ClCompile>
-      <PreprocessorDefinitions>_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-    </ClCompile>
-  </ItemDefinitionGroup>
+  <!-- When using NuGet packages, prevent legacy community modules from pulling in Microsoft.ReactNative framework source builds. -->
+  <Target Name="RemoveFrameworkProjectReferences" BeforeTargets="ResolveProjectReferences;BeforeResolveReferences;_GetProjectReferenceTargetFrameworkProperties" Condition="'$(UseExperimentalNuget)'=='true'">
+    <ItemGroup>
+      <ProjectReference Remove="@(ProjectReference)" Condition="'%(FileName)' == 'Microsoft.ReactNative'" />
+    </ItemGroup>
+  </Target>
 
 </Project>
