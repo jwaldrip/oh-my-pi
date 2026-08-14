@@ -79,6 +79,39 @@ jobs:
         working-directory: ReproApp
         run: |
           npx --yes @react-native-community/cli autolink-windows --logging
+      - name: Route UWP packaging packages to nuget.org via package source mapping
+        shell: pwsh
+        working-directory: ReproApp/windows
+        run: |
+          # RNW's generated NuGet.config (templates/cpp-app/NuGet_Config, otherwise
+          # unmodified here) registers two sources: Microsoft's "react-native-public"
+          # Azure DevOps feed (which hosts the Microsoft.ReactNative.* NuGet packages
+          # this UseExperimentalNuget=true project actually needs) and nuget.org. In
+          # the prior run of this workflow (run 31841933184) that ADO feed's V3 index
+          # listed the classic UWP packaging package
+          # Microsoft.NETCore.UniversalWindowsPlatform (plus its runtime.win10-* /
+          # Microsoft.Net.Native.* dependencies), but every nupkg download from it
+          # returned 401; packages.config-style restore bound to that source and did
+          # not fall through to nuget.org, which also carries these standard public
+          # UWP toolchain packages. Add package source mapping (additive: both
+          # sources stay registered) so only Microsoft.ReactNative* resolves from
+          # the react-native feed and everything else, including these UWP toolchain
+          # packages, resolves from nuget.org.
+          $mappingLines = @(
+            '  <packageSourceMapping>',
+            '    <packageSource key="react-native">',
+            '      <package pattern="Microsoft.ReactNative*" />',
+            '    </packageSource>',
+            '    <packageSource key="Nuget.org">',
+            '      <package pattern="*" />',
+            '    </packageSource>',
+            '  </packageSourceMapping>'
+          )
+          $mapping = ($mappingLines -join "`n") + "`n"
+          $config = Get-Content NuGet.Config -Raw
+          $config = $config -replace '</configuration>', "$mapping</configuration>"
+          Set-Content -Path NuGet.Config -Value $config
+          Get-Content NuGet.Config
       - name: Build the generated Windows solution
         shell: pwsh
         working-directory: ReproApp/windows
