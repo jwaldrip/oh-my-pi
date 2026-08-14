@@ -55,6 +55,11 @@ const rnwStyleSheet = StyleSheet as unknown as { getSheet: () => { textContent: 
  * appears in this markup. That makes layout assertions about FleetScreen, not
  * desktop-only declarations from other screens such as Cowork's 300px sidebar.
  */
+function hasClassSelector(rule: string, className: string): boolean {
+  const escapedClassName = className.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\.${escapedClassName}(?=$|[\\s.#\\[:{])`).test(rule);
+}
+
 function stylesForMarkup(markup: string): string {
   const classNames = new Set<string>();
   for (const match of markup.matchAll(/\bclass="([^"]*)"/g)) {
@@ -66,7 +71,7 @@ function stylesForMarkup(markup: string): string {
   }
 
   return [...rnwStyleSheet.getSheet().textContent.matchAll(/[^{}]+\{[^{}]*\}/g)]
-    .filter((rule) => [...classNames].some((className) => rule[0].includes(`.${className}`)))
+    .filter((rule) => [...classNames].some((className) => hasClassSelector(rule[0], className)))
     .map((rule) => rule[0])
     .join("\n");
 }
@@ -88,6 +93,13 @@ function render(browser: BrowserState): string {
   );
   return `${markup}\n<style>${stylesForMarkup(markup)}</style>`;
 }
+
+describe("RNW style rule scoping", () => {
+  test("matches complete class selector tokens, not class-name prefixes", () => {
+    expect(hasClassSelector(".r-width-1{width:1px}", "r-width-1")).toBe(true);
+    expect(hasClassSelector(".r-width-12{width:12px}", "r-width-1")).toBe(false);
+  });
+});
 
 describe("the session browser renders a realistic corpus", () => {
   const html = render(browserState());
