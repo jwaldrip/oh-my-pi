@@ -23,14 +23,7 @@ permissions:
 jobs:
   build:
     name: Build React Native Windows app
-    # react-native-windows 0.81's generated projects use PlatformToolset=v143
-    # (VS2022's native toolset) with the UWP application type. windows-latest
-    # now resolves to the VS2026 image, which ships only v145 and has no v143
-    # UWP overlay at all (see actions/runner-images#14101), so MSBuild fails
-    # with MSB8020 there. windows-2022 keeps VS2022 as its native toolset and
-    # includes the Universal Windows Platform workload, which is what
-    # actually provides v143 UWP build tools.
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -65,7 +58,7 @@ jobs:
           if (-not $sdkVersion) {
             throw "No Windows SDK with Windows.h is installed on this runner."
           }
-          & $msbuild ompd.sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion"
+          & $msbuild ompd.sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145 /p:WindowsAppSDKVerifyTransitiveDependencies=false
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }

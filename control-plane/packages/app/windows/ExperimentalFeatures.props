@@ -21,6 +21,7 @@
     -->
     <UseExperimentalNuget>true</UseExperimentalNuget>
 
+    <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
     <ReactExperimentalFeaturesSet>true</ReactExperimentalFeaturesSet>
   </PropertyGroup>
 
