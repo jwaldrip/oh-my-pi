@@ -54,6 +54,19 @@ export function createTunnelDialer(opts: TunnelDialerOptions): TunnelDaemon {
     acceptor: {
       accept: (token, send) => opts.gateway.acceptTunnelSession(token, send),
     },
+    onWebhook: async (request) => {
+      const response = await opts.gateway.fireWebhook(
+        request.routineId,
+        request.secret,
+        Buffer.from(request.body, "base64url"),
+        request.contentType,
+      );
+      return {
+        status: response.status,
+        body: Buffer.from(await response.arrayBuffer()).toString("base64url"),
+        contentType: response.headers.get("content-type") ?? undefined,
+      };
+    },
     onRegistered: (instanceId) => {
       audit("tunnel.register", "ok", null, { daemonId: opts.identity.daemonId, instanceId });
       opts.onLog?.(`tunnel registered with hub instance ${instanceId}`);

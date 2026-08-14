@@ -69,6 +69,7 @@ const RATE_BURST = 200;
 const RATE_PER_SECOND = 50;
 
 const MAX_FRAME_BYTES = 1_000_000;
+const WEBHOOK_TIMEOUT_MS = 30_000;
 
 type LegKind = "daemon" | "client";
 
@@ -112,6 +113,11 @@ interface DaemonSession {
   received: number;
 }
 
+interface PendingWebhook {
+  daemonId: string;
+  resolve: (response: Response) => void;
+}
+
 export interface HubOptions {
   registry: DaemonRegistry;
   backplane: Backplane;
@@ -144,6 +150,10 @@ export class Hub {
   readonly #clients = new Map<string, ServerWebSocket<LegState>>();
   /** Sessions whose daemon leg is here, by session id. */
   readonly #sessions = new Map<string, DaemonSession>();
+  /** Public HTTP requests awaiting the daemon's correlated tunnel response. */
+  readonly #webhooks = new Map<string, PendingWebhook>();
+  /** Requesting hub instances for webhook requests this instance sent to a daemon. */
+  readonly #webhookOrigins = new Map<string, string>();
 
   constructor(opts: HubOptions) {
     this.#registry = opts.registry;
@@ -225,14 +235,84 @@ export class Hub {
       if (server.upgrade(req, { data })) return undefined;
       return new Response("expected a websocket upgrade", { status: 426 });
     }
+    const webhook = /^\/v1\/webhooks\/([^/]+)\/([^/]+)$/.exec(path);
+    if (webhook) return await this.#forwardWebhook(req, webhook[1] ?? "", webhook[2] ?? "", url.searchParams.get("token"));
 
     const link = /^\/v1\/link\/([A-Za-z0-9_]+)$/.exec(path);
     if (link) return await this.#upgradeClient(req, server, link[1] ?? "");
 
     if (path === "/v1/enroll") return await this.#enroll(req);
+
     if (path.startsWith("/v1/enroll/")) return await this.#unenroll(req, path.slice("/v1/enroll/".length));
 
     return Response.json({ error: "not_found" }, { status: 404 });
+  }
+  async #forwardWebhook(
+    req: Request,
+    daemonId: string,
+    routineId: string,
+    querySecret: string | null,
+  ): Promise<Response> {
+    if (req.method !== "POST") return Response.json({ error: "not_found" }, { status: 404 });
+
+    let enrolled: EnrolledDaemon | null;
+    try {
+      enrolled = await this.#registry.lookup(daemonId);
+    } catch (cause) {
+      return this.#refuse("unverifiable", `registry lookup failed: ${describe(cause)}`, { daemonId });
+    }
+    if (!enrolled) return this.#refuse("unknown_daemon", `no daemon enrolled as ${daemonId}`, { daemonId });
+
+    let daemonInstance: string | null;
+    try {
+      daemonInstance = await this.#backplane.locateDaemon(daemonId);
+    } catch (cause) {
+      return this.#refuse("unverifiable", `routing lookup failed: ${describe(cause)}`, { daemonId });
+    }
+    if (daemonInstance === null) {
+      return this.#refuse("daemon_offline", `${daemonId} is enrolled but not connected`, { daemonId });
+    }
+
+    const requestId = `wh_${Buffer.from(crypto.getRandomValues(new Uint8Array(12))).toString("base64url")}`;
+    const secret = req.headers.get("x-webhook-secret") ?? querySecret ?? "";
+    const body = Buffer.from(await req.arrayBuffer()).toString("base64url");
+    const contentType = req.headers.get("content-type") ?? undefined;
+    const deferred = Promise.withResolvers<Response>();
+    this.#webhooks.set(requestId, { daemonId, resolve: deferred.resolve });
+
+    try {
+      const daemon = this.#daemons.get(daemonId);
+      if (daemon && daemonInstance === this.instanceId) {
+        this.#sendDaemon(daemon, { t: "webhook_request", requestId, routineId, secret, body, contentType });
+      } else {
+        await this.#backplane.send(daemonInstance, {
+          k: "webhook_request",
+          from: this.instanceId,
+          daemonId,
+          sessionId: requestId,
+          requestId,
+          routineId,
+          secret,
+          payload: body,
+          contentType,
+        });
+      }
+
+      const timeout = Promise.withResolvers<Response>();
+      const timer = setTimeout(
+        () => timeout.resolve(Response.json({ error: "daemon_timeout" }, { status: 504 })),
+        WEBHOOK_TIMEOUT_MS,
+      );
+      try {
+        return await Promise.race([deferred.promise, timeout.promise]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      return Response.json({ error: "relay_broken" }, { status: 502 });
+    } finally {
+      this.#webhooks.delete(requestId);
+    }
   }
 
   /**
@@ -461,6 +541,29 @@ export class Hub {
         });
         return;
       }
+      case "webhook_response": {
+        const status = Number.isInteger(frame.status) && frame.status >= 100 && frame.status <= 599 ? frame.status : 502;
+        const pending = this.#webhooks.get(frame.requestId);
+        if (pending && pending.daemonId === leg.daemonId) {
+          const headers = frame.contentType === undefined ? undefined : { "content-type": frame.contentType };
+          pending.resolve(new Response(Buffer.from(frame.body, "base64url"), { status, headers }));
+          return;
+        }
+
+        const origin = this.#webhookOrigins.get(frame.requestId);
+        if (origin === undefined) return;
+        this.#webhookOrigins.delete(frame.requestId);
+        await this.#backplane.send(origin, {
+          k: "webhook_response",
+          sessionId: frame.requestId,
+          from: this.instanceId,
+          requestId: frame.requestId,
+          status,
+          payload: frame.body,
+          contentType: frame.contentType,
+        });
+        return;
+      }
       case "ack": {
         const session = this.#sessions.get(frame.sessionId);
         if (session) this.#applyAck(session, frame.received);
@@ -593,6 +696,7 @@ export class Hub {
         if (!daemon || envelope.daemonId === undefined) {
           // The lease pointed here and the leg is gone: the daemon dropped in
           // the window between the lookup and this envelope. Say so rather than
+
           // leaving the client waiting on a session that will never open.
           await this.#backplane.send(envelope.from, {
             k: "close",
@@ -614,6 +718,44 @@ export class Hub {
           received: 0,
         });
         this.#sendDaemon(daemon, { t: "open", sessionId: envelope.sessionId });
+        return;
+      }
+      case "webhook_request": {
+        const daemon = envelope.daemonId === undefined ? undefined : this.#daemons.get(envelope.daemonId);
+        if (!daemon || envelope.daemonId === undefined || envelope.requestId === undefined || envelope.routineId === undefined) {
+          await this.#backplane.send(envelope.from, {
+            k: "webhook_response",
+            sessionId: envelope.requestId ?? envelope.sessionId,
+            from: this.instanceId,
+            requestId: envelope.requestId ?? envelope.sessionId,
+            status: 503,
+            payload: Buffer.from(JSON.stringify({ error: "daemon_offline" })).toString("base64url"),
+            contentType: "application/json",
+          });
+          return;
+        }
+        this.#webhookOrigins.set(envelope.requestId, envelope.from);
+        this.#sendDaemon(daemon, {
+          t: "webhook_request",
+          requestId: envelope.requestId,
+          routineId: envelope.routineId,
+          secret: envelope.secret ?? "",
+          body: envelope.payload ?? "",
+          contentType: envelope.contentType,
+        });
+        return;
+      }
+
+      case "webhook_response": {
+        const requestId = envelope.requestId ?? envelope.sessionId;
+        const pending = this.#webhooks.get(requestId);
+        if (!pending) return;
+        const status =
+          Number.isInteger(envelope.status) && (envelope.status ?? 0) >= 100 && (envelope.status ?? 0) <= 599
+            ? (envelope.status ?? 502)
+            : 502;
+        const headers = envelope.contentType === undefined ? undefined : { "content-type": envelope.contentType };
+        pending.resolve(new Response(Buffer.from(envelope.payload ?? "", "base64url"), { status, headers }));
         return;
       }
 
