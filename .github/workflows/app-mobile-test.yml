@@ -45,6 +45,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: android-actions/setup-android@v3
       - uses: ./.github/actions/bun-install
       - name: Install JS deps for autolinking
@@ -79,6 +82,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: android-actions/setup-android@v3
       - uses: ./.github/actions/bun-install
       - name: Enable KVM

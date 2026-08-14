@@ -123,6 +123,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: android-actions/setup-android@v3
       - uses: ./.github/actions/bun-install
       - name: Decode upload keystore
@@ -233,6 +236,32 @@ jobs:
           name: ompd-macos-export
           path: control-plane/packages/app/build/macos/export/**
           if-no-files-found: error
+      - name: Upload macOS to App Store Connect / TestFlight
+        if: env.OMPD_ASC_KEY_PATH != ''
+        env:
+          OMPD_UPLOAD: 'true'
+        run: |
+          # Prefer a .pkg; fall back to .dmg/.app zip produced by export
+          PKG="$(find build/macos/export -name '*.pkg' | head -1 || true)"
+          if [[ -z "$PKG" ]]; then
+            APP="$(find build/macos/export -type d -name '*.app' -print -quit | head -1 || true)"
+            if [[ -n "$APP" ]]; then
+              PKG="$RUNNER_TEMP/ompd-macos.zip"
+              ditto -c -k --sequesterRsrc --keepParent "$APP" "$PKG"
+            fi
+          fi
+          if [[ -z "${PKG:-}" || ! -f "$PKG" ]]; then
+            echo "::error::No macOS pkg/app export found to upload"
+            ls -laR build/macos/export || true
+            exit 1
+          fi
+          export API_PRIVATE_KEYS_DIR
+          API_PRIVATE_KEYS_DIR="$(cd "$(dirname "$OMPD_ASC_KEY_PATH")" && pwd)"
+          xcrun altool --upload-app             --type macos             --file "$PKG"             --apiKey "$OMPD_ASC_KEY_ID"             --apiIssuer "$OMPD_ASC_ISSUER_ID"
+          echo "uploaded macOS build to App Store Connect"
+      - name: Skip macOS ASC upload notice
+        if: env.OMPD_ASC_KEY_PATH == ''
+        run: echo "ASC API key secrets missing; macOS export artifact retained for manual TestFlight upload"
 
   windows-msix:
     name: Windows MSIX package
