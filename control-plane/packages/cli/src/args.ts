@@ -55,6 +55,7 @@ export type Command =
   | { kind: "prompt"; agentId: string; text: string }
   | { kind: "routines" }
   | { kind: "run"; routineId: string }
+  | { kind: "webhook-secret"; routineId: string }
   | { kind: "audit"; limit: number }
   | { kind: "open" }
   | { kind: "self-install"; prefix?: string }
@@ -105,6 +106,8 @@ agents
 routines
   routines                list routines
   run <routineId>         run a routine now
+  routines webhook-secret <routineId>
+                          replace a webhook secret and print the new value once
 
 audit
   audit [--limit N]       recent privileged actions
@@ -361,9 +364,16 @@ export function parseCommand(argv: string[]): Command {
       return { kind: "prompt", agentId, text };
     }
 
-    case "routines":
-      rejectExtra(rest, 0, "routines");
-      return { kind: "routines" };
+    case "routines": {
+      const action = rest[0];
+      if (action === undefined) return { kind: "routines" };
+      if (action !== "webhook-secret") {
+        throw new UsageError(`unknown routines action ${action}; use routines or routines webhook-secret <routineId>`);
+      }
+      const args = rest.slice(1);
+      rejectExtra(args, 1, "routines webhook-secret");
+      return { kind: "webhook-secret", routineId: requirePositional(args, 0, "routineId") };
+    }
 
     case "run":
       rejectExtra(rest, 1, "run");

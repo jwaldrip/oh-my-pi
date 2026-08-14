@@ -34,7 +34,7 @@ import {
 } from "./commands/devices.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { openCommand } from "./commands/open.ts";
-import { routinesCommand, runCommand } from "./commands/routines.ts";
+import { routinesCommand, runCommand, webhookSecretCommand } from "./commands/routines.ts";
 import { installCommand, uninstallCommand } from "./commands/service.ts";
 import { selfInstallCommand } from "./commands/self-install.ts";
 import { OMPD_VERSION } from "@ompd/daemon";
@@ -93,6 +93,8 @@ export async function run(argv: string[], ctx: CliContext = defaultContext()): P
         return await routinesCommand(ctx);
       case "run":
         return await runCommand(ctx, command);
+      case "webhook-secret":
+        return await webhookSecretCommand(ctx, command);
       case "audit":
         return await auditCommand(ctx, command);
       case "open":

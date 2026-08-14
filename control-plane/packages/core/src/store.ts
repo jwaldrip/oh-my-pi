@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS routines (
   timeout_seconds INTEGER, labels TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
 );
 
+-- A webhook trigger refers to this row by its stable secretRef. The value
+-- presented to the public route is never persisted, only its SHA-256 hash.
+CREATE TABLE IF NOT EXISTS webhook_secrets (
+  secret_ref TEXT PRIMARY KEY, secret_hash TEXT NOT NULL, created_at TEXT NOT NULL
+);
+
+
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, agent_id TEXT, state TEXT NOT NULL,
   started_at TEXT NOT NULL, finished_at TEXT, summary TEXT, error TEXT
@@ -148,6 +155,12 @@ interface AgentRow {
   last_active_at: string;
   routine_id: string | null;
   labels: string;
+}
+
+interface WebhookSecretRow {
+  secret_ref: string;
+  secret_hash: string;
+  created_at: string;
 }
 
 interface TaskRow {
@@ -232,6 +245,13 @@ export interface AddAuthTokenInput {
   tokenHash: string;
   /** Free text for an operator listing credentials, e.g. "local operator". */
   label?: string;
+}
+
+/** A per-routine webhook credential, retained only as a SHA-256 hash. */
+export interface WebhookSecretRecord {
+  secretRef: string;
+  secretHash: string;
+  createdAt: string;
 }
 
 export class Store {
@@ -557,6 +577,38 @@ export class Store {
       labels: JSON.parse((r.labels as string) ?? "{}"),
       createdAt: r.created_at as string,
     }));
+  }
+
+  /**
+   * Replace the credential for a webhook trigger. `secretRef` belongs to the
+   * routine definition, so rotating its value never changes the route.
+   */
+  upsertWebhookSecret(secretRef: string, secretHash: string): WebhookSecretRecord {
+    const record: WebhookSecretRecord = {
+      secretRef,
+      secretHash,
+      createdAt: new Date().toISOString(),
+    };
+    this.#db
+      .query(
+        `INSERT INTO webhook_secrets (secret_ref,secret_hash,created_at) VALUES (?,?,?)
+         ON CONFLICT(secret_ref) DO UPDATE SET secret_hash=excluded.secret_hash, created_at=excluded.created_at`,
+      )
+      .run(record.secretRef, record.secretHash, record.createdAt);
+    return record;
+  }
+
+  /** Null means this webhook has never had a credential minted. */
+  getWebhookSecret(secretRef: string): WebhookSecretRecord | null {
+    const row = this.#db
+      .query(`SELECT secret_ref,secret_hash,created_at FROM webhook_secrets WHERE secret_ref=?`)
+      .get(secretRef) as WebhookSecretRow | null;
+    if (!row) return null;
+    return {
+      secretRef: row.secret_ref,
+      secretHash: row.secret_hash,
+      createdAt: row.created_at,
+    };
   }
 
   upsertRun(run: Run): void {

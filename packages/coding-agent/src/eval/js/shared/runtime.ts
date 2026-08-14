@@ -376,8 +376,10 @@ export class JsRuntime {
 						cb();
 					},
 				});
-				const tableConsole = new Console({ stdout: stream, colorMode: false });
-				(tableConsole.table as (...a: unknown[]) => void)(...args);
+				const tableConsole = new Console({ stdout: stream, colorMode: false }) as Console & {
+					table?: (...a: unknown[]) => void;
+				};
+				if (tableConsole.table) tableConsole.table(...args);
 				hooks.onText(buffer.endsWith("\n") ? buffer : `${buffer}\n`);
 			},
 			__omp_display__: (value: unknown) => this.displayValue(value),

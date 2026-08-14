@@ -17,6 +17,7 @@
  *   testable without waiting on a clock.
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   SCOPE_MANAGE,
   SCOPE_PROMPT,
@@ -99,6 +100,29 @@ interface Inflight {
    * all with the `running` it writes on the way to a state that may never come.
    */
   settled: boolean;
+}
+
+/**
+ * `not_found` intentionally covers absent, disabled, and non-webhook routines
+ * so a bearer of an unrelated secret cannot use this endpoint as a routine
+ * catalogue. The comparison still happens in all cases below.
+ */
+export type WebhookFireResult =
+  | { accepted: true; run: Run }
+  | { accepted: false; reason: "not_found" | "forbidden" };
+
+const WEBHOOK_DUMMY_HASH = createHash("sha256").update("ompd webhook dummy").digest("hex");
+
+/** Hash the one-time plaintext produced by the operator-facing mint route. */
+export function hashWebhookSecret(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+const WEBHOOK_DUMMY_SECRET_REF = "__webhook_absent__";
+
+function webhookSecretMatches(presented: string, expectedHash: string | null): boolean {
+  const actual = Buffer.from(hashWebhookSecret(presented), "hex");
+  const expected = Buffer.from(expectedHash ?? WEBHOOK_DUMMY_HASH, "hex");
+  return timingSafeEqual(actual, expected);
 }
 
 function errorText(err: unknown): string {
@@ -307,6 +331,40 @@ export class Scheduler {
     if (!routine.enabled) throw new Error(`routine ${routineId} is disabled`);
     return await this.#execute(routine, actor);
   }
+
+
+  /**
+   * Fire one webhook routine without introducing a device identity for an
+   * external service. The per-routine secret is its complete authority.
+   */
+  async fireWebhook(routineId: string, presentedSecret: string): Promise<WebhookFireResult> {
+    const routine = this.#store.listRoutines().find((candidate) => candidate.id === routineId);
+    const secretRef =
+      routine?.trigger.kind === "webhook" ? routine.trigger.secretRef : WEBHOOK_DUMMY_SECRET_REF;
+    const secret = this.#store.getWebhookSecret(secretRef);
+    const matched = webhookSecretMatches(presentedSecret, secret?.secretHash ?? null);
+
+    if (routine === undefined || !routine.enabled || routine.trigger.kind !== "webhook") {
+      this.#audit({
+        actor: this.#actor,
+        routineId,
+        outcome: "denied",
+        detail: { trigger: "webhook", reason: "not_found" },
+      });
+      return { accepted: false, reason: "not_found" };
+    }
+    if (!matched) {
+      this.#audit({
+        actor: this.#actor,
+        routineId,
+        outcome: "denied",
+        detail: { trigger: "webhook", reason: "forbidden" },
+      });
+      return { accepted: false, reason: "forbidden" };
+    }
+    return { accepted: true, run: await this.#execute(routine, this.#actor) };
+  }
+
 
   /** Epoch ms of the next fire, or null for triggers the clock does not drive. */
   #nextDue(routine: Routine, fromMs: number): number | null {

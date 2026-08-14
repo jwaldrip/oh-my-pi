@@ -22,6 +22,14 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="content" />
+            <data android:scheme="file" />
+            <data android:mimeType="application/vnd.ompd.session+json" />
+        </intent-filter>
         <!-- Custom scheme for callers that cannot open a verified App Link. -->
         <intent-filter>
             <action android:name="android.intent.action.VIEW" />
