@@ -24,7 +24,7 @@ import {
   type Actor,
 } from "@ompd/core";
 import { AcpClient } from "@ompd/acp";
-import { Supervisor, type PendingApproval } from "../src/supervisor.ts";
+import { Supervisor, type PendingApproval, type PendingPlanReview } from "../src/supervisor.ts";
 import { createFakeHost, type FakeHostController } from "./fake-host.ts";
 
 /** A gate-2 approval prompt for `write`, shaped exactly as omp renders one. */
@@ -40,6 +40,7 @@ interface Harness {
   store: Store;
   fake: FakeHostController;
   approvals: Array<Omit<PendingApproval, "resolve">>;
+  planReviews: Array<Omit<PendingPlanReview, "resolve">>;
   pair: (id: string, scopes: string[]) => Actor;
 }
 
@@ -57,13 +58,17 @@ function harness(opts: HarnessOptions = {}): Harness {
   stores.push(store);
   const fake = createFakeHost();
   const approvals: Array<Omit<PendingApproval, "resolve">> = [];
+  const planReviews: Array<Omit<PendingPlanReview, "resolve">> = [];
   const sup = new Supervisor({
     store,
     policy: new DefaultPolicy({ mode: opts.mode ?? "standard" }),
     approvalTimeoutMs: opts.approvalTimeoutMs ?? 500,
     promptTimeoutMs: opts.promptTimeoutMs,
     spawnHost: fake.factory,
-    events: { onApprovalNeeded: (p) => approvals.push(p) },
+    events: {
+      onApprovalNeeded: (p) => approvals.push(p),
+      onPlanReviewNeeded: (p) => planReviews.push(p),
+    },
   });
   sups.push(sup);
   return {
@@ -71,6 +76,7 @@ function harness(opts: HarnessOptions = {}): Harness {
     store,
     fake,
     approvals,
+    planReviews,
     pair: (id, scopes) => {
       store.addDevice({
         id,
@@ -421,23 +427,23 @@ describe("the write gate", () => {
     expect(chosen).toBe("<declined>");
   });
 
-  test("plan approval keeps the answer it had before elicitation was advertised", async () => {
-    // The one compatibility case. The host used to take the plan as approved
-    // because it could not ask; declining now would silently break plan mode.
-    // The plan mutates nothing, and every call it leads to is gated on its own.
-    const h = harness({ approvalTimeoutMs: 300 });
+  test("a plan approval is delivered to a connected client and returns its selected option", async () => {
+    const h = harness({ approvalTimeoutMs: 5_000 });
     const admin = h.pair("admin", [SCOPE_READ, SCOPE_PROMPT, SCOPE_MANAGE, SCOPE_APPROVE]);
     const agent = await h.sup.createAgent({ name: "a", cwd: "/work" }, admin);
 
-    const chosen = await h.fake.elicit(
+    const pending = h.fake.elicit(
       agent.acpSessionId!,
       'Approve plan "Ship it" and start implementation?\n- step one',
       ["Approve and execute", "Refine plan"],
     );
+    const review = await waitFor(() => h.planReviews[0] ?? null, 2_000);
 
-    expect(chosen).toBe("Approve and execute");
-    // Not a tool call, so nothing is recorded as an approval decision.
-    expect(h.store.listApprovals(agent.id)).toHaveLength(0);
+    expect(review.agentId).toBe(agent.id);
+    expect(review.message).toContain('Approve plan "Ship it"');
+    expect(review.choices).toEqual(["Approve and execute", "Refine plan"]);
+    expect(h.sup.decidePlan(review.requestId, "Approve and execute", admin)).toBe(true);
+    expect(await pending).toBe("Approve and execute");
   });
 
   test("plan choices attached to a different question are declined", async () => {

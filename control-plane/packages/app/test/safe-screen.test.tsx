@@ -109,6 +109,7 @@ describe("SafeScreen", () => {
           onSubmit={() => {}}
           onCancel={() => {}}
           onDecide={() => {}}
+          onDecidePlan={() => {}}
         />,
       );
     });

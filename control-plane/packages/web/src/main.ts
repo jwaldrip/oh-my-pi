@@ -29,6 +29,7 @@ import { createComposer } from "./ui/composer.ts";
 import { el, elapsed, formatMoney, setText, shortenPath } from "./ui/dom.ts";
 import { icon } from "./ui/icons.ts";
 import { createPlan } from "./ui/plan.ts";
+import type { PlanReview } from "./ui/plan.ts";
 import { createDataBlock, createRack } from "./ui/readouts.ts";
 import type { Readings } from "./ui/readouts.ts";
 import { createStatus } from "./ui/status.ts";
@@ -138,6 +139,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
   const timelines = new Map<AgentId, TimelineView>();
   const agentsById = new Map<AgentId, Agent>();
   const watermarks = new Map<AgentId, number>();
+  const planReviews = new Map<AgentId, PlanReview>();
   /** Agents this page has already pulled a full transcript for. */
   const backfilled = new Set<AgentId>();
   const turnStarts = new Map<AgentId, number>();
@@ -230,7 +232,14 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
   });
   timelineHost.append(vacant);
 
-  const plan = createPlan();
+  const plan = createPlan({
+    onRespond: (requestId, choice) => {
+      if (selected === null || planReviews.get(selected)?.requestId !== requestId) return;
+      client.decidePlan(selected, requestId, choice);
+      planReviews.delete(selected);
+      plan.render(sessionFor(selected).plan, null);
+    },
+  });
   const planDock = el("div", { class: "plan-dock" });
   const dataBlock = createDataBlock();
   const rack = createRack();
@@ -340,7 +349,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
     paintStrip(agentId);
     if (agentId !== selected) return;
     timelineFor(agentId).render(after);
-    plan.render(after.plan);
+    plan.render(after.plan, planReviews.get(agentId) ?? null);
     composer.setCommands(after.commands, after.commandDetails);
     paintInstruments();
   }
@@ -375,7 +384,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
     timelineHost.replaceChildren(timeline.element);
     const state = sessionFor(agentId);
     timeline.render(state);
-    plan.render(state.plan);
+    plan.render(state.plan, planReviews.get(agentId) ?? null);
     composer.setCommands(state.commands, state.commandDetails);
     paintHead();
     paintInstruments();
@@ -449,6 +458,7 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
       timelines.delete(agentId);
       turnStarts.delete(agentId);
       turnDurations.delete(agentId);
+      planReviews.delete(agentId);
     }
 
     if (selected === null) return;
@@ -502,6 +512,19 @@ function renderConsole(host: HTMLElement, connection: Connection): void {
     // Never steal focus mid-sentence: the live region has already announced it.
     if (active instanceof HTMLElement && composer.element.contains(active)) return;
     timelineFor(event.agentId).focusClearance();
+  });
+
+  client.on("plan_review", (event) => {
+    planReviews.set(event.agentId, {
+      requestId: event.requestId,
+      message: event.message,
+      choices: event.choices,
+    });
+    if (event.agentId !== selected) {
+      showToast(`${agentsById.get(event.agentId)?.name ?? "An agent"} needs a plan review.`);
+      return;
+    }
+    plan.render(sessionFor(event.agentId).plan, planReviews.get(event.agentId) ?? null);
   });
 
   client.on("error", (event: ClientErrorEvent) => {

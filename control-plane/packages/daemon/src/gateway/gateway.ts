@@ -46,7 +46,7 @@ import {
 } from "@ompd/core";
 import type { SessionIndex } from "../sessions/session-index.ts";
 import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
-import { Supervisor, UnauthorizedError, type PendingApproval } from "../supervisor.ts";
+import { Supervisor, UnauthorizedError, type PendingApproval, type PendingPlanReview } from "../supervisor.ts";
 import { DeviceAuth, PairingBacklogError, PairingError } from "./auth.ts";
 import type { GatewayEvents } from "./events.ts";
 import { MODE_OPTION_ID, type SessionConfig } from "../hosts.ts";
@@ -399,6 +399,8 @@ interface SocketState {
    * point, so a reattach cannot show the same ask twice.
    */
   approvals: Map<AgentId, Set<string>>;
+  /** Plan-review request ids already delivered, keyed like tool approvals. */
+  planReviews: Map<AgentId, Set<string>>;
   /**
    * Highest turn already summarised to this socket, per agent. Serves the same
    * purpose `delivered` does for updates: a repeat is how a client ends up
@@ -540,6 +542,12 @@ export class Gateway {
         for (const ws of this.#sockets) {
           if (!ws.data.attached.has(approval.agentId)) continue;
           this.#deliverApproval(ws, approval);
+        }
+      },
+      onPlanReviewNeeded: (review) => {
+        for (const ws of this.#sockets) {
+          if (!ws.data.attached.has(review.agentId)) continue;
+          this.#deliverPlanReview(ws, review);
         }
       },
     });
@@ -704,6 +712,7 @@ export class Gateway {
       attached: new Set(),
       delivered: new Map(),
       approvals: new Map(),
+      planReviews: new Map(),
       said: new Map(),
       bucket: new TokenBucket({ capacity: RATE_BURST, refillPerSecond: RATE_PER_SECOND }),
       revoked: false,
@@ -1763,6 +1772,10 @@ export class Gateway {
           if (approval.agentId !== frame.agentId) continue;
           this.#deliverApproval(ws, approval);
         }
+        for (const review of this.#sup.pendingPlanReviews()) {
+          if (review.agentId !== frame.agentId) continue;
+          this.#deliverPlanReview(ws, review);
+        }
         return;
       }
 
@@ -1772,6 +1785,7 @@ export class Gateway {
         ws.data.delivered.delete(frame.agentId);
         // Same for approvals, so a reattach is shown a still-pending ask.
         ws.data.approvals.delete(frame.agentId);
+        ws.data.planReviews.delete(frame.agentId);
         // And the spoken summary, so a reattached client is told again what
         // the turn it is watching came to.
         ws.data.said.delete(frame.agentId);
@@ -1878,6 +1892,26 @@ export class Gateway {
             message: err instanceof Error ? err.message : "cancel failed",
           });
         });
+        return;
+      }
+
+      case "plan_decide": {
+        if (
+          typeof frame.agentId !== "string" ||
+          typeof frame.requestId !== "string" ||
+          (frame.choice !== "Approve and execute" && frame.choice !== "Refine plan")
+        ) {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "invalid plan decision" });
+          return;
+        }
+        if (!this.#sup.decidePlan(frame.requestId, frame.choice, this.#actorOf(ws))) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unauthorized",
+            message: "plan decision refused: unknown request or missing approve scope",
+          });
+        }
         return;
       }
 
@@ -1993,6 +2027,23 @@ export class Gateway {
       title: approval.title,
       tool: approval.tool,
       input: approval.input,
+    });
+  }
+
+  #deliverPlanReview(ws: GatewaySocket, review: Omit<PendingPlanReview, "resolve">): void {
+    let sent = ws.data.planReviews.get(review.agentId);
+    if (!sent) {
+      sent = new Set<string>();
+      ws.data.planReviews.set(review.agentId, sent);
+    }
+    if (sent.has(review.requestId)) return;
+    sent.add(review.requestId);
+    this.#send(ws, {
+      t: "plan_review",
+      agentId: review.agentId,
+      requestId: review.requestId,
+      message: review.message,
+      choices: review.choices,
     });
   }
 
