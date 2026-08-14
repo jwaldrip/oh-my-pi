@@ -22,7 +22,7 @@ function agent(overrides: Partial<Agent> & { id: string }): Agent {
 	return {
 		name: overrides.id,
 		state: "idle",
-		host: { kind: "local", id: "h1" },
+		host: { kind: "local", id: "h1", spec: { kind: "local" } },
 		cwd: "/repo",
 		createdAt: "2024-01-01T00:00:00.000Z",
 		lastActiveAt: "2024-01-01T00:00:00.000Z",

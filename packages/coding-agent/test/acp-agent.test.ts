@@ -2898,13 +2898,14 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		try {
 			const created = await harness.agent.newSession({
 				cwd: harness.cwdA,
-				// Exact shape of `mcpServerDescriptor` in the daemon: type/url/_meta,
-				// and deliberately no `headers` field.
+				// Exact shape of `mcpServerDescriptor` in the daemon: type/url/_meta/headers.
+				// `headers` is passed as an empty array when there are no headers.
 				mcpServers: [
 					{
 						name: "ompd-webview",
 						type: "http",
 						url: `http://127.0.0.1:${server.port}/mcp`,
+						headers: [],
 						_meta: { "omp.toolApproval": "allow" },
 					},
 				],
