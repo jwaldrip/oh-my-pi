@@ -127,6 +127,13 @@ describe("SafeScreen", () => {
       back?.click();
     });
     expect(backed).toBe(1);
+
+    // Bottom safe inset is on the composer chrome, not lost to KeyboardAvoidingView.
+    const composerSafe = host.querySelector('[data-testid="session-composer-safe"]');
+    expect(composerSafe).not.toBeNull();
+    const composerPad = cssPadding(composerSafe);
+    expect(composerPad.bottom).toBe("34px");
+
     act(() => {
       root.unmount();
     });

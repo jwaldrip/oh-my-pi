@@ -165,14 +165,21 @@ export function SessionScreen(props: SessionScreenProps): JSX.Element {
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={0}
-        style={{ paddingBottom: insets.bottom }}
       >
-        <Composer
-          enabled={connection === "connected"}
-          busy={busy}
-          onSubmit={props.onSubmit}
-          onCancel={props.onCancel}
-        />
+        {/*
+          Home-indicator inset lives on a child, not on KeyboardAvoidingView.
+          KAV's padding behavior owns paddingBottom for the keyboard; putting
+          the system inset on the same style loses it the moment the keyboard
+          moves.
+        */}
+        <View style={{ paddingBottom: insets.bottom }} testID="session-composer-safe">
+          <Composer
+            enabled={connection === "connected"}
+            busy={busy}
+            onSubmit={props.onSubmit}
+            onCancel={props.onCancel}
+          />
+        </View>
       </KeyboardAvoidingView>
     </SafeScreen>
   );
