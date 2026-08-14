@@ -4,6 +4,21 @@
 // `packages/app/node_modules`, which under a hoisted linker holds almost
 // nothing, and Gradle fails at the first line with a directory that is not
 // there. Asking node where the package actually is works under either layout.
+//
+// pluginManagement must be the first statement Gradle evaluates, so the node
+// resolve runs inside that block rather than before it.
+pluginManagement {
+  def reactNativeGradlePlugin = new File(
+    providers.exec {
+      workingDir(settingsDir)
+      commandLine("node", "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [settingsDir] })")
+    }.standardOutput.asText.get().trim()
+  ).getParentFile().absolutePath
+  includeBuild(reactNativeGradlePlugin)
+}
+
+plugins { id("com.facebook.react.settings") }
+
 def reactNativeGradlePlugin = new File(
   providers.exec {
     workingDir(rootDir)
@@ -11,8 +26,6 @@ def reactNativeGradlePlugin = new File(
   }.standardOutput.asText.get().trim()
 ).getParentFile().absolutePath
 
-pluginManagement { includeBuild(reactNativeGradlePlugin) }
-plugins { id("com.facebook.react.settings") }
 extensions.configure(com.facebook.react.ReactSettingsExtension) { ex -> ex.autolinkLibrariesFromCommand() }
 rootProject.name = 'ompd'
 include ':app'
