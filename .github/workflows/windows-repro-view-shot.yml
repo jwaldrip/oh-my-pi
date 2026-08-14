@@ -1,0 +1,93 @@
+name: Windows minimal repro - react-native-view-shot New Architecture
+
+# Isolated proof, tracked separately from the app's own CI: generates a fresh
+# React Native Windows 0.81 New Architecture app via the official RNW
+# generator (`react-native-windows-init`, not this repo's customized `ompd`
+# scaffold) with react-native-view-shot as its only third-party native
+# dependency, then builds it. See PR #8 and
+# `.github/workflows/windows-build.yml` for context: react-native-view-shot
+# has no New Architecture (Fabric) Windows implementation in any published
+# version (checked through 5.1.1) or on its GitHub `master` branch. This
+# workflow proves that in complete isolation from this repo's own build
+# configuration and toolchain overrides.
+#
+# Temporary: remove the `push` trigger (and this file) once the finding is
+# confirmed and recorded on the PR; `workflow_dispatch` alone cannot be
+# dispatched from a non-default branch until the workflow file also exists
+# on the default branch.
+
+on:
+  push:
+    branches:
+      - feat/windows-desktop-scaffold
+    paths:
+      - ".github/workflows/windows-repro-view-shot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: Build isolated RNW 0.81 New Arch app with react-native-view-shot
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+      - name: Generate a bare React Native 0.81.6 app
+        shell: pwsh
+        run: |
+          npx --yes @react-native-community/cli@20.0.0 init ReproApp --version 0.81.6 --pm npm --skip-install --skip-git-init
+      - name: Install JS dependencies
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npm install
+      - name: Generate the React Native Windows project via the official generator
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npx --yes react-native-windows-init@0.81.6 --version 0.81.30 --language cpp --overwrite --no-telemetry
+      - name: Assert the generated project is New Architecture (RnwNewArch=true)
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          $props = Get-Content windows/ExperimentalFeatures.props -Raw
+          Write-Output $props
+          if ($props -notmatch '<RnwNewArch>true</RnwNewArch>') {
+            throw "Generated project is not New Architecture; repro is invalid."
+          }
+      - name: Add react-native-view-shot as the only third-party native dependency
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npm install --save-exact react-native-view-shot@4.0.3
+      - name: Autolink Windows native modules
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npx --yes @react-native-community/cli autolink-windows --logging
+      - name: Build the generated Windows solution
+        shell: pwsh
+        working-directory: ReproApp/windows
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild is not installed on this runner."
+          }
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include"
+          $sdkVersion = Get-ChildItem $sdkRoot -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName "um\Windows.h") } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $sdkVersion) {
+            throw "No Windows SDK with Windows.h is installed on this runner."
+          }
+          $sln = Get-ChildItem *.sln | Select-Object -First 1 -ExpandProperty Name
+          & $msbuild $sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
