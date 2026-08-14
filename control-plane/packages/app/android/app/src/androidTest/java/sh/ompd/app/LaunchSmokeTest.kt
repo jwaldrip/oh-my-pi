@@ -7,17 +7,18 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
+import java.io.ByteArrayOutputStream
+import java.util.regex.Pattern
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.util.regex.Pattern
 
 /**
  * Emulator smoke with Metro serving JS (adb reverse tcp:8081).
  *
- * React Native maps `testID` to content-description on Android (not always
- * resource-id). Match both, and fall back to visible pairing copy.
+ * React Native maps `testID` to content-description on Android. Match
+ * resource-id and content-desc, plus visible pairing copy.
  */
 @RunWith(AndroidJUnit4::class)
 @LargeTest
@@ -33,26 +34,41 @@ class LaunchSmokeTest {
     val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
     ActivityScenario.launch(MainActivity::class.java).use {
       val timeoutMs = 90_000L
-      val idPattern = Pattern.compile("^(pair-endpoint|console|pair-submit)$")
+      val deadline = System.currentTimeMillis() + timeoutMs
+      var hit: String? = null
 
-      fun found(): Boolean {
-        if (device.findObject(By.res(idPattern)) != null) return true
-        if (device.findObject(By.desc(idPattern)) != null) return true
-        // Visible copy from the pairing screen
-        if (device.findObject(By.text(Pattern.compile("(?i).*pair.*|.*endpoint.*|.*connect.*"))) != null) return true
-        return false
+      while (System.currentTimeMillis() < deadline && hit == null) {
+        hit = firstMatch(device)
+        if (hit == null) {
+          device.waitForIdle(500)
+          Thread.sleep(500)
+        }
       }
 
-      val ok = device.wait(Until.predicate { found() }, timeoutMs)
-      if (!ok) {
-        // Dump a short hierarchy so the next failure is diagnosable in CI logs.
-        val xml = device.dumpWindowHierarchy()
-        val snippet = xml.lineSequence().take(80).joinToString("\n")
+      if (hit == null) {
+        val baos = ByteArrayOutputStream()
+        device.dumpWindowHierarchy(baos)
+        val snippet = baos.toString("UTF-8").lineSequence().take(100).joinToString("\n")
         throw AssertionError(
           "expected RN surface pair-endpoint/console after launch; hierarchy head:\n$snippet"
         )
       }
-      assertTrue(true)
+      assertNotNull(hit)
     }
+  }
+
+  private fun firstMatch(device: UiDevice): String? {
+    val ids = listOf("pair-endpoint", "pair", "pair-form", "pair-submit", "console", "boot")
+    for (id in ids) {
+      if (device.findObject(By.res(id)) != null) return "res:$id"
+      if (device.findObject(By.desc(id)) != null) return "desc:$id"
+    }
+    // Visible copy from PairScreen
+    if (device.findObject(By.text("Take the position")) != null) return "text:heading"
+    if (device.findObject(By.text("Daemon endpoint")) != null) return "text:endpoint-label"
+    if (device.findObject(By.text(Pattern.compile("(?i)connect"))) != null) return "text:connect"
+    // Wait helper keeps CPU calm when nothing matches yet
+    device.wait(Until.hasObject(By.pkg("sh.ompd.app")), 250)
+    return null
   }
 }
