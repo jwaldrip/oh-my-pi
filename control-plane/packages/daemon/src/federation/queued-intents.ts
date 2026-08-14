@@ -12,6 +12,11 @@ import { Supervisor } from "../supervisor.ts";
 /** The narrow remote surface a local delegate needs to drain a replica queue. */
 export interface IntentPeer {
   pullPendingIntents(): Promise<QueuedIntent[]>;
+  /**
+   * Atomically claim one pending intent before execution.
+   * Returns false if the intent is no longer pending (already claimed or delivered).
+   */
+  claimIntent(id: string): Promise<boolean>;
   acknowledgeDelivered(ids: readonly string[]): Promise<void>;
 }
 
@@ -53,6 +58,20 @@ export class HttpIntentPeer implements IntentPeer {
     return fields.intents.map(parseQueuedIntent);
   }
 
+  async claimIntent(id: string): Promise<boolean> {
+    const response = await this.#fetch(`${this.#url}/v1/sync/intents/claim`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.#token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ id }),
+    });
+    if (response.status === 409) return false;
+    if (!response.ok) throw new Error(`intent claim failed: ${response.status}`);
+    return true;
+  }
+
   async acknowledgeDelivered(ids: readonly string[]): Promise<void> {
     if (ids.length === 0) return;
     const response = await this.#fetch(`${this.#url}/v1/sync/intents/ack`, {
@@ -75,15 +94,16 @@ export interface QueuedIntentDrainerOptions {
 
 /**
  * The only bridge from replica intent storage to execution. The delegate dials
- * the replica, executes through its own supervisor, then acknowledges an
- * intent only after its local action settles.
+ * the replica, claims each intent immediately before its supervisor call,
+ * executes through its own supervisor using the originating actor, then
+ * acknowledges an intent only after its local action settles.
  */
 export class QueuedIntentDrainer {
   #supervisor: Supervisor;
   #peer: IntentPeer;
   #onError: ((error: Error) => void) | undefined;
-  #draining = false;
   #timer: Timer | null = null;
+  #inFlight: Promise<number> | null = null;
 
   constructor(opts: QueuedIntentDrainerOptions) {
     this.#supervisor = opts.supervisor;
@@ -100,48 +120,71 @@ export class QueuedIntentDrainer {
     this.#timer = setInterval(poll, intervalMs);
   }
 
-  stop(): void {
-    if (this.#timer === null) return;
-    clearInterval(this.#timer);
-    this.#timer = null;
+  /**
+   * Stop polling and wait for any in-flight drain to finish before returning.
+   * Callers that shut the supervisor down after this are guaranteed that no
+   * drain is still touching it.
+   */
+  async stop(): Promise<void> {
+    if (this.#timer !== null) {
+      clearInterval(this.#timer);
+      this.#timer = null;
+    }
+    if (this.#inFlight !== null) await this.#inFlight.catch(() => undefined);
   }
 
   /**
-   * Execute eligible intents in source order. Failures leave only that intent
-   * pending for a later poll, while unrelated later requests still drain.
+   * Execute eligible intents in source order. Each intent is claimed
+   * immediately before its supervisor call so a crash mid-batch cannot
+   * redeliver an already-executed prompt. Failures leave only that intent
+   * claimed (not pending) for later operator reconciliation.
    */
   async drain(): Promise<number> {
-    if (this.#draining) return 0;
-    this.#draining = true;
+    if (this.#inFlight !== null) return this.#inFlight;
+    this.#inFlight = this.#doDrain();
     try {
-      const delivered: string[] = [];
-      for (const intent of await this.#peer.pullPendingIntents()) {
-        if (intent.action !== "new-agent" && !this.#supervisor.ownsAgent(intent.agentId)) continue;
-        try {
-          await this.#execute(intent);
-          delivered.push(intent.id);
-        } catch (error) {
-          this.#report(error);
-        }
-      }
-      if (delivered.length > 0) await this.#peer.acknowledgeDelivered(delivered);
-      return delivered.length;
+      return await this.#inFlight;
     } finally {
-      this.#draining = false;
+      this.#inFlight = null;
     }
   }
 
+  async #doDrain(): Promise<number> {
+    let delivered = 0;
+    for (const intent of await this.#peer.pullPendingIntents()) {
+      if (intent.action !== "new-agent" && !this.#supervisor.ownsAgent(intent.agentId)) continue;
+      try {
+        // Claim first. If another drain already claimed this intent, skip it.
+        const claimed = await this.#peer.claimIntent(intent.id);
+        if (!claimed) continue;
+
+        await this.#execute(intent);
+        await this.#peer.acknowledgeDelivered([intent.id]);
+        delivered += 1;
+      } catch (error) {
+        this.#report(error);
+      }
+    }
+    return delivered;
+  }
+
   async #execute(intent: QueuedIntent): Promise<void> {
+    // The originating actorDeviceId is the only identity the supervisor may
+    // authorize against. Scopes are empty here; Supervisor re-reads the
+    // device row and its live scopes/revocation state. A missing or revoked
+    // device refuses delivery rather than inventing authority.
+    const actor: Actor = { deviceId: intent.actorDeviceId, scopes: [] };
+
     switch (intent.action) {
       case "prompt": {
         const fields = objectFields(intent.payload, `intent ${intent.id} prompt payload`);
         const text = stringField(fields, "text");
         if (text.length === 0) throw new Error(`intent ${intent.id} prompt text is empty`);
-        await this.#supervisor.prompt(intent.agentId, text, daemonActor(SCOPE_PROMPT));
+        await this.#supervisor.prompt(intent.agentId, text, actor);
         return;
       }
       case "cancel":
-        await this.#supervisor.cancel(intent.agentId, daemonActor(SCOPE_PROMPT));
+        await this.#supervisor.cancel(intent.agentId, actor);
         return;
       case "decide": {
         const fields = objectFields(intent.payload, `intent ${intent.id} decision payload`);
@@ -153,15 +196,21 @@ export class QueuedIntentDrainer {
         }
         // A timed-out approval is already terminal. It is still delivered: a
         // retry cannot make a closed approval pending again.
-        this.#supervisor.decide(requestId, choice, scope, daemonActor(SCOPE_APPROVE));
+        const accepted = this.#supervisor.decide(requestId, choice, scope, actor);
+        if (!accepted) {
+          throw new Error(`intent ${intent.id} decision refused: unknown request or missing approve scope`);
+        }
         return;
       }
       case "new-agent": {
+        // Always prove the originating actor still holds manage scope, even
+        // when the reserved agent already exists and we skip re-creation.
+        this.#supervisor.authorize(actor, SCOPE_MANAGE, "agent.create", intent.agentId);
         // An acknowledgement lost after creation must not create a second ACP
         // session on the retry. The reserved id is the idempotency boundary.
         if (this.#supervisor.ownsAgent(intent.agentId)) return;
         const payload = newAgentPayload(intent.payload, intent.id);
-        await this.#supervisor.createAgent({ id: intent.agentId, ...payload }, daemonActor(SCOPE_MANAGE));
+        await this.#supervisor.createAgent({ id: intent.agentId, ...payload }, actor);
         return;
       }
       default: {
@@ -176,19 +225,16 @@ export class QueuedIntentDrainer {
   }
 }
 
-/** Internal actor reserved for a local delegate executing an already-authorized intent. */
-function daemonActor(scope: string): Actor {
-  return { deviceId: "daemon", scopes: [scope] };
-}
-
 function objectFields(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label} is invalid`);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
   return value as Record<string, unknown>;
 }
 
 function stringField(fields: Record<string, unknown>, key: string): string {
   const value = fields[key];
-  if (typeof value !== "string") throw new Error(`queued intent payload is missing ${key}`);
+  if (typeof value !== "string") throw new Error(`${key} must be a string`);
   return value;
 }
 
@@ -198,19 +244,30 @@ function parseQueuedIntent(value: unknown): QueuedIntent {
   const agentId = stringField(fields, "agentId");
   const actorDeviceId = stringField(fields, "actorDeviceId");
   const action = stringField(fields, "action");
+  if (action !== "prompt" && action !== "decide" && action !== "cancel" && action !== "new-agent") {
+    throw new Error(`unsupported queued intent action: ${action}`);
+  }
   const createdAt = stringField(fields, "createdAt");
   const status = stringField(fields, "status");
-  if (
-    (action !== "prompt" && action !== "decide" && action !== "cancel" && action !== "new-agent") ||
-    status !== "pending" ||
-    !("payload" in fields)
-  ) {
-    throw new Error("queued intent has invalid fields");
+  if (status !== "pending" && status !== "claimed" && status !== "delivered") {
+    throw new Error(`unsupported queued intent status: ${status}`);
   }
-  return { id, agentId, actorDeviceId, action, payload: fields.payload, createdAt, status };
+  return {
+    id,
+    agentId,
+    actorDeviceId,
+    action,
+    payload: fields.payload,
+    createdAt,
+    status,
+    ...(typeof fields.seq === "number" ? { seq: fields.seq } : {}),
+  };
 }
 
-function newAgentPayload(payload: unknown, intentId: string): {
+function newAgentPayload(
+  payload: unknown,
+  intentId: string,
+): {
   name: string;
   cwd: string;
   host?: HostSpec;
@@ -220,49 +277,41 @@ function newAgentPayload(payload: unknown, intentId: string): {
   const fields = objectFields(payload, `intent ${intentId} new-agent payload`);
   const name = stringField(fields, "name");
   const cwd = stringField(fields, "cwd");
-  if (name.length === 0 || cwd.length === 0) throw new Error(`intent ${intentId} new-agent fields are empty`);
-
-  const result: {
-    name: string;
-    cwd: string;
-    host?: HostSpec;
-    routineId?: string;
-    labels?: Record<string, string>;
-  } = { name, cwd };
-  if (fields.host !== undefined) result.host = parseHostSpec(fields.host, intentId);
-  if (fields.routineId !== undefined) result.routineId = stringField(fields, "routineId");
-  if (fields.labels !== undefined) result.labels = stringMap(fields.labels, `intent ${intentId} labels`);
-  return result;
+  if (name.length === 0 || cwd.length === 0) {
+    throw new Error(`intent ${intentId} new-agent payload requires name and cwd`);
+  }
+  return {
+    name,
+    cwd,
+    ...(fields.host !== undefined ? { host: parseHostSpec(fields.host, intentId) } : {}),
+    ...(typeof fields.routineId === "string" ? { routineId: fields.routineId } : {}),
+    ...(fields.labels !== undefined ? { labels: stringMap(fields.labels, `intent ${intentId} labels`) } : {}),
+  };
 }
 
 function parseHostSpec(value: unknown, intentId: string): HostSpec {
   const fields = objectFields(value, `intent ${intentId} host`);
-  if (fields.kind !== "local" && fields.kind !== "container" && fields.kind !== "cloud") {
-    throw new Error(`intent ${intentId} host is invalid`);
+  const kind = stringField(fields, "kind");
+  if (kind !== "local" && kind !== "container" && kind !== "cloud") {
+    throw new Error(`intent ${intentId} has unsupported host kind: ${kind}`);
   }
-  const result: HostSpec = { kind: fields.kind };
-  for (const key of ["image", "repo", "ref"] as const) {
-    if (fields[key] !== undefined) result[key] = stringField(fields, key);
-  }
-  if (fields.ttlSeconds !== undefined) {
-    if (typeof fields.ttlSeconds !== "number" || !Number.isFinite(fields.ttlSeconds)) {
-      throw new Error(`intent ${intentId} host ttlSeconds is invalid`);
-    }
-    result.ttlSeconds = fields.ttlSeconds;
-  }
-  if (fields.mounts !== undefined) result.mounts = parseMounts(fields.mounts, intentId);
-  return result;
+  return {
+    kind,
+    ...(typeof fields.image === "string" ? { image: fields.image } : {}),
+    ...(typeof fields.repo === "string" ? { repo: fields.repo } : {}),
+    ...(fields.mounts !== undefined ? { mounts: parseMounts(fields.mounts, intentId) } : {}),
+  };
 }
 
 function parseMounts(value: unknown, intentId: string): HostMount[] {
-  if (!Array.isArray(value)) throw new Error(`intent ${intentId} host mounts are invalid`);
-  return value.map((mount) => {
-    const fields = objectFields(mount, `intent ${intentId} host mount`);
-    const hostPath = stringField(fields, "hostPath");
-    if (fields.mode !== undefined && fields.mode !== "ro" && fields.mode !== "rw") {
-      throw new Error(`intent ${intentId} host mount is invalid`);
-    }
-    return fields.mode === undefined ? { hostPath } : { hostPath, mode: fields.mode };
+  if (!Array.isArray(value)) throw new Error(`intent ${intentId} host mounts must be an array`);
+  return value.map((entry, index) => {
+    const fields = objectFields(entry, `intent ${intentId} host mount ${index}`);
+    return {
+      hostPath: stringField(fields, "hostPath"),
+      containerPath: stringField(fields, "containerPath"),
+      ...(fields.readOnly === true ? { readOnly: true as const } : {}),
+    };
   });
 }
 

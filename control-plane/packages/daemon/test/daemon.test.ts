@@ -86,6 +86,11 @@ describe("config", () => {
       // Empty by default: dialing out to a hub publishes this machine to
       // whoever holds a paired token, so it stays a deliberate edit.
       hubUrl: "",
+      replica: false,
+      replicaSyncToken: "",
+      intentPeerUrl: "",
+      intentPeerToken: "",
+      intentPollIntervalMs: 0,
     });
   });
 
@@ -119,6 +124,36 @@ describe("config", () => {
     const home = tempDir("ompd-cfg-");
     writeFileSync(join(home, "config.json"), JSON.stringify({ port: 70_000 }));
     expect(() => loadConfig(home)).toThrow(/port must be an integer/);
+  });
+
+  test("replica requires a sync token and peer URL/token travel together", () => {
+    const home = tempDir("ompd-cfg-");
+    writeFileSync(join(home, "config.json"), JSON.stringify({ replica: true }));
+    expect(() => loadConfig(home)).toThrow(/replica requires a non-empty replicaSyncToken/);
+
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ intentPeerUrl: "https://cloud.example" }),
+    );
+    expect(() => loadConfig(home)).toThrow(/intentPeerUrl and intentPeerToken must both be set/);
+
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({
+        replica: true,
+        replicaSyncToken: "sync-secret",
+        intentPeerUrl: "https://cloud.example",
+        intentPeerToken: "peer-secret",
+        intentPollIntervalMs: 2500,
+      }),
+    );
+    expect(loadConfig(home)).toMatchObject({
+      replica: true,
+      replicaSyncToken: "sync-secret",
+      intentPeerUrl: "https://cloud.example",
+      intentPeerToken: "peer-secret",
+      intentPollIntervalMs: 2500,
+    });
   });
 });
 

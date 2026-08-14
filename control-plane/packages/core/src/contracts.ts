@@ -65,9 +65,10 @@ export interface Agent {
  * session. The replica may persist and relay it; only the delegate executes it.
  */
 export type QueuedIntentAction = "prompt" | "decide" | "cancel" | "new-agent";
-export type QueuedIntentStatus = "pending" | "delivered";
+export type QueuedIntentStatus = "pending" | "claimed" | "delivered";
 
 export interface QueuedIntent {
+  seq?: number;
   id: string;
   /**
    * The owned agent. For `new-agent`, this is reserved by the replica before

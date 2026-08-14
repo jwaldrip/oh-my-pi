@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import {
   DefaultPolicy,
@@ -142,19 +142,33 @@ describe("Federation queued intents", () => {
       "new-agent",
       "prompt",
     ]);
-    expect(pending.filter((intent) => intent.action !== "new-agent").every((intent) => intent.agentId === agentId)).toBeTrue();
+    expect(
+      pending.filter((intent) => intent.action !== "new-agent").every((intent) => intent.agentId === agentId),
+    ).toBeTrue();
     expect(pending.every((intent) => intent.actorDeviceId !== "daemon")).toBeTrue();
   });
 
-  test("the owning delegate pulls, executes, and acknowledges queued intents", async () => {
+  test("the owning delegate claims, executes with real actor, and acknowledges", async () => {
     const cloud = await makeGateway({ replica: true, syncToken: "cloud-sync-token" });
     const operator = await cloud.pair([SCOPE_PROMPT, SCOPE_MANAGE]);
     const local = await makeGateway();
     const agentId = createAgentId();
     cloud.store.upsertAgent(replicaAgent(agentId));
+
+    // The originating device must exist on the local delegate for authorization.
+    const operatorDevice = cloud.store.listDevices().find((device) => !device.revokedAt);
+    expect(operatorDevice).toBeDefined();
+    local.store.addDevice({
+      id: operatorDevice!.id,
+      name: operatorDevice!.name,
+      publicKey: operatorDevice!.publicKey,
+      scopes: [SCOPE_PROMPT, SCOPE_MANAGE],
+      createdAt: operatorDevice!.createdAt,
+    });
+
     await local.supervisor.createAgent(
       { id: agentId, name: "Local delegate", cwd: "/workspace" },
-      { deviceId: "daemon", scopes: [SCOPE_MANAGE] },
+      { deviceId: operatorDevice!.id, scopes: [] },
     );
 
     const queued = await cloud.request(
@@ -173,59 +187,225 @@ describe("Federation queued intents", () => {
     const pending = await cloud.request("/v1/sync/intents", { method: "GET" }, "cloud-sync-token");
     expect(pending.status).toBe(200);
     expect((await pending.json()) as { intents: QueuedIntent[] }).toEqual({ intents: [] });
+
+    // The claim path rejects a second claim, and ack of pending IDs is a no-op.
+    const body = (await queued.json()) as { intent: QueuedIntent };
+    const reclaimed = await cloud.request(
+      "/v1/sync/intents/claim",
+      { method: "POST", body: JSON.stringify({ id: body.intent.id }) },
+      "cloud-sync-token",
+    );
+    expect(reclaimed.status).toBe(409);
   });
 
-  test("periodically drains the replica queue until the delegate stops", async () => {
+  test("claim is required before markDelivered advances status", async () => {
+    const cloud = await makeGateway({ replica: true, syncToken: "cloud-sync-token" });
+    const operator = await cloud.pair([SCOPE_PROMPT]);
+    const agentId = createAgentId();
+    cloud.store.upsertAgent(replicaAgent(agentId));
+    const queued = await cloud.request(
+      `/v1/agents/${agentId}/prompt`,
+      { method: "POST", body: JSON.stringify({ text: "claim me" }) },
+      operator,
+    );
+    const body = (await queued.json()) as { intent: QueuedIntent };
+
+    const ackPending = await cloud.request(
+      "/v1/sync/intents/ack",
+      { method: "POST", body: JSON.stringify({ ids: [body.intent.id] }) },
+      "cloud-sync-token",
+    );
+    expect(ackPending.status).toBe(200);
+    expect(((await ackPending.json()) as { delivered: number }).delivered).toBe(0);
+    expect(cloud.store.listPendingQueuedIntents().map((intent) => intent.id)).toEqual([body.intent.id]);
+
+    const claimed = await cloud.request(
+      "/v1/sync/intents/claim",
+      { method: "POST", body: JSON.stringify({ id: body.intent.id }) },
+      "cloud-sync-token",
+    );
+    expect(claimed.status).toBe(200);
+    expect(cloud.store.listPendingQueuedIntents()).toEqual([]);
+
+    const ackClaimed = await cloud.request(
+      "/v1/sync/intents/ack",
+      { method: "POST", body: JSON.stringify({ ids: [body.intent.id] }) },
+      "cloud-sync-token",
+    );
+    expect(((await ackClaimed.json()) as { delivered: number }).delivered).toBe(1);
+  });
+
+  test("a missing local actor refuses delivery rather than inventing authority", async () => {
     const local = await makeGateway();
     const agentId = createAgentId();
+    // Create agent with a known local device first.
+    local.store.addDevice({
+      id: "dev_local",
+      name: "local",
+      publicKey: "pk_local",
+      scopes: [SCOPE_MANAGE, SCOPE_PROMPT],
+      createdAt: new Date().toISOString(),
+    });
     await local.supervisor.createAgent(
-      { id: agentId, name: "Local delegate", cwd: "/workspace" },
-      { deviceId: "daemon", scopes: [SCOPE_MANAGE] },
+      { id: agentId, name: "Local", cwd: "/workspace" },
+      { deviceId: "dev_local", scopes: [] },
     );
-    const acknowledged = Promise.withResolvers<void>();
-    let pending = true;
+
+    const errors: Error[] = [];
     const drainer = new QueuedIntentDrainer({
       supervisor: local.supervisor,
+      onError: (error) => errors.push(error),
       peer: {
-        pullPendingIntents: async () =>
-          pending
-            ? [
-                {
-                  id: "qi_periodic",
-                  agentId,
-                  actorDeviceId: "dev_cloud_operator",
-                  action: "prompt",
-                  payload: { text: "Poll the replica" },
-                  createdAt: new Date().toISOString(),
-                  status: "pending",
-                },
-              ]
-            : [],
-        acknowledgeDelivered: async (ids) => {
-          expect(ids).toEqual(["qi_periodic"]);
-          pending = false;
-          acknowledged.resolve();
+        pullPendingIntents: async () => [
+          {
+            id: "qi_unknown_actor",
+            agentId,
+            actorDeviceId: "dev_unknown",
+            action: "prompt",
+            payload: { text: "should not run" },
+            createdAt: new Date().toISOString(),
+            status: "pending",
+          },
+        ],
+        claimIntent: async () => true,
+        acknowledgeDelivered: async () => {
+          throw new Error("should not acknowledge a refused intent");
         },
       },
     });
-    local.fake.onPrompt((_sessionId, text) => {
-      expect(text).toBe("Poll the replica");
+
+    expect(await drainer.drain()).toBe(0);
+    expect(local.fake.prompts).toEqual([]);
+    expect(errors.some((error) => /unknown device|unauthorized/i.test(error.message))).toBeTrue();
+  });
+
+  test("new-agent short-circuit still authorizes the originating actor", async () => {
+    const local = await makeGateway();
+    const agentId = createAgentId();
+    local.store.addDevice({
+      id: "dev_revoked",
+      name: "revoked",
+      publicKey: "pk",
+      scopes: [SCOPE_MANAGE],
+      createdAt: new Date().toISOString(),
+      revokedAt: new Date().toISOString(),
     });
-    vi.useFakeTimers();
-    drainer.start(1);
-    try {
-      vi.advanceTimersByTime(1);
-      await acknowledged.promise;
-      expect(pending).toBeFalse();
-    } finally {
-      drainer.stop();
-      vi.useRealTimers();
-    }
+    // Pre-create the reserved agent under a different authorized device so
+    // ownsAgent is true and the short-circuit path is taken.
+    local.store.addDevice({
+      id: "dev_owner",
+      name: "owner",
+      publicKey: "pk2",
+      scopes: [SCOPE_MANAGE],
+      createdAt: new Date().toISOString(),
+    });
+    await local.supervisor.createAgent(
+      { id: agentId, name: "Already exists", cwd: "/workspace" },
+      { deviceId: "dev_owner", scopes: [] },
+    );
+
+    const errors: Error[] = [];
+    let acknowledged = false;
+    const drainer = new QueuedIntentDrainer({
+      supervisor: local.supervisor,
+      onError: (error) => errors.push(error),
+      peer: {
+        pullPendingIntents: async () => [
+          {
+            id: "qi_new_revoked",
+            agentId,
+            actorDeviceId: "dev_revoked",
+            action: "new-agent",
+            payload: { name: "Already exists", cwd: "/workspace" },
+            createdAt: new Date().toISOString(),
+            status: "pending",
+          },
+        ],
+        claimIntent: async () => true,
+        acknowledgeDelivered: async () => {
+          acknowledged = true;
+        },
+      },
+    });
+
+    expect(await drainer.drain()).toBe(0);
+    expect(acknowledged).toBeFalse();
+    expect(errors.some((error) => /revoked|unauthorized/i.test(error.message))).toBeTrue();
+  });
+
+  test("stop awaits an in-flight drain before returning", async () => {
+    const local = await makeGateway();
+    const agentId = createAgentId();
+    local.store.addDevice({
+      id: "dev_local",
+      name: "local",
+      publicKey: "pk",
+      scopes: [SCOPE_MANAGE, SCOPE_PROMPT],
+      createdAt: new Date().toISOString(),
+    });
+    await local.supervisor.createAgent(
+      { id: agentId, name: "Local", cwd: "/workspace" },
+      { deviceId: "dev_local", scopes: [] },
+    );
+
+    const gate = Promise.withResolvers<void>();
+    let drainEntered = false;
+    let drainFinished = false;
+    const drainer = new QueuedIntentDrainer({
+      supervisor: local.supervisor,
+      peer: {
+        pullPendingIntents: async () => {
+          drainEntered = true;
+          await gate.promise;
+          return [
+            {
+              id: "qi_slow",
+              agentId,
+              actorDeviceId: "dev_local",
+              action: "prompt",
+              payload: { text: "slow" },
+              createdAt: new Date().toISOString(),
+              status: "pending",
+            },
+          ];
+        },
+        claimIntent: async () => true,
+        acknowledgeDelivered: async () => {
+          drainFinished = true;
+        },
+      },
+    });
+
+    const drainPromise = drainer.drain();
+    // Wait until the drain has entered the peer pull.
+    while (!drainEntered) await Promise.resolve();
+
+    const stopPromise = drainer.stop();
+    // stop must not resolve while the drain is still blocked.
+    let stopped = false;
+    void stopPromise.then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBeFalse();
+
+    gate.resolve();
+    await stopPromise;
+    expect(stopped).toBeTrue();
+    expect(await drainPromise).toBe(1);
+    expect(drainFinished).toBeTrue();
   });
 
   test("the delegate preserves a reserved agent id when it drains a queued creation", async () => {
     const local = await makeGateway();
     const agentId = createAgentId();
+    local.store.addDevice({
+      id: "dev_cloud_operator",
+      name: "cloud operator",
+      publicKey: "pk",
+      scopes: [SCOPE_MANAGE],
+      createdAt: new Date().toISOString(),
+    });
     const intent: QueuedIntent = {
       id: "qi_new_agent",
       agentId,
@@ -236,15 +416,21 @@ describe("Federation queued intents", () => {
       status: "pending",
     };
     const acknowledged: string[][] = [];
+    const claimed: string[] = [];
     const drainer = new QueuedIntentDrainer({
       supervisor: local.supervisor,
       peer: {
         pullPendingIntents: async () => [intent],
+        claimIntent: async (id) => {
+          claimed.push(id);
+          return true;
+        },
         acknowledgeDelivered: async (ids) => void acknowledged.push([...ids]),
       },
     });
 
     expect(await drainer.drain()).toBe(1);
+    expect(claimed).toEqual([intent.id]);
     expect(local.supervisor.listAgents().map((agent) => agent.id)).toContain(agentId);
     expect(acknowledged).toEqual([[intent.id]]);
   });

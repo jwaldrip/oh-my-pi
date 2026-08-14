@@ -51,7 +51,7 @@ import { createTunnelDialer } from "./tunnel/dial.ts";
 import { identityPath, loadIdentity } from "./tunnel/identity.ts";
 import { reachableEndpoints } from "./endpoints.ts";
 import { EvolutionEngine, ProposalStore } from "./evolution/index.ts";
-import { QueuedIntentDrainer, type IntentPeer } from "./federation/queued-intents.ts";
+import { HttpIntentPeer, QueuedIntentDrainer, type IntentPeer } from "./federation/queued-intents.ts";
 import { Gateway, GatewayEvents, type VoiceHandler } from "./gateway/index.ts";
 import { homeIdFor } from "./home-id.ts";
 import { HostRegistry } from "./hosts.ts";
@@ -163,6 +163,29 @@ export interface OmpdConfig {
    * is how a laptop behind NAT becomes reachable without opening a port.
    */
   hubUrl: string;
+  /**
+   * When true, this daemon is a cloud replica: authorized writes for agents it
+   * does not own are queued rather than executed. Requires replicaSyncToken.
+   */
+  replica: boolean;
+  /**
+   * Dedicated sync credential for `/v1/sync/intents*`. Empty means no sync
+   * surface. Distinct from paired-device bearer tokens.
+   */
+  replicaSyncToken: string;
+  /**
+   * Base URL of a cloud replica this local delegate drains. Empty means no
+   * drain. Requires intentPeerToken.
+   */
+  intentPeerUrl: string;
+  /**
+   * Sync token presented to intentPeerUrl. Empty means no drain.
+   */
+  intentPeerToken: string;
+  /**
+   * Delegate poll cadence in milliseconds. 0 means the drainer default.
+   */
+  intentPollIntervalMs: number;
 }
 
 export const DEFAULT_CONFIG: OmpdConfig = {
@@ -172,6 +195,11 @@ export const DEFAULT_CONFIG: OmpdConfig = {
   ompPath: "omp",
   keepAwake: true,
   hubUrl: "",
+  replica: false,
+  replicaSyncToken: "",
+  intentPeerUrl: "",
+  intentPeerToken: "",
+  intentPollIntervalMs: 0,
 };
 
 export interface OmpdOptions {
@@ -300,7 +328,37 @@ export function loadConfig(home: string, overrides: Partial<OmpdConfig> = {}): O
     // completes.
     throw new Error(`${path}: hubUrl must be a ws:// or wss:// URL, got ${merged.hubUrl}`);
   }
-
+  if (typeof merged.replica !== "boolean") {
+    throw new Error(`${path}: replica must be true or false, got ${String(merged.replica)}`);
+  }
+  if (typeof merged.replicaSyncToken !== "string") {
+    throw new Error(`${path}: replicaSyncToken must be a string, got ${String(merged.replicaSyncToken)}`);
+  }
+  if (merged.replica && merged.replicaSyncToken === "") {
+    throw new Error(`${path}: replica requires a non-empty replicaSyncToken`);
+  }
+  if (typeof merged.intentPeerUrl !== "string") {
+    throw new Error(`${path}: intentPeerUrl must be a string, got ${String(merged.intentPeerUrl)}`);
+  }
+  if (typeof merged.intentPeerToken !== "string") {
+    throw new Error(`${path}: intentPeerToken must be a string, got ${String(merged.intentPeerToken)}`);
+  }
+  if (merged.intentPeerUrl !== "" && !/^https?:\/\//.test(merged.intentPeerUrl)) {
+    throw new Error(`${path}: intentPeerUrl must be an http:// or https:// URL, got ${merged.intentPeerUrl}`);
+  }
+  if ((merged.intentPeerUrl === "") !== (merged.intentPeerToken === "")) {
+    throw new Error(`${path}: intentPeerUrl and intentPeerToken must both be set or both be empty`);
+  }
+  if (
+    typeof merged.intentPollIntervalMs !== "number" ||
+    !Number.isFinite(merged.intentPollIntervalMs) ||
+    merged.intentPollIntervalMs < 0 ||
+    !Number.isInteger(merged.intentPollIntervalMs)
+  ) {
+    throw new Error(
+      `${path}: intentPollIntervalMs must be a non-negative integer, got ${String(merged.intentPollIntervalMs)}`,
+    );
+  }
 
   return merged;
 }
@@ -423,16 +481,12 @@ export class Ompd {
     });
     this.#events.add({ onAgentsChanged: (agents) => this.#sleepGuard.update(agents) });
 
-    // Wraps the host factory before the supervisor gets it, so every ACP host
-    // the supervisor spawns is indexed by session on the way through. That is
-    // what lets the gateway answer for a session's config without reaching
-    // into the supervisor or opening a second connection to the agent.
+    // Hosts are named here so the provisioner and supervisor share one
+    // registry: a container agent's session would otherwise be the only kind
+    // the gateway could not answer a mode query for. Keeping every spawn on
+    // the daemon's own machine is the whole point of that refusal.
     this.#hosts = new HostRegistry({ spawn: opts.spawnHost });
 
-    // Built before the supervisor, which takes it: a non-local host spec is
-    // refused outright without one, and refusing to run a container agent on
-    // the daemon's own machine is the whole point of that refusal.
-    //
     // The backends are named here rather than left to the provisioner's
     // defaults for one reason: they have to spawn through the registry above,
     // or a container agent's session would be the only kind the gateway could
@@ -481,13 +535,23 @@ export class Ompd {
         return [mcpServerDescriptor(server, agentId)];
       },
     });
-    if (opts.intentPeer !== undefined) {
+    const intentPeer =
+      opts.intentPeer ??
+      (this.#config.intentPeerUrl !== ""
+        ? new HttpIntentPeer({
+            url: this.#config.intentPeerUrl,
+            token: this.#config.intentPeerToken,
+          })
+        : undefined);
+    if (intentPeer !== undefined) {
       this.#queuedIntentDrainer = new QueuedIntentDrainer({
         supervisor: this.#supervisor,
-        peer: opts.intentPeer,
+        peer: intentPeer,
         onError: (error) => this.#onLog(`queued intent drain failed: ${error.message}`),
       });
-      this.#intentPollIntervalMs = opts.intentPollIntervalMs;
+      this.#intentPollIntervalMs =
+        opts.intentPollIntervalMs ??
+        (this.#config.intentPollIntervalMs > 0 ? this.#config.intentPollIntervalMs : undefined);
     }
     requestWebViewApproval = ({ agentId, tool, title, action }) =>
       this.#supervisor.gateAction({ agentId, tool, title, input: action });
@@ -500,13 +564,11 @@ export class Ompd {
       supervisor: this.#supervisor,
       actor: { deviceId: LOCAL_OPERATOR_DEVICE_ID, scopes: [...LOCAL_OPERATOR_SCOPES] },
     });
-
     this.#evolution = new EvolutionEngine({
       store: this.#store,
       proposals: this.#proposals,
       repoRoot: opts.repoRoot ?? process.cwd(),
     });
-
     this.#tasks = new TaskManager({ store: this.#store, supervisor: this.#supervisor });
     this.#sessionIndex = new SessionIndex({ store: this.#store });
 
@@ -548,6 +610,14 @@ export class Ompd {
       // needs no setting and no timer.
       onTextPrompt: (agentId, actor) => this.#voiced.delete(voiceKey(agentId, actor.deviceId)),
       voice: this.#voiceEnabled ? (send, actor) => this.#openVoice(send, actor) : undefined,
+      ...(this.#config.replicaSyncToken !== ""
+        ? {
+            federation: {
+              replica: this.#config.replica,
+              syncToken: this.#config.replicaSyncToken,
+            },
+          }
+        : {}),
     });
     sendWebViewAction = (agentId, requestId, action) =>
       this.#gateway.sendWebViewAction(agentId, requestId, action);
@@ -817,8 +887,9 @@ export class Ompd {
     if (this.#starting !== undefined) await this.#starting.catch(() => undefined);
 
     try {
-      // 1. No new scheduled work.
-      this.#queuedIntentDrainer?.stop();
+      // 1. No new scheduled work, and wait for any in-flight drain before
+      //    the supervisor it touches is shut down.
+      await this.#queuedIntentDrainer?.stop();
       this.#scheduler.stop();
       // 2. Settle the runs already in flight, before anything they depend on
       //    goes away: cancelling a turn needs the host serving it, and a run
