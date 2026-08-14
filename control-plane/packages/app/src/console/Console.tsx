@@ -94,10 +94,10 @@ export function Console({
   const log =
     agent === null ? null : (
       // Keyed, so selecting a different agent builds a new screen rather than
-      // re-rendering this one with different props. The browser pane is an
-      // offer the operator made about one agent: carried across a selection it
-      // would leave a page from the previous agent's work open, registered as
-      // the new agent's target, without anyone having asked for it.
+      // re-rendering one with a different target. Registration follows that
+      // screen, and its sandbox belongs to that one agent. Keeping a screen
+      // alive across a selection could otherwise execute a new agent's action
+      // in the prior agent's browser without anyone choosing it.
       <SessionScreen
         key={agent.id}
         agent={agent}
@@ -119,11 +119,15 @@ export function Console({
         onDecide={(requestId, choice, scope) => {
           actions.decide(agent.id, requestId, choice, scope);
         }}
-        onMountWebView={(target) => {
-          actions.mountWebView(agent.id, target);
+        pendingWebViewAction={state.pendingWebViewActions.get(agent.id)}
+        onMountWebView={() => {
+          actions.mountWebView(agent.id);
         }}
         onUnmountWebView={() => {
           actions.unmountWebView(agent.id);
+        }}
+        onWebViewResult={(requestId, result) => {
+          actions.webViewResult(agent.id, requestId, result);
         }}
       />
     );

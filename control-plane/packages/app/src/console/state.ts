@@ -13,7 +13,7 @@
  * load and its spend.
  */
 
-import type { Agent, AgentId, ApprovalChoice } from "@ompd/core/contracts";
+import type { Agent, AgentId, ApprovalChoice, WebViewAction } from "@ompd/core/contracts";
 import { SCOPE_APPROVE } from "@ompd/core/contracts";
 import type {
   AgentsEvent,
@@ -45,6 +45,18 @@ export interface StripStats {
 }
 
 /**
+ * The sole agent action awaiting the selected screen's embedded browser.
+ *
+ * The daemon serializes actions for a target, but retaining the request id is
+ * still necessary: a stale driver's completion must never erase a newer
+ * action for the same agent.
+ */
+export interface PendingWebViewAction {
+  requestId: string;
+  action: WebViewAction;
+}
+
+/**
  * Error codes that mean the daemon overruled this device, not that the link
  * broke. The gateway wears `unauthorized` for both a dead token and a missing
  * scope; the client settles the first case on its own and emits
@@ -63,6 +75,8 @@ export interface ConsoleState {
   readonly attempt: number;
   readonly delayMs: number | undefined;
   readonly selected: AgentId | null;
+  /** At most one browser action per agent. Completion is correlated by request id. */
+  readonly pendingWebViewActions: ReadonlyMap<AgentId, PendingWebViewAction>;
   readonly canApprove: boolean;
   /** Why approval is refused, once the daemon has actually refused it. */
   readonly refusal: string | undefined;
@@ -82,6 +96,7 @@ export function emptyConsole(scopes: readonly string[]): ConsoleState {
     attempt: 0,
     delayMs: undefined,
     selected: null,
+    pendingWebViewActions: new Map(),
     // A pairing that did not declare its scopes stays optimistic; the daemon's
     // first refusal is what downgrades it.
     canApprove: scopes.length === 0 || scopes.includes(SCOPE_APPROVE),
@@ -105,6 +120,10 @@ export type ConsoleEvent =
   | { t: "prompt"; agentId: AgentId; text: string }
   /** Local: a clearance this device just settled. */
   | { t: "decide"; agentId: AgentId; requestId: string; choice: ApprovalChoice }
+  /** Daemon: an already-authorized action for this agent's registered WebView. */
+  | { t: "webview_action"; agentId: AgentId; requestId: string; action: WebViewAction }
+  /** Local: exactly this action was answered, or its screen went away. */
+  | { t: "webview_result"; agentId: AgentId; requestId: string }
   | { t: "dismiss" };
 
 /**
@@ -174,6 +193,20 @@ export function apply(state: ConsoleState, event: ConsoleEvent): ConsoleState {
         resolveApproval(session, event.requestId, event.choice),
       );
 
+    case "webview_action": {
+      const pendingWebViewActions = new Map(state.pendingWebViewActions);
+      pendingWebViewActions.set(event.agentId, { requestId: event.requestId, action: event.action });
+      return { ...state, pendingWebViewActions };
+    }
+
+    case "webview_result": {
+      const pending = state.pendingWebViewActions.get(event.agentId);
+      if (pending?.requestId !== event.requestId) return state;
+      const pendingWebViewActions = new Map(state.pendingWebViewActions);
+      pendingWebViewActions.delete(event.agentId);
+      return { ...state, pendingWebViewActions };
+    }
+
     case "dismiss":
       return state.notice === null ? state : { ...state, notice: null };
 
@@ -204,11 +237,13 @@ function applyAgents(state: ConsoleState, agents: readonly Agent[]): ConsoleStat
 
   const watermarks = new Map(state.watermarks);
   const spoken = new Map(state.spoken);
+  const pendingWebViewActions = new Map(state.pendingWebViewActions);
   for (const agentId of [...sessions.keys()]) {
     if (live.has(agentId)) continue;
     sessions.delete(agentId);
     watermarks.delete(agentId);
     spoken.delete(agentId);
+    pendingWebViewActions.delete(agentId);
   }
 
   const selected = state.selected !== null && live.has(state.selected) ? state.selected : null;
@@ -220,6 +255,7 @@ function applyAgents(state: ConsoleState, agents: readonly Agent[]): ConsoleStat
     sessions,
     watermarks,
     spoken,
+    pendingWebViewActions,
     selected,
     notice: lost ? "That agent is gone." : state.notice,
   };

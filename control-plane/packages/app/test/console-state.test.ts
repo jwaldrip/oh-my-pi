@@ -133,6 +133,29 @@ describe("what the daemon says", () => {
   });
 });
 
+describe("browser actions", () => {
+  test("one agent retains only its newest request and a stale result cannot clear it", () => {
+    const first = apply(emptyConsole([]), {
+      t: "webview_action",
+      agentId: "a1",
+      requestId: "request-1",
+      action: { kind: "observe" },
+    });
+    const replaced = apply(first, {
+      t: "webview_action",
+      agentId: "a1",
+      requestId: "request-2",
+      action: { kind: "screenshot" },
+    });
+
+    expect(replaced.pendingWebViewActions.get("a1")?.requestId).toBe("request-2");
+    expect(apply(replaced, { t: "webview_result", agentId: "a1", requestId: "request-1" })).toBe(replaced);
+
+    const settled = apply(replaced, { t: "webview_result", agentId: "a1", requestId: "request-2" });
+    expect(settled.pendingWebViewActions.has("a1")).toBe(false);
+  });
+});
+
 describe("the roster is the authority", () => {
   test("an agent that leaves takes its transcript with it", () => {
     const state = drive([

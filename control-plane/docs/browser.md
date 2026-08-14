@@ -123,11 +123,12 @@ plumbing" understates how many distinct pieces that phrase covers.
    naming a loopback URL with a per-agent token. Resumed sessions get the same
    mount as fresh ones, which is what stops a restart from silently taking the
    capability away from an agent that had it.
-2. **Register.** A client that mounts a WebView sends
-   `{ t: "webview_register", agentId }` on its socket. The gateway holds one
-   target per agent, refuses a registration for an agent this socket has not
-   attached to, and requires `read` scope. Registering displaces the previous
-   holder, and `detach`, `webview_unregister`, or losing the socket all drop it.
+2. **Register.** A selected native-app session screen sends
+   `{ t: "webview_register", agentId }` while it is mounted, whether or not
+   the human has opened the Browser pane. The gateway holds one target per
+   agent, refuses a registration for an agent this socket has not attached to,
+   and requires `read` scope. Registering displaces the previous holder, and
+   `detach`, `webview_unregister`, or losing the socket all drop it.
 3. **Gate.** `tools/call` reaches `WebViewBridge.performAction`, which
    evaluates `DefaultPolicy` before anything is dispatched. See "Every
    mutating action reaches the policy engine" above.
@@ -135,11 +136,14 @@ plumbing" understates how many distinct pieces that phrase covers.
    registered socket, and answers `false` synchronously when there is no
    target, so the tool call fails immediately rather than waiting out the
    bridge's device timeout for a frame that could never arrive.
-5. **Answer.** The client performs the action against its own
-   `WebViewDriver` and replies `webview_result` with the request id it was
-   given. The gateway refuses a result from a socket that is not the agent's
-   registered target, and refuses an unknown or already-settled request id,
-   so one device cannot settle another's action by replaying what it observed.
+5. **Answer.** The app stores at most one pending action per agent with its
+   request id, opens the registered screen's embedded Browser pane, and gives
+   the action to its `WebViewDriver` exactly once. Its result is sent as
+   `webview_result` with that same request id; a stale result cannot clear a
+   newer pending action. The gateway refuses a result from a socket that is
+   not the agent's registered target, and refuses an unknown or already-settled
+   request id, so one device cannot settle another's action by replaying what
+   it observed.
 6. **Unavailable.** A registered socket that closes mid-action fails every
    in-flight action for that agent at once (`onWebViewUnavailable` ->
    `WebViewBridge.cancelAgent`), rather than leaving the model waiting.
@@ -153,9 +157,11 @@ covers the refusal paths, `browser-bridge.test.ts` the gating, and
 On the client side, `core/src/ompd-client.ts` owns the transport for every
 ompd client (app, web, and the TUI-as-client), including replaying
 registrations after a reconnect's `hello`, in that order: an attach first,
-then the registration the daemon would otherwise refuse. `app`'s session
-screen mounts the driver behind a browser toggle and registers it on mount,
-which is the only place a `WebViewDriverHandle` and an `AgentId` meet.
+then the registration the daemon would otherwise refuse. `app` registers the
+selected native screen before its Browser pane is visible. An inbound action
+opens that isolated pane and is performed through `WebViewDriver`; the human
+can also open and close the visible Browser toggle without changing the
+screen's registration.
 
 ## Per-platform status
 
