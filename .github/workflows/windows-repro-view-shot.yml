@@ -125,22 +125,17 @@ jobs:
           if (-not $sdkVersion) {
             throw "No Windows SDK with Windows.h is installed on this runner."
           }
-          # Build the app's own .vcxproj directly, not the .sln. The .sln also
-          # includes the UWP packaging (.wapproj) project, which failed on this
-          # runner with an unrelated error (MSB3774: could not find SDK
-          # "Microsoft.UniversalCRT.Debug, Version=10.0.22621.0") after the app's
-          # own .vcxproj (and every native module it references, including
-          # RNViewShot once added) had already compiled cleanly. Building the
-          # .vcxproj directly still pulls in every ProjectReference (native
-          # modules), just not the separate appx packaging step, which is not
-          # what this repro is testing.
-          $vcxproj = Get-ChildItem -Recurse -Filter *.vcxproj |
-            Where-Object { $_.Directory.Name -eq $_.BaseName } |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $vcxproj) {
-            throw "Could not find the generated app .vcxproj."
-          }
-          & $msbuild $vcxproj /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
+          # Build via the .sln (not the standalone .vcxproj): the app's own
+          # ReproApp.vcxproj imports $(SolutionDir)\ExperimentalFeatures.props,
+          # and $(SolutionDir) is only defined when MSBuild is invoked against
+          # the .sln. Target only the app project (/t:ReproApp) so this still
+          # skips the separate UWP packaging (.wapproj) project, which failed
+          # on this runner with an unrelated error (MSB3774: could not find SDK
+          # "Microsoft.UniversalCRT.Debug, Version=10.0.22621.0") -- that
+          # target still pulls in every ProjectReference (native modules,
+          # including RNViewShot once added), just not the appx packaging step.
+          $sln = Get-ChildItem *.sln | Select-Object -First 1 -ExpandProperty Name
+          & $msbuild $sln /m /restore /t:ReproApp /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
           if ($LASTEXITCODE -ne 0) {
             throw "Control build (no react-native-view-shot) failed. This means the failure is environmental/toolchain, not caused by react-native-view-shot; see the log above for the real root cause before drawing any conclusion about view-shot."
           }
@@ -171,17 +166,13 @@ jobs:
           if (-not $sdkVersion) {
             throw "No Windows SDK with Windows.h is installed on this runner."
           }
-          # Same target as the control build above: the app's own .vcxproj
-          # (which now has react-native-view-shot autolinked as a
-          # ProjectReference), not the .sln/.wapproj, so this leg differs from
-          # the control leg only by the presence of react-native-view-shot.
-          $vcxproj = Get-ChildItem -Recurse -Filter *.vcxproj |
-            Where-Object { $_.Directory.Name -eq $_.BaseName } |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $vcxproj) {
-            throw "Could not find the generated app .vcxproj."
-          }
-          & $msbuild $vcxproj /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
+          # Same target as the control build above: build via the .sln,
+          # targeting only the app project (/t:ReproApp), which now has
+          # react-native-view-shot autolinked as a ProjectReference. This
+          # leg differs from the control leg only by the presence of
+          # react-native-view-shot.
+          $sln = Get-ChildItem *.sln | Select-Object -First 1 -ExpandProperty Name
+          & $msbuild $sln /m /restore /t:ReproApp /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
