@@ -10,7 +10,15 @@
 
 import { describe, expect, test } from "bun:test";
 import type { Agent } from "@ompd/core/contracts";
-import { allStats, apply, emptyConsole, fleetClearances, sessionFor, stripStats } from "../src/console/state.ts";
+import {
+  allStats,
+  apply,
+  browserSessionsOf,
+  emptyConsole,
+  fleetClearances,
+  sessionFor,
+  stripStats,
+} from "../src/console/state.ts";
 import type { ConsoleEvent, ConsoleState } from "../src/console/state.ts";
 import { EMPTY_SESSION } from "../src/session/model.ts";
 
@@ -78,6 +86,19 @@ describe("a canned stream drives the board", () => {
   test("watermarks track the highest seq per agent", () => {
     const state = drive([{ t: "agents", event: { agents: [agent("a1")] } }, ...turn("a1")]);
     expect(state.watermarks.get("a1")).toBe(STREAM.length);
+  });
+
+  test("keeps subagents in Agent Hub rather than creating an unusable session row", () => {
+    const state = drive([
+      {
+        t: "agents",
+        event: {
+          agents: [agent("primary"), agent("scout", { parentAgentId: "primary" })],
+        },
+      },
+    ]);
+
+    expect(browserSessionsOf(state).map((session) => session.id)).toEqual(["primary"]);
   });
 });
 

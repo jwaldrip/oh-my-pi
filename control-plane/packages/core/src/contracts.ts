@@ -24,6 +24,15 @@ export type AgentState =
 /** States from which no further work can proceed without operator action. */
 export const TERMINAL_AGENT_STATES: readonly AgentState[] = ["stopped", "failed"];
 
+export interface AgentMetrics {
+  /** Total tokens consumed by this agent, including completed child turns. */
+  usedTokens: number;
+  /** Provider-reported cost in the account's base currency, when available. */
+  costAmount?: number;
+  /** Wall-clock runtime, measured from the agent's registration. */
+  durationMs: number;
+}
+
 export interface Agent {
   id: AgentId;
   name: string;
@@ -36,6 +45,14 @@ export interface Agent {
   lastActiveAt: string;
   /** Set when this agent was spawned by a routine rather than a human. */
   routineId?: string;
+  /** Parent agent registry id when this is an OMP subagent. */
+  parentAgentId?: string;
+  /** The assignment passed to a subagent, independent of its display name. */
+  taskTitle?: string;
+  /** Resolved provider/model identity reported by OMP. */
+  model?: string;
+  /** Live or terminal usage accumulated by the agent. */
+  metrics?: AgentMetrics;
   labels: Record<string, string>;
 }
 

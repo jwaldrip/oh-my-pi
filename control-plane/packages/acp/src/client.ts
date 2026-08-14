@@ -62,6 +62,123 @@ export interface AcpCloseInfo {
 export interface PromptResult {
   stopReason: string;
 }
+export interface AcpAgentRegistrySnapshot {
+  id: string;
+  displayName: string;
+  kind: "main" | "sub" | "advisor";
+  parentId?: string;
+  parentSessionId?: string;
+  sessionId?: string;
+  status: "running" | "idle" | "parked" | "aborted";
+  createdAt: string;
+  lastActiveAt: string;
+  taskTitle?: string;
+  model?: string;
+  metrics?: {
+    usedTokens: number;
+    costAmount?: number;
+    durationMs: number;
+  };
+}
+
+export interface AcpAgentRegistryNotification {
+  agents: AcpAgentRegistrySnapshot[];
+}
+
+/**
+ * Validates the one custom ACP notification that carries the in-process OMP
+ * AgentRegistry. The peer is a process boundary, so invalid telemetry is
+ * ignored rather than being allowed to corrupt a durable agent record.
+ */
+export function parseAgentRegistryNotification(
+  params: unknown,
+): AcpAgentRegistryNotification | undefined {
+  if (
+    typeof params !== "object" ||
+    params === null ||
+    !("agents" in params) ||
+    !Array.isArray(params.agents)
+  ) {
+    return undefined;
+  }
+
+  const agents: AcpAgentRegistrySnapshot[] = [];
+  for (const candidate of params.agents) {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      !("id" in candidate) ||
+      !("displayName" in candidate) ||
+      !("kind" in candidate) ||
+      !("status" in candidate) ||
+      !("createdAt" in candidate) ||
+      !("lastActiveAt" in candidate) ||
+      typeof candidate.id !== "string" ||
+      typeof candidate.displayName !== "string" ||
+      (candidate.kind !== "main" && candidate.kind !== "sub" && candidate.kind !== "advisor") ||
+      (candidate.status !== "running" &&
+        candidate.status !== "idle" &&
+        candidate.status !== "parked" &&
+        candidate.status !== "aborted") ||
+      typeof candidate.createdAt !== "string" ||
+      typeof candidate.lastActiveAt !== "string"
+    ) {
+      return undefined;
+    }
+    const metrics = "metrics" in candidate ? candidate.metrics : undefined;
+    if (
+      metrics !== undefined &&
+      (typeof metrics !== "object" ||
+        metrics === null ||
+        !("usedTokens" in metrics) ||
+        !("durationMs" in metrics) ||
+        typeof metrics.usedTokens !== "number" ||
+        typeof metrics.durationMs !== "number" ||
+        ("costAmount" in metrics &&
+          metrics.costAmount !== undefined &&
+          typeof metrics.costAmount !== "number"))
+    ) {
+      return undefined;
+    }
+    agents.push({
+      id: candidate.id,
+      displayName: candidate.displayName,
+      kind: candidate.kind,
+      parentId:
+        "parentId" in candidate && typeof candidate.parentId === "string"
+          ? candidate.parentId
+          : undefined,
+      parentSessionId:
+        "parentSessionId" in candidate && typeof candidate.parentSessionId === "string"
+          ? candidate.parentSessionId
+          : undefined,
+      sessionId:
+        "sessionId" in candidate && typeof candidate.sessionId === "string"
+          ? candidate.sessionId
+          : undefined,
+      status: candidate.status,
+      createdAt: candidate.createdAt,
+      lastActiveAt: candidate.lastActiveAt,
+      taskTitle:
+        "taskTitle" in candidate && typeof candidate.taskTitle === "string"
+          ? candidate.taskTitle
+          : undefined,
+      model: "model" in candidate && typeof candidate.model === "string" ? candidate.model : undefined,
+      metrics:
+        metrics === undefined
+          ? undefined
+          : {
+              usedTokens: metrics.usedTokens,
+              costAmount:
+                "costAmount" in metrics && typeof metrics.costAmount === "number"
+                  ? metrics.costAmount
+                  : undefined,
+              durationMs: metrics.durationMs,
+            },
+    });
+  }
+  return { agents };
+}
 
 /**
  * A question OMP's internal approval gate, or anything else inside the host,
@@ -104,6 +221,8 @@ export interface AcpClientOptions {
   /** Called once the transport closes for any reason. */
   onClose?: (info: AcpCloseInfo) => void;
   /** Diagnostics sink. */
+  /** Receives the live AgentRegistry snapshot emitted by an OMP ACP host. */
+  onAgentRegistry?: (agents: AcpAgentRegistrySnapshot[]) => void;
   onLog?: (line: string) => void;
   /** Deadline for control-plane requests: initialize, session/new, and friends. */
   requestTimeoutMs?: number;
@@ -244,6 +363,12 @@ export class AcpClient {
 
     // Notification from the agent.
     if (m.id === undefined && typeof m.method === "string") {
+      if (m.method === "notifications/agent_registry") {
+        const notification = parseAgentRegistryNotification(m.params);
+        if (notification) this.#opts.onAgentRegistry?.(notification.agents);
+        else this.#opts.onLog?.("invalid agent registry notification");
+        return;
+      }
       if (m.method === "session/update") {
         const p = m.params as { sessionId?: string; update?: unknown } | undefined;
         if (p?.sessionId) this.#opts.onUpdate?.(p.sessionId, p.update ?? p);

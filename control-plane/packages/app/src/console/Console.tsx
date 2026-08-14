@@ -13,6 +13,7 @@
 import type { JSX } from "react";
 import { useEffect, useMemo, useReducer, useRef } from "react";
 import { StyleSheet, View } from "react-native";
+import { AgentHub } from "../components/AgentHub.tsx";
 import { Toast } from "../components/Toast.tsx";
 import { useSplitLayout } from "../design/layout.ts";
 import { browserReduce, EMPTY_BROWSER } from "../session/browser.ts";
@@ -53,7 +54,7 @@ export function Console({
   const didAutoSelect = useRef(false);
   useEffect(() => {
     if (!split || state.selected !== null || didAutoSelect.current) return;
-    const top = state.agents[0];
+    const top = state.agents.find((candidate) => candidate.parentAgentId === undefined);
     if (top === undefined) return;
     didAutoSelect.current = true;
     actions.select(top.id);
@@ -65,30 +66,35 @@ export function Console({
   useHardwareBack(!split && state.selected !== null, actions.back);
 
   const bay = (
-    <FleetScreen
-      browser={browser}
-      onSort={(field) => {
-        dispatchBrowser({ t: "sort", field });
-      }}
-      onToggleGroup={(cwd) => {
-        dispatchBrowser({ t: "toggleGroup", cwd });
-      }}
-      onToggleGrouped={() => {
-        dispatchBrowser({ t: "toggleGrouped" });
-      }}
-      onToggleArchived={() => {
-        dispatchBrowser({ t: "toggleArchived" });
-      }}
-      onTakeover={(session) => {
-        actions.select(session.id);
-      }}
-      onArchive={(session) => {
-        dispatchBrowser({ t: "archive", id: session.id });
-      }}
-      onUnarchive={(session) => {
-        dispatchBrowser({ t: "unarchive", id: session.id });
-      }}
-    />
+    <View style={split ? styles.splitBay : styles.bay}>
+      <AgentHub agents={state.agents.filter((candidate) => candidate.parentAgentId !== undefined)} />
+      <View style={styles.fleet}>
+        <FleetScreen
+          browser={browser}
+          onSort={(field) => {
+            dispatchBrowser({ t: "sort", field });
+          }}
+          onToggleGroup={(cwd) => {
+            dispatchBrowser({ t: "toggleGroup", cwd });
+          }}
+          onToggleGrouped={() => {
+            dispatchBrowser({ t: "toggleGrouped" });
+          }}
+          onToggleArchived={() => {
+            dispatchBrowser({ t: "toggleArchived" });
+          }}
+          onTakeover={(session) => {
+            actions.select(session.id);
+          }}
+          onArchive={(session) => {
+            dispatchBrowser({ t: "archive", id: session.id });
+          }}
+          onUnarchive={(session) => {
+            dispatchBrowser({ t: "unarchive", id: session.id });
+          }}
+        />
+      </View>
+    </View>
   );
 
   const log =
@@ -149,6 +155,8 @@ export function Console({
 const styles = StyleSheet.create({
   position: { flex: 1, backgroundColor: ground.base },
   split: { flex: 1, flexDirection: "row" },
-  bay: { width: 340, borderRightWidth: stroke.heavy, borderRightColor: ground.edge },
+  bay: { flex: 1 },
+  splitBay: { width: 340, borderRightWidth: stroke.heavy, borderRightColor: ground.edge },
+  fleet: { flex: 1 },
   log: { flex: 1 },
 });
