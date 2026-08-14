@@ -40,7 +40,7 @@ export interface SessionScreenProps {
   onSubmit: (text: string) => void;
   onCancel: () => void;
   onDecide: (requestId: string, choice: ApprovalChoice, scope?: ApprovalScope) => void;
-  onDecidePlan: (requestId: string, choice: PlanReviewChoice, feedback?: string) => void;
+  onDecidePlan: (requestId: string, choice: PlanReviewChoice) => void;
   /**
    * Offer this screen's WebView as the agent's action target. Called when the
    * operator opens the browser pane and again after a remount; the daemon
