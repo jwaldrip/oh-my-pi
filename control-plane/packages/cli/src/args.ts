@@ -55,6 +55,7 @@ export type Command =
   | { kind: "prompt"; agentId: string; text: string }
   | { kind: "routines" }
   | { kind: "run"; routineId: string }
+  | { kind: "sync-config"; targetUrl: string; token: string }
   | { kind: "audit"; limit: number }
   | { kind: "open" }
   | { kind: "self-install"; prefix?: string }
@@ -105,6 +106,9 @@ agents
 routines
   routines                list routines
   run <routineId>         run a routine now
+  sync-config <target-url> --token <target-token>
+                          import non-secret configuration from another daemon
+
 
 audit
   audit [--limit N]       recent privileged actions
@@ -368,6 +372,13 @@ export function parseCommand(argv: string[]): Command {
     case "run":
       rejectExtra(rest, 1, "run");
       return { kind: "run", routineId: requirePositional(rest, 0, "routineId") };
+
+    case "sync-config": {
+      rejectExtra(rest, 1, "sync-config");
+      const token = stringFlag(flags, "token");
+      if (token === undefined) throw new UsageError("sync-config needs --token");
+      return { kind: "sync-config", targetUrl: requirePositional(rest, 0, "target-url"), token };
+    }
 
     case "audit": {
       rejectExtra(rest, 0, "audit");
