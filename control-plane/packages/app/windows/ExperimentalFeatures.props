@@ -3,10 +3,15 @@
 
   <PropertyGroup Label="Microsoft.ReactNative Experimental Features">
     <!--
-      New Architecture for the app host, Paper compatibility for community modules.
+      Required for building a New Architecture project.
+
+      react-native-webview 15.0.0+ ships a Fabric-based Windows implementation.
+      react-native-view-shot has no New Architecture Windows implementation in
+      any published or unreleased version as of this writing (last checked
+      react-native-view-shot@5.1.1 and the gre/react-native-view-shot master
+      branch); it fails to build here until upstream migrates it.
     -->
-    <RnwNewArch Condition="'$(ProjectName)' == 'ompd'">true</RnwNewArch>
-    <RnwNewArch Condition="'$(ProjectName)' != 'ompd'">false</RnwNewArch>
+    <RnwNewArch>true</RnwNewArch>
 
     <!--
       Changes compilation to assume use of Microsoft.ReactNative NuGet packages

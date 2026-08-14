@@ -16,7 +16,7 @@
     </ProjectReference>
     <!-- Projects from react-native-webview -->
     <ProjectReference Include="$(ProjectDir)..\..\..\..\..\node_modules\react-native-webview\windows\ReactNativeWebView\ReactNativeWebView.vcxproj">
-      <Project>{00AA3765-C6A0-4713-B3F9-BFE47B9C83F5}</Project>
+      <Project>{30CADFC7-80EF-4296-A405-47E4B97C0C71}</Project>
     </ProjectReference>
   </ItemGroup>
 </Project>

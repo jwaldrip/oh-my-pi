@@ -31,7 +31,7 @@
     "react-native-svg": "15.15.5",
     "react-native-view-shot": "4.0.3",
     "react-native-web": "0.21.2",
-    "react-native-webview": "14.0.1",
+    "react-native-webview": "15.0.0",
     "react-native-windows": "0.81.30"
   },
   "devDependencies": {
