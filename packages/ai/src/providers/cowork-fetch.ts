@@ -107,8 +107,11 @@ function decodedResponseStream(message: IncomingMessage): stream.Readable {
 			return message.pipe(zlib.createInflate());
 		case "br":
 			return message.pipe(zlib.createBrotliDecompress());
-		case "zstd":
-			return message.pipe(zlib.createZstdDecompress());
+		case "zstd": {
+			const z = zlib as typeof zlib & { createZstdDecompress?: () => stream.Transform };
+			if (z.createZstdDecompress) return message.pipe(z.createZstdDecompress());
+			throw new Error("zstd compression is not supported by this Node.js runtime");
+		}
 		default:
 			return message;
 	}
