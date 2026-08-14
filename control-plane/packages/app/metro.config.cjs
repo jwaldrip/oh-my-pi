@@ -25,6 +25,11 @@ const config = {
   resolver: {
     disableHierarchicalLookup: true,
     nodeModulesPaths: [path.join(projectRoot, "node_modules"), path.join(forkRoot, "node_modules")],
+    /**
+     * One tree, several platforms. `web` is served by Vite rather than Metro,
+     * but keeping it in the list means a `.web.tsx` sibling is never picked up
+     * by a native bundle by accident.
+     */
     platforms: ["ios", "android", "macos", "windows", "native"],
   },
 };
