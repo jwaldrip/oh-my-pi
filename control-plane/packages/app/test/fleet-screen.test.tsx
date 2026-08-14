@@ -49,7 +49,29 @@ const NOOP = () => {};
  */
 const rnwStyleSheet = StyleSheet as unknown as { getSheet: () => { textContent: string } };
 
-/** Markup plus the atomic CSS the render registered: the whole rendered page. */
+/**
+ * RNW's sheet is process-global: importing a screen registers its styles even
+ * when that screen is not rendered. Keep only rules whose class selector
+ * appears in this markup. That makes layout assertions about FleetScreen, not
+ * desktop-only declarations from other screens such as Cowork's 300px sidebar.
+ */
+function stylesForMarkup(markup: string): string {
+  const classNames = new Set<string>();
+  for (const match of markup.matchAll(/\bclass="([^"]*)"/g)) {
+    const classAttribute = match[1];
+    if (classAttribute === undefined) continue;
+    for (const className of classAttribute.split(/\s+/)) {
+      if (className) classNames.add(className);
+    }
+  }
+
+  return [...rnwStyleSheet.getSheet().textContent.matchAll(/[^{}]+\{[^{}]*\}/g)]
+    .filter((rule) => [...classNames].some((className) => rule[0].includes(`.${className}`)))
+    .map((rule) => rule[0])
+    .join("\n");
+}
+
+/** Markup plus only the atomic CSS used by that rendered page. */
 function render(browser: BrowserState): string {
   const markup = renderToStaticMarkup(
     <FleetScreen
@@ -64,8 +86,7 @@ function render(browser: BrowserState): string {
       now={NOW}
     />,
   );
-  const sheet = rnwStyleSheet.getSheet();
-  return `${markup}\n<style>${sheet.textContent}</style>`;
+  return `${markup}\n<style>${stylesForMarkup(markup)}</style>`;
 }
 
 describe("the session browser renders a realistic corpus", () => {
