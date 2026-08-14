@@ -301,7 +301,7 @@ export function fleetClearances(state: ConsoleState): number {
  * sessions this device has never attached to.
  */
 export function browserSessionsOf(state: ConsoleState): BrowserSession[] {
-  return state.agents.map((agent) => {
+  return state.agents.filter((agent) => agent.parentAgentId === undefined).map((agent) => {
     const session = state.sessions.get(agent.id) ?? EMPTY_SESSION;
     return {
       id: agent.id,

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, state TEXT NOT NULL,
   acp_session_id TEXT, host TEXT NOT NULL, cwd TEXT NOT NULL,
   created_at TEXT NOT NULL, last_active_at TEXT NOT NULL,
-  routine_id TEXT, labels TEXT NOT NULL DEFAULT '{}'
+  routine_id TEXT, parent_agent_id TEXT, task_title TEXT, model TEXT,
+  metrics TEXT, labels TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS updates (
@@ -125,6 +126,10 @@ interface AgentRow {
   created_at: string;
   last_active_at: string;
   routine_id: string | null;
+  parent_agent_id: string | null;
+  task_title: string | null;
+  model: string | null;
+  metrics: string | null;
   labels: string;
 }
 
@@ -202,6 +207,7 @@ export class Store {
   constructor(path: string) {
     this.#db = new Database(path, { create: true });
     this.#db.run(SCHEMA);
+    this.#migrateAgentHubMetadata();
   }
 
   close(): void {
@@ -210,15 +216,36 @@ export class Store {
 
   // -- agents --------------------------------------------------------------
 
+  /**
+   * SQLite does not extend an existing table when its CREATE statement gains a
+   * column. Keep the migration here, beside the schema it brings forward, so
+   * an existing daemon database carries its live agent tree through upgrade.
+   */
+  #migrateAgentHubMetadata(): void {
+    const columns = new Set(
+      (this.#db.query("PRAGMA table_info(agents)").all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    for (const [name, type] of [
+      ["parent_agent_id", "TEXT"],
+      ["task_title", "TEXT"],
+      ["model", "TEXT"],
+      ["metrics", "TEXT"],
+    ] as const) {
+      if (!columns.has(name)) this.#db.run(`ALTER TABLE agents ADD COLUMN ${name} ${type}`);
+    }
+  }
+
   upsertAgent(a: Agent): void {
     this.#db
       .query(
-        `INSERT INTO agents (id,name,state,acp_session_id,host,cwd,created_at,last_active_at,routine_id,labels)
-         VALUES (?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO agents (id,name,state,acp_session_id,host,cwd,created_at,last_active_at,routine_id,parent_agent_id,task_title,model,metrics,labels)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
            name=excluded.name, state=excluded.state, acp_session_id=excluded.acp_session_id,
            host=excluded.host, cwd=excluded.cwd, last_active_at=excluded.last_active_at,
-           routine_id=excluded.routine_id, labels=excluded.labels`,
+           routine_id=excluded.routine_id, parent_agent_id=excluded.parent_agent_id,
+           task_title=excluded.task_title, model=excluded.model, metrics=excluded.metrics,
+           labels=excluded.labels`,
       )
       .run(
         a.id,
@@ -230,6 +257,10 @@ export class Store {
         a.createdAt,
         a.lastActiveAt,
         a.routineId ?? null,
+        a.parentAgentId ?? null,
+        a.taskTitle ?? null,
+        a.model ?? null,
+        a.metrics === undefined ? null : JSON.stringify(a.metrics),
         JSON.stringify(a.labels),
       );
   }
@@ -728,7 +759,7 @@ export class Store {
 }
 
 function rowToAgent(row: AgentRow): Agent {
-  return {
+  const agent: Agent = {
     id: row.id,
     name: row.name,
     state: row.state as AgentState,
@@ -740,6 +771,11 @@ function rowToAgent(row: AgentRow): Agent {
     routineId: row.routine_id ?? undefined,
     labels: JSON.parse(row.labels),
   };
+  if (row.parent_agent_id !== null) agent.parentAgentId = row.parent_agent_id;
+  if (row.task_title !== null) agent.taskTitle = row.task_title;
+  if (row.model !== null) agent.model = row.model;
+  if (row.metrics !== null) agent.metrics = JSON.parse(row.metrics);
+  return agent;
 }
 
 function rowToAuthToken(row: Record<string, string | null>): AuthTokenRecord {

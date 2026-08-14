@@ -1246,6 +1246,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const emitProgressNow = () => {
 		refreshRecentOutput();
 		progress.durationMs = Date.now() - startTime;
+		AgentRegistry.global().setHistory(id, {
+			resolvedModel: progress.resolvedModel,
+			metrics: {
+				tokens: progress.tokens,
+				requests: progress.requests,
+				tools: progress.toolCount,
+				cost: progress.cost,
+				durationMs: progress.durationMs,
+				durationKind: "active",
+				contextTokens: progress.contextTokens,
+				contextWindow: progress.contextWindow,
+			},
+		});
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
@@ -3105,6 +3118,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentAgentId: options.parentAgentId,
 				agentId: id,
 				agentDisplayName: agent.name,
+				taskTitle: assignment ?? task,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,

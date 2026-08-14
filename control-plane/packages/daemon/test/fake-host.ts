@@ -10,7 +10,12 @@
  * agent's behaviour is chosen by the test.
  */
 
-import { AcpClient, type LocalHost, type SpawnLocalHostOptions } from "@ompd/acp";
+import {
+  AcpClient,
+  type AcpAgentRegistrySnapshot,
+  type LocalHost,
+  type SpawnLocalHostOptions,
+} from "@ompd/acp";
 
 export interface ScriptedToolCall {
   toolCallId: string;
@@ -35,6 +40,8 @@ export interface FakeHostController {
   elicit(sessionId: string, message: string, enumValues: string[]): Promise<string>;
   /** Push a `session/update` notification. */
   emitUpdate(sessionId: string, update: unknown): void;
+  /** Push OMP's live AgentRegistry extension notification. */
+  emitAgentRegistry(agents: AcpAgentRegistrySnapshot[]): void;
   /** Session ids handed out by `session/new`, in order. */
   sessions: string[];
   /** Full `session/new` params, used to prove daemon-provided MCP mounts. */
@@ -305,6 +312,13 @@ export function createFakeHost(): FakeHostController {
         jsonrpc: "2.0",
         method: "session/update",
         params: { sessionId, update },
+      });
+    },
+    emitAgentRegistry: (agents) => {
+      toClient(latest, {
+        jsonrpc: "2.0",
+        method: "notifications/agent_registry",
+        params: { agents },
       });
     },
     requestPermission: (sessionId, call) =>
