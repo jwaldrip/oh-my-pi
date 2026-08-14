@@ -7,8 +7,8 @@
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="ompd"
-    Publisher="CN=jwaldrip"
+    Name="sh.ompd.app"
+    Publisher="CN=ompd"
     Version="1.0.0.0" />
 
   <Properties>

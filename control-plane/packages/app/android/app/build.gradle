@@ -87,13 +87,14 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace "com.ompd"
+    namespace "sh.ompd.app"
     defaultConfig {
-        applicationId "com.ompd"
+        applicationId "sh.ompd.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode Integer.parseInt(project.findProperty("OMPD_VERSION_CODE") ?: "1")
+        versionName project.findProperty("OMPD_VERSION_NAME") ?: "0.1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
         debug {
@@ -102,17 +103,50 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            // Upload-key signing for Play Internal Testing. Values come from
+            // CI secrets / gradle.properties — never commit the keystore.
+            // Configuration is optional so debug/unit/instrumentation tasks
+            // still configure without credentials; release tasks validate below.
+            def storePath = System.getenv("OMPD_ANDROID_KEYSTORE_PATH") ?: project.findProperty("OMPD_ANDROID_KEYSTORE_PATH")
+            if (storePath) {
+                storeFile file(storePath)
+                storePassword System.getenv("OMPD_ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("OMPD_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("OMPD_ANDROID_KEY_ALIAS") ?: project.findProperty("OMPD_ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("OMPD_ANDROID_KEY_PASSWORD") ?: project.findProperty("OMPD_ANDROID_KEY_PASSWORD")
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // Prefer upload key when present. Never fall back to debug.keystore.
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+// Fail closed only when a release package is actually requested.
+tasks.configureEach { task ->
+    if (task.name in ["assembleRelease", "bundleRelease", "packageReleaseBundle"]) {
+        task.doFirst {
+            def storeFile = android.signingConfigs.release.storeFile
+            if (storeFile == null || !storeFile.exists()) {
+                throw new GradleException(
+                    "Release signing is not configured. Set OMPD_ANDROID_KEYSTORE_PATH " +
+                    "(and password/alias env vars) before assembling a release AAB/APK. " +
+                    "debug.keystore is never used for release.")
+            }
+            def alias = android.signingConfigs.release.keyAlias
+            if (alias == null || alias.toString().trim().isEmpty()) {
+                throw new GradleException("OMPD_ANDROID_KEY_ALIAS is required for release signing.")
+            }
         }
     }
 }
@@ -126,4 +160,15 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+}
+
+dependencies {
+    // test deps appended below existing block — merged carefully
 }

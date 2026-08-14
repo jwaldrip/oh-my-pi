@@ -13,7 +13,16 @@
     "build:web": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "bun test --preload ./test/preload-react.ts test/",
-    "check": "bun ../../scripts/check-types.ts tsconfig.json tsconfig.test.json"
+    "check": "bun ../../scripts/check-types.ts tsconfig.json tsconfig.test.json",
+    "test:ios:sim": "bash ./scripts/ios-sim-test.sh",
+    "test:android:unit": "bash ./scripts/android-unit-test.sh",
+    "build:ios:archive": "bash ./scripts/ios-archive.sh",
+    "build:android:aab": "bash ./scripts/android-aab.sh",
+    "upload:testflight": "bash ./scripts/upload-testflight.sh",
+    "upload:play-internal": "bash ./scripts/upload-play-internal.sh",
+    "test:android:instrumentation": "bash ./scripts/android-instrumentation-test.sh",
+    "build:macos:archive": "bash ./scripts/macos-archive.sh",
+    "build:windows:msix": "bash ./scripts/windows-msix.sh"
   },
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "7.3.1",

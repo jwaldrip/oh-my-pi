@@ -1,4 +1,4 @@
-package com.ompd
+package sh.ompd.app
 
 import android.app.Application
 import com.facebook.react.PackageList

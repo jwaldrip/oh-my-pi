@@ -1,4 +1,16 @@
 {
   "name": "ompd",
-  "displayName": "ompd"
+  "displayName": "ompd",
+  "ios": {
+    "bundleIdentifier": "sh.ompd.app"
+  },
+  "macos": {
+    "bundleIdentifier": "sh.ompd.macos"
+  },
+  "android": {
+    "package": "sh.ompd.app"
+  },
+  "windows": {
+    "packageName": "sh.ompd.app"
+  }
 }

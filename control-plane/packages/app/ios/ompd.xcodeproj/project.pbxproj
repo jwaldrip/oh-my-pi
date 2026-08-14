@@ -12,6 +12,7 @@
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 		87F19ADE3FC4E22E6DD21F41 /* PairingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7447C492347B48399A5C6E9D /* PairingUITests.swift */; };
+		D1E3657E5B7B4AC383CC94F1 /* LaunchSmokeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5DC395512D4408AC076F09 /* LaunchSmokeUITests.swift */; };
 		F5FFF68EB761642F798DA35E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
@@ -34,6 +35,7 @@
 		5709B34CF0A7D63546082F79 /* Pods-ompd.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-ompd.release.xcconfig"; path = "Target Support Files/Pods-ompd/Pods-ompd.release.xcconfig"; sourceTree = "<group>"; };
 		5DCACB8F33CDC322A6C60F78 /* libPods-ompd.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-ompd.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		7447C492347B48399A5C6E9D /* PairingUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PairingUITests.swift; sourceTree = "<group>"; };
+		2D5DC395512D4408AC076F09 /* LaunchSmokeUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LaunchSmokeUITests.swift; sourceTree = "<group>"; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = ompd/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = ompd/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		8EB1714DD9D82BD87C694FE2 /* ompdUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ompdUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -84,6 +86,7 @@
 			isa = PBXGroup;
 			children = (
 				7447C492347B48399A5C6E9D /* PairingUITests.swift */,
+				2D5DC395512D4408AC076F09 /* LaunchSmokeUITests.swift */,
 			);
 			name = ompdUITests;
 			path = ompdUITests;
@@ -316,6 +319,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				87F19ADE3FC4E22E6DD21F41 /* PairingUITests.swift in Sources */,
+				D1E3657E5B7B4AC383CC94F1 /* LaunchSmokeUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -352,7 +356,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "org.reactjs.native.example.$(PRODUCT_NAME:rfc1034identifier)";
+				PRODUCT_BUNDLE_IDENTIFIER = sh.ompd.app;
 				PRODUCT_NAME = ompd;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -380,7 +384,7 @@
 					"-ObjC",
 					"-lc++",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "org.reactjs.native.example.$(PRODUCT_NAME:rfc1034identifier)";
+				PRODUCT_BUNDLE_IDENTIFIER = sh.ompd.app;
 				PRODUCT_NAME = ompd;
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -396,7 +400,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.reactjs.native.example.ompdUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.ompd.app.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -560,7 +564,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.reactjs.native.example.ompdUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.ompd.app.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;

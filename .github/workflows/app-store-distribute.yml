@@ -1,0 +1,263 @@
+name: App store test tracks
+
+# Builds and uploads to TestFlight / Play Internal / Mac TestFlight / Windows package.
+# Upload steps are skipped (not failed) when the required secrets are absent so the
+# workflow can still produce artifacts for manual upload.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Comma list: ios,android,macos,windows,all"
+        required: true
+        default: "ios,android"
+      upload:
+        description: "Upload to stores when secrets exist"
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "ompd-app-v*"
+
+concurrency:
+  group: app-store-distribute-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ios-testflight:
+    name: iOS archive + TestFlight
+    if: >
+      github.event_name == 'push' ||
+      contains(github.event.inputs.platforms, 'ios') ||
+      github.event.inputs.platforms == 'all'
+    runs-on: macos-14
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: control-plane/packages/app
+    env:
+      OMPD_APPLE_TEAM_ID: ${{ secrets.OMPD_APPLE_TEAM_ID }}
+      OMPD_ASC_KEY_ID: ${{ secrets.OMPD_ASC_KEY_ID }}
+      OMPD_ASC_ISSUER_ID: ${{ secrets.OMPD_ASC_ISSUER_ID }}
+      OMPD_ASC_PRIVATE_KEY: ${{ secrets.OMPD_ASC_PRIVATE_KEY }}
+      OMPD_APPLE_CERT_P12_BASE64: ${{ secrets.OMPD_APPLE_CERT_P12_BASE64 }}
+      OMPD_APPLE_CERT_P12_PASSWORD: ${{ secrets.OMPD_APPLE_CERT_P12_PASSWORD }}
+      OMPD_UPLOAD: ${{ github.event_name == 'push' && 'true' || github.event.inputs.upload }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/bun-install
+      - name: Require Apple team id for archive
+        if: env.OMPD_APPLE_TEAM_ID == ''
+        run: |
+          echo "::error::OMPD_APPLE_TEAM_ID secret is required to archive for TestFlight"
+          exit 1
+      - name: Require distribution certificate
+        if: env.OMPD_APPLE_CERT_P12_BASE64 == '' || env.OMPD_APPLE_CERT_P12_PASSWORD == ''
+        run: |
+          echo "::error::OMPD_APPLE_CERT_P12_BASE64 and OMPD_APPLE_CERT_P12_PASSWORD are required for signed archives on GitHub runners"
+          exit 1
+      - name: Import Apple signing certificate
+        run: bash ./scripts/import-apple-signing.sh
+      - name: Install pods
+        run: |
+          cd ios
+          pod install
+      - name: Import ASC API key
+        if: env.OMPD_ASC_KEY_ID != '' && env.OMPD_ASC_ISSUER_ID != '' && env.OMPD_ASC_PRIVATE_KEY != ''
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          key_id = os.environ["OMPD_ASC_KEY_ID"]
+          material = os.environ["OMPD_ASC_PRIVATE_KEY"]
+          if "\\n" in material and "\n" not in material:
+              material = material.replace("\\n", "\n")
+          p = Path.home() / ".appstoreconnect/private_keys" / f"AuthKey_{key_id}.p8"
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(material)
+          p.chmod(0o600)
+          print(f"asc_key_bytes {p.stat().st_size}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"OMPD_ASC_KEY_PATH={p}\n")
+          PY
+      - name: Archive IPA
+        run: bun run build:ios:archive
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ompd-ios-ipa
+          path: control-plane/packages/app/build/ios/ipa/*.ipa
+          if-no-files-found: error
+      - name: Upload to TestFlight
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_ASC_KEY_PATH != ''
+        run: bun run upload:testflight
+      - name: Skip upload notice
+        if: env.OMPD_ASC_KEY_PATH == ''
+        run: echo "ASC API key secrets missing; IPA artifact retained for manual TestFlight upload"
+
+  android-play-internal:
+    name: Android AAB + Play Internal
+    if: >
+      github.event_name == 'push' ||
+      contains(github.event.inputs.platforms, 'android') ||
+      github.event.inputs.platforms == 'all'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: control-plane/packages/app
+    env:
+      OMPD_ANDROID_KEYSTORE_BASE64: ${{ secrets.OMPD_ANDROID_KEYSTORE_BASE64 }}
+      OMPD_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.OMPD_ANDROID_KEYSTORE_PASSWORD }}
+      OMPD_ANDROID_KEY_ALIAS: ${{ secrets.OMPD_ANDROID_KEY_ALIAS }}
+      OMPD_ANDROID_KEY_PASSWORD: ${{ secrets.OMPD_ANDROID_KEY_PASSWORD }}
+      OMPD_PLAY_SERVICE_ACCOUNT_JSON_VALUE: ${{ secrets.OMPD_PLAY_SERVICE_ACCOUNT_JSON }}
+      OMPD_UPLOAD: ${{ github.event_name == 'push' && 'true' || github.event.inputs.upload }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: ./.github/actions/bun-install
+      - name: Decode upload keystore
+        run: |
+          if [[ -z "${OMPD_ANDROID_KEYSTORE_BASE64}" ]]; then
+            echo "::error::OMPD_ANDROID_KEYSTORE_BASE64 secret is required for release AAB"
+            exit 1
+          fi
+          KS="$RUNNER_TEMP/ompd-upload.jks"
+          printf '%s' "$OMPD_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KS"
+          chmod 600 "$KS"
+          echo "OMPD_ANDROID_KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+          wc -c "$KS" | awk '{print "keystore_bytes",$1}'
+      - name: Build release AAB
+        run: bun run build:android:aab
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ompd-android-aab
+          path: control-plane/packages/app/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+      - name: Write Play service account
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_PLAY_SERVICE_ACCOUNT_JSON_VALUE != ''
+        run: |
+          SA="$RUNNER_TEMP/play-sa.json"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          sa = Path(os.environ["RUNNER_TEMP"]) / "play-sa.json"
+          sa.write_text(os.environ["OMPD_PLAY_SERVICE_ACCOUNT_JSON_VALUE"])
+          sa.chmod(0o600)
+          import json
+          d = json.loads(sa.read_text())
+          print("play_sa_client_email_set", bool(d.get("client_email")))
+          print("play_sa_project_id_set", bool(d.get("project_id")))
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write(f"OMPD_PLAY_SERVICE_ACCOUNT_JSON={sa}\n")
+          PY
+      - name: Install Play upload deps
+        if: env.OMPD_PLAY_SERVICE_ACCOUNT_JSON != ''
+        run: pip install 'google-api-python-client>=2.100' 'google-auth>=2.23'
+      - name: Upload to Play Internal testing
+        if: env.OMPD_UPLOAD == 'true' && env.OMPD_PLAY_SERVICE_ACCOUNT_JSON != ''
+        run: bun run upload:play-internal
+      - name: Skip upload notice
+        if: env.OMPD_PLAY_SERVICE_ACCOUNT_JSON == ''
+        run: echo "Play service account secret missing; AAB artifact retained for manual Internal testing upload"
+
+  macos-testflight:
+    name: macOS archive
+    if: >
+      github.event_name == 'workflow_dispatch' && (
+        contains(github.event.inputs.platforms, 'macos') ||
+        github.event.inputs.platforms == 'all'
+      )
+    runs-on: macos-14
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: control-plane/packages/app
+    env:
+      OMPD_APPLE_TEAM_ID: ${{ secrets.OMPD_APPLE_TEAM_ID }}
+      OMPD_ASC_KEY_ID: ${{ secrets.OMPD_ASC_KEY_ID }}
+      OMPD_ASC_ISSUER_ID: ${{ secrets.OMPD_ASC_ISSUER_ID }}
+      OMPD_ASC_PRIVATE_KEY: ${{ secrets.OMPD_ASC_PRIVATE_KEY }}
+      OMPD_APPLE_CERT_P12_BASE64: ${{ secrets.OMPD_APPLE_CERT_P12_BASE64 }}
+      OMPD_APPLE_CERT_P12_PASSWORD: ${{ secrets.OMPD_APPLE_CERT_P12_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/bun-install
+      - name: Require Apple team id
+        if: env.OMPD_APPLE_TEAM_ID == ''
+        run: |
+          echo "::error::OMPD_APPLE_TEAM_ID secret is required"
+          exit 1
+      - name: Require distribution certificate
+        if: env.OMPD_APPLE_CERT_P12_BASE64 == '' || env.OMPD_APPLE_CERT_P12_PASSWORD == ''
+        run: |
+          echo "::error::OMPD_APPLE_CERT_P12_BASE64 and OMPD_APPLE_CERT_P12_PASSWORD are required"
+          exit 1
+      - name: Import ASC API key
+        if: env.OMPD_ASC_KEY_ID != '' && env.OMPD_ASC_ISSUER_ID != '' && env.OMPD_ASC_PRIVATE_KEY != ''
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          key_id = os.environ["OMPD_ASC_KEY_ID"]
+          material = os.environ["OMPD_ASC_PRIVATE_KEY"]
+          p = Path.home() / ".appstoreconnect/private_keys" / f"AuthKey_{key_id}.p8"
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(material)
+          p.chmod(0o600)
+          print(f"asc_key_bytes {p.stat().st_size}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"OMPD_ASC_KEY_PATH={p}\n")
+          PY
+      - name: Import Apple signing certificate
+        run: bash ./scripts/import-apple-signing.sh
+      - name: Archive macOS
+        run: bun run build:macos:archive
+      - name: Upload macOS export
+        uses: actions/upload-artifact@v4
+        with:
+          name: ompd-macos-export
+          path: control-plane/packages/app/build/macos/export/**
+          if-no-files-found: error
+
+  windows-msix:
+    name: Windows MSIX package
+    if: >
+      github.event_name == 'workflow_dispatch' && (
+        contains(github.event.inputs.platforms, 'windows') ||
+        github.event.inputs.platforms == 'all'
+      )
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: control-plane/packages/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/bun-install
+      - name: Locate MSBuild
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) { throw "MSBuild not found" }
+          "MSBUILD_PATH=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "msbuild=$msbuild"
+      - name: Build MSIX
+        shell: bash
+        run: bun run build:windows:msix
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ompd-windows-msix
+          path: |
+            control-plane/packages/app/windows/**/AppPackages/**/*.msix
+            control-plane/packages/app/windows/**/AppPackages/**/*.msixbundle
+            control-plane/packages/app/windows/**/AppPackages/**/*.appx
+          if-no-files-found: warn
