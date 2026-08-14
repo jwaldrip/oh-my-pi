@@ -41,6 +41,11 @@ jobs:
         run: |
           npx --yes @react-native-community/cli autolink-windows --sln windows/ompd.sln --proj windows/ompd/ompd.vcxproj
           git diff --exit-code -- windows/ompd/AutolinkedNativeModules.g.cpp windows/ompd/AutolinkedNativeModules.g.h windows/ompd/AutolinkedNativeModules.g.props windows/ompd/AutolinkedNativeModules.g.targets
+      - name: Generate Windows native spec code
+        shell: pwsh
+        working-directory: control-plane/packages/app
+        run: |
+          npx --yes @react-native-community/cli codegen-windows
       - name: Build generated Windows solution
         shell: pwsh
         working-directory: control-plane/packages/app/windows
@@ -58,7 +63,7 @@ jobs:
           if (-not $sdkVersion) {
             throw "No Windows SDK with Windows.h is installed on this runner."
           }
-          & $msbuild ompd.sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145 /p:WindowsAppSDKVerifyTransitiveDependencies=false
+          & $msbuild ompd.sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145 /p:WindowsAppSDKVerifyTransitiveDependencies=false /p:RunCodegenWindows=false
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
