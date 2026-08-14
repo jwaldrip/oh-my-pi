@@ -142,7 +142,14 @@ for pkg in utils wire omptype hashline catalog ai mnemopi snapcompact agent tui 
    )
 done
 
-# 4. Pack the coding agent with its *published* manifest: release swaps
+# 4. Pack @ompd/core before its coding-agent consumer. `bun pm pack` resolves
+#    coding-agent's workspace dependency to this package's release version.
+(
+   cd "$ROOT_DIR/control-plane/packages/core"
+   bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
+)
+
+# 5. Pack the coding agent with its *published* manifest: release swaps
 #    `bin.omp` from `src/cli.ts` to the prepack bundle `dist/cli.js`. The repo
 #    manifest keeps pointing at source so `bun link`/`install.sh --source`
 #    work without a build, so the swap must be reproduced here for the smoke
@@ -171,8 +178,16 @@ snapcompact_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-snapcompact-*.tgz)"
 agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-agent-core-*.tgz)"
 tui_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-tui-*.tgz)"
 stats_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omp-stats-*.tgz)"
+core_tgz="$(find_tarball "$TARBALL_DIR"/ompd-core-*.tgz)"
 coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-coding-agent-*.tgz)"
 collab_web_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-collab-web-*.tgz)"
+
+core_version="$(jq -er '.version' "$ROOT_DIR/control-plane/packages/core/package.json")"
+coding_agent_core_dependency="$(tar -xOf "$coding_agent_tgz" package/package.json | jq -er '.dependencies["@ompd/core"]')"
+if [ "$coding_agent_core_dependency" != "^$core_version" ]; then
+   echo "Packed coding-agent must depend on @ompd/core as ^$core_version, got: $coding_agent_core_dependency" >&2
+   exit 1
+fi
 
 TARBALL_APP_DIR="$WORK_DIR/tarball-install"
 mkdir -p "$TARBALL_APP_DIR"
@@ -185,6 +200,7 @@ mkdir -p "$TARBALL_APP_DIR"
    node -e "
 		const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
 		pkg.overrides = {
+			'@ompd/core': '$core_tgz',
 			'@oh-my-pi/pi-utils': '$utils_tgz',
 			'@oh-my-pi/pi-wire': '$wire_tgz',
 			'@oh-my-pi/omptype': '$omptype_tgz',
@@ -204,7 +220,16 @@ mkdir -p "$TARBALL_APP_DIR"
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-   bun add "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
+   bun add \
+      "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" \
+      "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" \
+      "$core_tgz" "$coding_agent_tgz" "$collab_web_tgz"
+   core_dir="node_modules/@ompd/core"
+   [ -d "$core_dir" ] || {
+      echo "@ompd/core tarball not installed: $core_dir"
+      exit 1
+   }
+
    # The platform leaf must arrive through the core's optionalDependencies +
    # override, not as a direct dependency — assert it landed before smoking so a
    # resolution regression is distinguishable from a runtime loader bug.
