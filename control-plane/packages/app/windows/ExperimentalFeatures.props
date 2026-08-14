@@ -3,24 +3,17 @@
 
   <PropertyGroup Label="Microsoft.ReactNative Experimental Features">
     <!--
-      Required for building a New Architecture project.
-
-      App projects should not change this value.
-
-      See https://microsoft.github.io/react-native-windows/docs/new-architecture
+      Required for building a Paper / UWP Architecture project.
     -->
-    <RnwNewArch>true</RnwNewArch>
+    <RnwNewArch>false</RnwNewArch>
 
     <!--
       Changes compilation to assume use of Microsoft.ReactNative NuGet packages
       instead of building the framework from source. Defaults to true.
-
-      This is set during app project creation and should not be changed.
-
-      See https://microsoft.github.io/react-native-windows/docs/nuget
     -->
     <UseExperimentalNuget>true</UseExperimentalNuget>
 
+    <!-- Suppress WinAppSDK transitive checks for legacy UWP projects -->
     <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
     <RunCodegenWindows>false</RunCodegenWindows>
     <ReactExperimentalFeaturesSet>true</ReactExperimentalFeaturesSet>
