@@ -29,7 +29,7 @@ import {
 } from "@ompd/core";
 import { AcpClient, type LocalHost, type SpawnLocalHostOptions } from "@ompd/acp";
 import { Supervisor } from "../src/supervisor.ts";
-import { CronError, Scheduler, nextFireTime } from "../src/routines/index.ts";
+import { CronError, Scheduler, hashWebhookSecret, nextFireTime } from "../src/routines/index.ts";
 import { createFakeHost, type FakeHostController } from "./fake-host.ts";
 
 const DENVER = "America/Denver";
@@ -380,6 +380,75 @@ describe("Scheduler execution", () => {
     const agent = h.store.getAgent(run.agentId ?? "");
     expect(agent?.routineId).toBe(routine.id);
     expect(agent?.state).toBe("stopped");
+  });
+
+  test("a valid webhook secret runs through the same lifecycle as a cron fire", async () => {
+    const h = harness();
+    h.fake.onPrompt(() => ({ stopReason: "end_turn" }));
+    const cron = defineRoutine(h.store, { trigger: { kind: "cron", expression: "* * * * *", timezone: "UTC" } });
+    const webhook = defineRoutine(h.store, {
+      trigger: { kind: "webhook", secretRef: "whsec_nightly" },
+      singleton: false,
+    });
+    h.store.upsertWebhookSecret("whsec_nightly", hashWebhookSecret("correct-secret"));
+
+    await h.scheduler.tick();
+    h.advance(60_000);
+    await h.scheduler.tick();
+    const cronRun = h.store.listRuns(cron.id)[0];
+
+    const result = await h.scheduler.fireWebhook(webhook.id, "correct-secret");
+
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) throw new Error("correct secret was refused");
+    expect(result.run.state).toBe("succeeded");
+    expect(result.run.finishedAt).toBeDefined();
+    for (const field of ["id", "routineId", "agentId", "state", "startedAt", "finishedAt"]) {
+      expect(field in result.run).toBe(field in (cronRun ?? {}));
+    }
+    expect(h.store.getAgent(result.run.agentId ?? "")?.state).toBe("stopped");
+  });
+
+  test("a wrong webhook secret produces no run", async () => {
+    const h = harness();
+    const routine = defineRoutine(h.store, { trigger: { kind: "webhook", secretRef: "whsec_wrong" } });
+    h.store.upsertWebhookSecret("whsec_wrong", hashWebhookSecret("correct-secret"));
+
+    expect(await h.scheduler.fireWebhook(routine.id, "wrong-secret")).toEqual({
+      accepted: false,
+      reason: "forbidden",
+    });
+    expect(h.store.listRuns(routine.id)).toHaveLength(0);
+  });
+
+  test("two valid webhook deliveries create independent runs", async () => {
+    const h = harness();
+    h.fake.onPrompt(() => ({ stopReason: "end_turn" }));
+    const routine = defineRoutine(h.store, {
+      trigger: { kind: "webhook", secretRef: "whsec_repeat" },
+      singleton: false,
+    });
+    h.store.upsertWebhookSecret("whsec_repeat", hashWebhookSecret("repeat-secret"));
+
+    const first = await h.scheduler.fireWebhook(routine.id, "repeat-secret");
+    const second = await h.scheduler.fireWebhook(routine.id, "repeat-secret");
+
+    expect(first.accepted).toBe(true);
+    expect(second.accepted).toBe(true);
+    if (!first.accepted || !second.accepted) throw new Error("valid secret was refused");
+    expect(first.run.id).not.toBe(second.run.id);
+    expect(h.store.listRuns(routine.id)).toHaveLength(2);
+  });
+
+  test("a non-webhook routine refuses webhook delivery without a run", async () => {
+    const h = harness();
+    const routine = defineRoutine(h.store, { trigger: { kind: "cron", expression: "* * * * *", timezone: "UTC" } });
+
+    expect(await h.scheduler.fireWebhook(routine.id, "any-secret")).toEqual({
+      accepted: false,
+      reason: "not_found",
+    });
+    expect(h.store.listRuns(routine.id)).toHaveLength(0);
   });
 
   test("singleton skips while a run is still active and records the skip", async () => {

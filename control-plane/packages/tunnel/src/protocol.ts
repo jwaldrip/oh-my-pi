@@ -59,7 +59,18 @@ export type DaemonToHub =
   | { t: "close"; sessionId: SessionId; code: RefusalCode | "done"; message?: string }
   /** Cumulative acknowledgement: how many frames this leg has actually taken in. */
   | { t: "ack"; sessionId: SessionId; received: number }
-  | { t: "pong" };
+  | { t: "pong" }
+  /**
+   * The public relay forwards a webhook request to the pinned daemon. The body
+   * stays opaque base64url data; only the local daemon decides what it means.
+   */
+  | {
+      t: "webhook_response";
+      requestId: string;
+      status: number;
+      body: SealedPayload;
+      contentType?: string;
+    };
 
 export type HubToDaemon =
   /** Sent on connect. The daemon signs `nonce` to prove which daemon it is. */
@@ -71,7 +82,19 @@ export type HubToDaemon =
   | { t: "close"; sessionId: SessionId; code: RefusalCode | "done"; message?: string }
   | { t: "ack"; sessionId: SessionId; received: number }
   | { t: "refused"; code: RefusalCode; message: string }
-  | { t: "ping" };
+  | { t: "ping" }
+  /**
+   * An unauthenticated-by-device webhook, scoped by its own routine secret.
+   * The hub forwards it over the already-open daemon leg and never executes it.
+   */
+  | {
+      t: "webhook_request";
+      requestId: string;
+      routineId: string;
+      secret: string;
+      body: SealedPayload;
+      contentType?: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Client leg

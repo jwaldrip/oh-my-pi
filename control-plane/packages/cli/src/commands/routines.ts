@@ -19,6 +19,10 @@ interface RunResponse {
   run?: Run;
 }
 
+interface WebhookSecretResponse {
+  secret?: unknown;
+}
+
 function describeTrigger(trigger: TriggerSpec): string {
   switch (trigger.kind) {
     case "cron":
@@ -72,4 +76,31 @@ export async function runCommand(
   // A failed run is a failed command. Exiting 0 here would make this useless
   // in anything that checks a status code.
   return run.state === "failed" || run.state === "timed_out" ? 1 : 0;
+}
+
+/**
+ * Rotate the per-routine credential and print the replacement exactly once.
+ * The daemon retains only a hash, so this is the sole chance to copy it.
+ */
+export async function webhookSecretCommand(
+  ctx: CliContext,
+  cmd: Extract<Command, { kind: "webhook-secret" }>,
+): Promise<number> {
+  const response = await api<WebhookSecretResponse>(
+    ctx,
+    `/v1/routines/${encodeURIComponent(cmd.routineId)}/webhook-secret`,
+    { method: "POST" },
+  );
+  if (typeof response.secret !== "string") {
+    ctx.err("the daemon minted no webhook secret");
+    return 1;
+  }
+
+  ctx.out(`webhook secret for ${cmd.routineId}`);
+  ctx.out("");
+  ctx.out(`  ${response.secret}`);
+  ctx.out("");
+  ctx.out("  This secret is shown once and is not recoverable. The daemon keeps only its");
+  ctx.out("  hash. Copy it now; mint another one if you lose it.");
+  return 0;
 }

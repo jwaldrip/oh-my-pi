@@ -129,6 +129,50 @@ describe("through the hub", () => {
     expect(JSON.parse(toBeta.received[0] ?? "{}").from).toBe("beta");
   });
 
+  test("a public webhook reaches only the pinned daemon and preserves its body", async () => {
+    fleet = await startHubs(2);
+    const daemonUrl = fleet.hubs[0]?.url ?? "";
+    const publicUrl = fleet.hubs[1]?.url ?? "";
+    const identity = await enroll(fleet, "webhook-daemon");
+    const received: Array<{ routineId: string; secret: string; body: string; contentType?: string }> = [];
+    const daemon = new TunnelDaemon({
+      hubUrl: daemonUrl,
+      identity,
+      acceptor: echoAcceptor("webhook-daemon", {}),
+      transport: browserTransport,
+      onWebhook: async (request) => {
+        received.push(request);
+        return {
+          status: 202,
+          body: Buffer.from(JSON.stringify({ run: { id: "run_webhook" } })).toString("base64url"),
+          contentType: "application/json",
+        };
+      },
+    });
+    running.push(daemon);
+    daemon.start();
+    await until(() => daemon.registered, "webhook daemon to register");
+
+    const response = await fetch(
+      `${httpUrl(publicUrl)}/v1/webhooks/${identity.daemonId}/rtn_webhook`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-webhook-secret": "per-routine-secret" },
+        body: JSON.stringify({ event: "pushed" }),
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ run: { id: "run_webhook" } });
+    expect(received).toHaveLength(1);
+    const delivery = received[0];
+    if (delivery === undefined) throw new Error("webhook request was not delivered");
+    expect(delivery.routineId).toBe("rtn_webhook");
+    expect(delivery.secret).toBe("per-routine-secret");
+    expect(delivery.body).toBe(Buffer.from(JSON.stringify({ event: "pushed" })).toString("base64url"));
+    expect(delivery.contentType).toBe("application/json");
+  });
+
   test("a client paired to daemon A cannot reach daemon B", async () => {
     fleet = await startHubs(1);
     const url = fleet.hubs[0]?.url ?? "";

@@ -17,6 +17,7 @@
  * single client can monopolise the daemon.
  */
 
+import { createHash, randomBytes } from "node:crypto";
 import { extname, join, resolve, sep } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import {
@@ -214,8 +215,15 @@ export type VoiceHandlerFactory = (
  * same reason `VoiceHandler` is: the two are wired together by whoever builds
  * the daemon, and neither has to import the other.
  */
+export interface WebhookFireAttempt {
+  accepted: boolean;
+  reason?: "not_found" | "forbidden";
+  run?: Run;
+}
+
 export interface RoutineRunner {
   runNow(routineId: string, actor: Actor): Promise<Run>;
+  fireWebhook(routineId: string, presentedSecret: string): Promise<WebhookFireAttempt>;
 }
 
 /**
@@ -726,9 +734,33 @@ export class Gateway {
       ws.send(JSON.stringify({ t: "webview_action", agentId, requestId, action } satisfies ServerFrame));
       return true;
     } catch {
+
       this.#webviews.delete(agentId);
       return false;
     }
+  }
+
+  /**
+   * The webhook's secret is the only credential this path accepts. It is used
+   * by both the loopback HTTP route and the outbound tunnel's local endpoint.
+   */
+  async fireWebhook(
+    routineId: string,
+    secret: string,
+    _body?: Uint8Array,
+    _contentType?: string,
+  ): Promise<Response> {
+    const runner = this.#routines;
+    if (!runner) return Response.json({ error: "routines_unavailable" }, { status: 503 });
+
+    const result = await runner.fireWebhook(routineId, secret);
+    if (!result.accepted) {
+      return Response.json(
+        { error: "webhook_refused" },
+        { status: result.reason === "forbidden" ? 403 : 404 },
+      );
+    }
+    return Response.json({ run: result.run }, { status: 202 });
   }
   /** Revoke a paired device. Takes effect on its next request or frame. */
   revokeDevice(deviceId: string): void {
@@ -784,6 +816,15 @@ export class Gateway {
         }
         throw err;
       }
+    }
+
+    const webhook = /^\/v1\/webhooks\/([^/]+)$/.exec(path);
+    if (webhook && req.method === "POST") {
+      // This is deliberately not a device bearer token. It is a narrow,
+      // per-routine capability and the scheduler verifies its stored hash.
+      const secret = req.headers.get("x-webhook-secret") ?? url.searchParams.get("token") ?? "";
+      const body = new Uint8Array(await req.arrayBuffer());
+      return await this.fireWebhook(webhook[1] ?? "", secret, body, req.headers.get("content-type") ?? undefined);
     }
 
     // Everything outside `/v1` is the web client, and it is terminal: a path
@@ -1127,10 +1168,30 @@ export class Gateway {
         });
       } catch (err) {
         if (err instanceof PairingError) {
+
           return Response.json({ error: err.message }, { status: 404 });
         }
         throw err;
       }
+    }
+
+    const webhookSecret = /^\/v1\/routines\/([^/]+)\/webhook-secret$/.exec(path);
+    if (webhookSecret && req.method === "POST") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const routine = this.#store.listRoutines().find((candidate) => candidate.id === webhookSecret[1]);
+      if (!routine) return Response.json({ error: "not_found" }, { status: 404 });
+      if (routine.trigger.kind !== "webhook") {
+        return Response.json({ error: "not_a_webhook_routine" }, { status: 400 });
+      }
+
+      // Returned exactly once. The store receives only the digest, so neither
+      // a restart nor another route can reveal this credential later.
+      const secret = randomBytes(32).toString("base64url");
+      this.#store.upsertWebhookSecret(
+        routine.trigger.secretRef,
+        createHash("sha256").update(secret).digest("hex"),
+      );
+      return Response.json({ secret }, { status: 201 });
     }
 
     if (path === "/v1/routines" && req.method === "GET") {
