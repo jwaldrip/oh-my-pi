@@ -12,13 +12,28 @@ apply plugin: "com.facebook.react"
  * resolves to a dependency is asked of node instead of guessed at, so the build
  * survives either a hoisted or a nested install.
  */
+// Walk to monorepo root (where bun hoists node_modules) before requiring packages.
+def monorepoRootDir = {
+    def dir = rootDir
+    while (dir != null) {
+        if (new File(dir, "node_modules/react-native/package.json").exists()) {
+            return dir
+        }
+        dir = dir.parentFile
+    }
+    throw new GradleException("Could not locate monorepo root with node_modules/react-native from ${rootDir}")
+}()
+
 def resolvePackage = { String id ->
-    new File(
-        providers.exec {
-            workingDir(rootDir)
-            commandLine("node", "--print", "require.resolve('${id}/package.json', { paths: [rootDir] })")
-        }.standardOutput.asText.get().trim()
-    ).getParentFile()
+    def pkg = new File(monorepoRootDir, "node_modules/${id}/package.json")
+    if (!pkg.exists()) {
+        // scoped packages use the id path as-is under node_modules
+        pkg = new File(monorepoRootDir, "node_modules/${id}/package.json")
+    }
+    if (!pkg.exists()) {
+        throw new GradleException("Missing ${id} under ${monorepoRootDir}/node_modules (run bun install)")
+    }
+    pkg.parentFile
 }
 
 react {

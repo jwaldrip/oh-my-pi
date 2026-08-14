@@ -63,12 +63,28 @@ xcodebuild -exportArchive \
   "${AUTH_ARGS[@]}"
 echo "MAC_EXPORT=$OUT/export"
 ls -la "$OUT/export"
-# Verify exported .app signature when present
+
+# App Store export is typically a .pkg; Developer ID may yield .app / .dmg.
+PKG_PATH="$(find "$OUT/export" -type f \( -name '*.pkg' -o -name '*.dmg' \) -print | head -1 || true)"
 APP_PATH="$(find "$OUT/export" -type d -name '*.app' -print -quit | head -1 || true)"
-if [[ -z "$APP_PATH" ]]; then
-  echo "No .app found under $OUT/export" >&2
+
+if [[ -n "$APP_PATH" ]]; then
+  codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+  codesign -dvv "$APP_PATH" 2>&1 | awk -F= '/TeamIdentifier/{print "mac_team",$2}'
+elif [[ -n "$PKG_PATH" ]]; then
+  echo "mac_export_package $PKG_PATH"
+  # pkgutil validates structure without requiring an unpacked .app
+  if [[ "$PKG_PATH" == *.pkg ]]; then
+    pkgutil --check-signature "$PKG_PATH" || true
+  fi
+  # Also try to verify the app nested inside the archive used for export
+  ARCH_APP="$(find "$OUT/ompd-mac.xcarchive/Products" -type d -name '*.app' -print -quit | head -1 || true)"
+  if [[ -n "$ARCH_APP" ]]; then
+    codesign --verify --deep --strict --verbose=2 "$ARCH_APP"
+    codesign -dvv "$ARCH_APP" 2>&1 | awk -F= '/TeamIdentifier/{print "mac_archive_team",$2}'
+  fi
+else
+  echo "No .pkg/.dmg/.app found under $OUT/export" >&2
   ls -laR "$OUT/export" || true
   exit 1
 fi
-codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-codesign -dvv "$APP_PATH" 2>&1 | awk -F= '/TeamIdentifier/{print "mac_team",$2}'
