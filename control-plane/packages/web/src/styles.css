@@ -1235,14 +1235,12 @@ ul {
   color: var(--ink-strong);
 }
 
-.plan-review-actions,
-.plan-review-form {
+.plan-review-actions {
   display: flex;
   gap: 8px;
 }
 
-.plan-review-actions button,
-.plan-review-send {
+.plan-review-actions button {
   min-block-size: var(--tap);
   padding: 0 10px;
   border: 1px solid var(--sig-hold);
@@ -1256,19 +1254,7 @@ ul {
   border-color: var(--sig-clear) !important;
 }
 
-.plan-review-feedback {
-  flex: 1;
-  min-block-size: 72px;
-  padding: 8px;
-  border: var(--edge-line);
-  background: var(--room-base);
-  color: var(--ink-strong);
-  font: var(--t-xs) var(--sans);
-  resize: vertical;
-}
-
-.plan-review-actions button:disabled,
-.plan-review-send:disabled {
+.plan-review-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }

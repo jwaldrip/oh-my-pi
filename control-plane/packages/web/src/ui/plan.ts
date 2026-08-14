@@ -60,19 +60,8 @@ export function createPlan(options: PlanOptions): PlanView {
     text: "Refine plan",
     attrs: { type: "button", "data-testid": "plan-refine" },
   });
-  const feedback = el("textarea", {
-    class: "plan-review-feedback",
-    attrs: { "aria-label": "Plan feedback", placeholder: "What should change?", "data-testid": "plan-feedback" },
-  });
-  const sendFeedback = el("button", {
-    class: "plan-review-send",
-    text: "Send feedback",
-    attrs: { type: "button", "data-testid": "plan-send-feedback" },
-  });
   const actions = el("div", { class: "plan-review-actions", children: [approve, refine] });
-  const feedbackForm = el("div", { class: "plan-review-form", children: [feedback, sendFeedback] });
-  feedbackForm.hidden = true;
-  const reviewPanel = el("div", { class: "plan-review", children: [reviewMessage, actions, feedbackForm] });
+  const reviewPanel = el("div", { class: "plan-review", children: [reviewMessage, actions] });
   reviewPanel.hidden = true;
   const element = el("section", { class: "plan", children: [head, body, reviewPanel] });
   element.hidden = true;
@@ -95,12 +84,6 @@ export function createPlan(options: PlanOptions): PlanView {
     respond("Approve and execute");
   });
   refine.addEventListener("click", () => {
-    feedbackForm.hidden = false;
-    feedback.focus();
-  });
-  sendFeedback.addEventListener("click", () => {
-    // ACP accepts the enum value only. The feedback stays visible to the
-    // operator while OMP takes its normal refine-plan path.
     respond("Refine plan");
   });
   toggleClass(element, "is-open", open);
@@ -115,13 +98,8 @@ export function createPlan(options: PlanOptions): PlanView {
       const canRespond = review !== null;
       approve.disabled = !canRespond;
       refine.disabled = !canRespond;
-      sendFeedback.disabled = !canRespond;
       reviewMessage.textContent =
         review?.message ?? (pending ? "Plan is pending review. Waiting for the agent's approval request." : "");
-      if (review === null) {
-        feedbackForm.hidden = true;
-        feedback.value = "";
-      }
       if (plan.length === 0) {
         body.replaceChildren();
         rows.length = 0;

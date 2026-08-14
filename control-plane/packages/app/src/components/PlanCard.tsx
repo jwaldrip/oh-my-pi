@@ -7,8 +7,8 @@
  * ACP would teach an operator that their decision landed when it did not.
  */
 
-import { useState, type JSX } from "react";
-import { Pressable, StyleSheet, TextInput, View } from "react-native";
+import type { JSX } from "react";
+import { Pressable, StyleSheet, View } from "react-native";
 import type { PlanReviewChoice } from "@ompd/core/contracts";
 import { Body, Kicker, Label } from "../design/text.tsx";
 import { ground, ink, signal, space, stroke, TOUCH_TARGET } from "../design/tokens.ts";
@@ -19,19 +19,17 @@ export interface PlanCardProps {
   review: PlanReview | null;
   canApprove: boolean;
   refusal?: string;
-  onRespond: (requestId: string, choice: PlanReviewChoice, feedback?: string) => void;
+  onRespond: (requestId: string, choice: PlanReviewChoice) => void;
 }
 
 export function PlanCard({ plan, review, canApprove, refusal, onRespond }: PlanCardProps): JSX.Element | null {
-  const [refining, setRefining] = useState(false);
-  const [feedback, setFeedback] = useState("");
   const hasPendingPlan = review !== null || plan.some((entry) => entry.status === "pending");
   if (!hasPendingPlan) return null;
 
   const canRespond = review !== null && canApprove;
-  const respond = (choice: PlanReviewChoice, note?: string): void => {
+  const respond = (choice: PlanReviewChoice): void => {
     if (review === null) return;
-    onRespond(review.requestId, choice, note);
+    onRespond(review.requestId, choice);
   };
 
   return (
@@ -50,62 +48,26 @@ export function PlanCard({ plan, review, canApprove, refusal, onRespond }: PlanC
           ))}
         </View>
       )}
-      {refining ? (
-        <View style={styles.feedback}>
-          <TextInput
-            accessibilityLabel="Plan feedback"
-            autoFocus
-            multiline
-            onChangeText={setFeedback}
-            placeholder="What should change?"
-            placeholderTextColor={ink.faint}
-            style={styles.input}
-            testID="plan-feedback"
-            value={feedback}
-          />
-          <View style={styles.actions}>
-            <Decision
-              disabled={!canRespond}
-              label="Send feedback"
-              onPress={() => {
-                respond("Refine plan", feedback.trim() || undefined);
-              }}
-              testID="plan-send-feedback"
-              tone={signal.ochre}
-            />
-            <Decision
-              disabled={false}
-              label="Cancel"
-              onPress={() => {
-                setRefining(false);
-              }}
-              testID="plan-cancel-refine"
-              tone={ink.muted}
-            />
-          </View>
-        </View>
-      ) : (
-        <View style={styles.actions}>
-          <Decision
-            disabled={!canRespond}
-            label="Approve and execute"
-            onPress={() => {
-              respond("Approve and execute");
-            }}
-            testID="plan-approve"
-            tone={signal.sage}
-          />
-          <Decision
-            disabled={!canRespond}
-            label="Refine plan"
-            onPress={() => {
-              setRefining(true);
-            }}
-            testID="plan-refine"
-            tone={signal.ochre}
-          />
-        </View>
-      )}
+      <View style={styles.actions}>
+        <Decision
+          disabled={!canRespond}
+          label="Approve and execute"
+          onPress={() => {
+            respond("Approve and execute");
+          }}
+          testID="plan-approve"
+          tone={signal.sage}
+        />
+        <Decision
+          disabled={!canRespond}
+          label="Refine plan"
+          onPress={() => {
+            respond("Refine plan");
+          }}
+          testID="plan-refine"
+          tone={signal.ochre}
+        />
+      </View>
       {!canApprove ? <Label color={ink.muted}>{refusal ?? "This device does not hold the approve scope."}</Label> : null}
     </View>
   );
@@ -161,16 +123,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     minHeight: TOUCH_TARGET,
     paddingHorizontal: space.snug,
-  },
-  feedback: { gap: space.snug },
-  input: {
-    borderColor: ground.edge,
-    borderRadius: 6,
-    borderWidth: stroke.hair,
-    color: ink.plain,
-    minHeight: 88,
-    padding: space.snug,
-    textAlignVertical: "top",
   },
   disabled: { borderColor: ground.edge, opacity: 0.65 },
   pressed: { backgroundColor: ground.active },
