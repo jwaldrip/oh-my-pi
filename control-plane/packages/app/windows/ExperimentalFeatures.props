@@ -8,22 +8,14 @@
     <RnwNewArch>false</RnwNewArch>
 
     <!--
-      Changes compilation to assume use of Microsoft.ReactNative NuGet packages
-      instead of building the framework from source. Defaults to true.
+      Build framework from source in legacy Paper mode.
     -->
-    <UseExperimentalNuget>true</UseExperimentalNuget>
+    <UseExperimentalNuget>false</UseExperimentalNuget>
 
     <!-- Suppress WinAppSDK transitive checks for legacy UWP projects -->
     <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
     <RunCodegenWindows>false</RunCodegenWindows>
     <ReactExperimentalFeaturesSet>true</ReactExperimentalFeaturesSet>
   </PropertyGroup>
-
-  <!-- When using NuGet packages, prevent legacy community modules from pulling in Microsoft.ReactNative framework source builds. -->
-  <Target Name="RemoveFrameworkProjectReferences" BeforeTargets="ResolveProjectReferences;BeforeResolveReferences;_GetProjectReferenceTargetFrameworkProperties" Condition="'$(UseExperimentalNuget)'=='true'">
-    <ItemGroup>
-      <ProjectReference Remove="@(ProjectReference)" Condition="'%(FileName)' == 'Microsoft.ReactNative'" />
-    </ItemGroup>
-  </Target>
 
 </Project>

@@ -63,7 +63,7 @@ jobs:
           if (-not $sdkVersion) {
             throw "No Windows SDK with Windows.h is installed on this runner."
           }
-          & $msbuild ompd.sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145 /p:UseExperimentalNuget=true /p:WindowsAppSDKVerifyTransitiveDependencies=false /p:RunCodegenWindows=false
+          & $msbuild ompd.sln /m /restore /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145 /p:WindowsAppSDKVerifyTransitiveDependencies=false /p:RunCodegenWindows=false
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
