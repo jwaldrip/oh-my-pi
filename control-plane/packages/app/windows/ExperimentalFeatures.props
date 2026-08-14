@@ -26,4 +26,11 @@
     <ReactExperimentalFeaturesSet>true</ReactExperimentalFeaturesSet>
   </PropertyGroup>
 
+  <!-- When using NuGet packages, prevent legacy community modules from pulling in Microsoft.ReactNative framework source builds. -->
+  <Target Name="RemoveFrameworkProjectReferences" BeforeTargets="ResolveProjectReferences;BeforeResolveReferences;_GetProjectReferenceTargetFrameworkProperties" Condition="'$(UseExperimentalNuget)'=='true'">
+    <ItemGroup>
+      <ProjectReference Remove="@(ProjectReference)" Condition="'%(FileName)' == 'Microsoft.ReactNative'" />
+    </ItemGroup>
+  </Target>
+
 </Project>
