@@ -167,14 +167,22 @@ variable "web_image" {
 
 variable "apple_team_id" {
   type        = string
-  description = "Apple Team ID embedded in apple-app-site-association."
-  default     = ""
+  description = "Apple Team ID embedded in apple-app-site-association (10-char)."
+
+  validation {
+    condition     = can(regex("^[A-Z0-9]{10}$", var.apple_team_id))
+    error_message = "apple_team_id must be a 10-character Apple Team ID; association files cannot ship placeholders."
+  }
 }
 
 variable "play_cert_sha256" {
   type        = string
-  description = "Play upload cert SHA-256 for assetlinks.json."
-  default     = ""
+  description = "Google Play app signing certificate SHA-256 for assetlinks.json (not the upload key)."
+
+  validation {
+    condition = can(regex("^(?i)([0-9A-F]{2}:){31}[0-9A-F]{2}$", var.play_cert_sha256)) || can(regex("^(?i)[0-9A-F]{64}$", var.play_cert_sha256))
+    error_message = "play_cert_sha256 must be the Play app signing cert SHA-256 fingerprint (with or without colons)."
+  }
 }
 
 resource "google_service_account" "web" {

@@ -10,11 +10,32 @@ import { readFileSync, existsSync } from "node:fs";
 
 const root = join(import.meta.dir, "dist");
 const port = Number(process.env.PORT ?? 8080);
-const teamId = process.env.OMPCTL_APPLE_TEAM_ID ?? "TEAMID";
-const playSha = process.env.OMPCTL_PLAY_CERT_SHA256 ?? "REPLACE_WITH_PLAY_UPLOAD_CERT_SHA256";
-const bundleIos = process.env.OMPCTL_IOS_BUNDLE_ID ?? "ai.ompctl.app";
-const bundleMac = process.env.OMPCTL_MACOS_BUNDLE_ID ?? "ai.ompctl.macos";
-const androidPkg = process.env.OMPCTL_ANDROID_PACKAGE ?? "ai.ompctl.app";
+function requireEnv(name: string): string {
+  const v = process.env[name]?.trim() ?? "";
+  if (!v) {
+    console.error(JSON.stringify({ severity: "ERROR", message: `${name} is required` }));
+    process.exit(2);
+  }
+  return v;
+}
+
+// Association files must never ship placeholders. Empty TEAMID / Play SHA would
+// make Universal Links and App Links look configured while failing device checks.
+const teamId = requireEnv("OMPCTL_APPLE_TEAM_ID");
+const playSha = requireEnv("OMPCTL_PLAY_CERT_SHA256");
+const bundleIos = process.env.OMPCTL_IOS_BUNDLE_ID?.trim() || "ai.ompctl.app";
+const bundleMac = process.env.OMPCTL_MACOS_BUNDLE_ID?.trim() || "ai.ompctl.macos";
+const androidPkg = process.env.OMPCTL_ANDROID_PACKAGE?.trim() || "ai.ompctl.app";
+
+if (!/^[A-Z0-9]{10}$/.test(teamId)) {
+  console.error(JSON.stringify({ severity: "ERROR", message: "OMPCTL_APPLE_TEAM_ID must be a 10-char Apple Team ID" }));
+  process.exit(2);
+}
+// Play Console app-signing cert fingerprint: 32 hex bytes with optional colons.
+if (!/^([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}$|^[0-9A-Fa-f]{64}$/.test(playSha)) {
+  console.error(JSON.stringify({ severity: "ERROR", message: "OMPCTL_PLAY_CERT_SHA256 must be a SHA-256 fingerprint (Play app signing cert)" }));
+  process.exit(2);
+}
 
 function aasa(): Response {
   const body = {

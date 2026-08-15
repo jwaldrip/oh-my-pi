@@ -42,7 +42,7 @@ Create the ASC key under App Store Connect → Users and Access → Integrations
 
 | Secret | Purpose |
 |--------|---------|
-| `OMPD_ANDROID_KEYSTORE_BASE64` | Base64 of the upload keystore (`.jks`/`.keystore`) |
+| `OMPD_ANDROID_KEYSTORE_BASE64` | Base64 of the app signing certificate (`.jks`/`.keystore`) |
 | `OMPD_ANDROID_KEYSTORE_PASSWORD` | Keystore password |
 | `OMPD_ANDROID_KEY_ALIAS` | Key alias |
 | `OMPD_ANDROID_KEY_PASSWORD` | Key password |

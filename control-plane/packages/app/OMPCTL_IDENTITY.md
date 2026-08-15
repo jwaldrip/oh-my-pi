@@ -46,3 +46,9 @@ Register apps under the new bundle ids (not `sh.ompd.*`):
 
 - App Store Connect: `ai.ompctl.app`, `ai.ompctl.macos`
 - Play Console: `ai.ompctl.app`
+
+## Association fail-closed
+
+`ompctl-web` refuses to start without `OMPCTL_APPLE_TEAM_ID` and
+`OMPCTL_PLAY_CERT_SHA256`. Terraform validates both. There is no placeholder
+path that can look healthy on a device check.
