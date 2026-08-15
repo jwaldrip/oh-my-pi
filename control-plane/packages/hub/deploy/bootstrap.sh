@@ -102,6 +102,22 @@ do
     sleep 3
   done
 done
+
+# 'gcloud builds submit' auto-creates and owns a project-owned staging
+# bucket named exactly "${PROJECT}_cloudbuild" on first use, which is fine
+# for an interactive human caller but fails for a service account: the SA
+# has cloudbuild.builds.editor, not storage.buckets.create, so its first
+# real submit dies with "forbidden from accessing the bucket". Pre-creating
+# it here and granting only object access (never bucket-admin) avoids
+# handing the deployer SA a standing bucket-creation right it does not
+# otherwise need.
+CLOUDBUILD_BUCKET="${PROJECT}_cloudbuild"
+echo "==> cloud build staging bucket"
+gcloud storage buckets describe "gs://${CLOUDBUILD_BUCKET}" --project "$PROJECT" >/dev/null 2>&1 || \
+  gcloud storage buckets create "gs://${CLOUDBUILD_BUCKET}" \
+    --project "$PROJECT" --location "$REGION" --uniform-bucket-level-access
+gcloud storage buckets add-iam-policy-binding "gs://${CLOUDBUILD_BUCKET}" \
+  --member "serviceAccount:${SA_EMAIL}" --role roles/storage.objectAdmin --quiet >/dev/null
 echo "==> artifact registry"
 gcloud artifacts repositories describe "$ARTIFACT_REPO" \
   --project "$PROJECT" --location "$REGION" >/dev/null 2>&1 || \
