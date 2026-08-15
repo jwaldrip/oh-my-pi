@@ -42,8 +42,8 @@
     "react-native-view-shot": "4.0.3",
     "react-native-vision-camera": "4.7.3",
     "react-native-web": "0.21.2",
-    "react-native-webview": "14.0.1",
-    "react-native-windows": "0.81.32"
+    "react-native-webview": "15.0.0",
+    "react-native-windows": "0.81.30"
   },
   "devDependencies": {
     "@react-native/babel-preset": "0.81.6",

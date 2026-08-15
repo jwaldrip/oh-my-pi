@@ -1,0 +1,178 @@
+name: Windows minimal repro - react-native-view-shot New Architecture
+
+# Isolated proof, tracked separately from the app's own CI: generates a fresh
+# React Native Windows 0.81 New Architecture app via the official RNW
+# generator (`@react-native-community/cli init-windows`, not this repo's
+# customized `ompd` scaffold) with react-native-view-shot as its only
+# third-party native dependency, then builds it. See PR #8 and
+# `.github/workflows/windows-build.yml` for context: react-native-view-shot
+# has no New Architecture (Fabric) Windows implementation in any published
+# version (checked through 5.1.1) or on its GitHub `master` branch. This
+# workflow proves that in complete isolation from this repo's own build
+# configuration and toolchain overrides.
+#
+# Note: the standalone `react-native-windows-init` package only supports
+# react-native-windows <= 0.75; RNW 0.76+ projects add the platform via
+# `npm install react-native-windows` followed by `init-windows` from
+# `@react-native-community/cli`, which is how this workflow does it.
+#
+# Temporary: remove the `push` trigger (and this file) once the finding is
+# confirmed and recorded on the PR; `workflow_dispatch` alone cannot be
+# dispatched from a non-default branch until the workflow file also exists
+# on the default branch.
+
+on:
+  push:
+    branches:
+      - feat/windows-desktop-scaffold
+    paths:
+      - ".github/workflows/windows-repro-view-shot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: Build isolated RNW 0.81 New Arch app with react-native-view-shot
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+      - name: Generate a bare React Native 0.81.6 app
+        shell: pwsh
+        run: |
+          npx --yes @react-native-community/cli@20.0.0 init ReproApp --version 0.81.6 --pm npm --skip-install --skip-git-init
+      - name: Install JS dependencies
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npm install
+      - name: Install react-native-windows
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npm install --save-exact react-native-windows@0.81.30
+      - name: Generate the React Native Windows project via the official generator
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npx --yes @react-native-community/cli init-windows --template cpp-app --overwrite
+      - name: Assert the generated project is New Architecture (RnwNewArch=true)
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          $props = Get-Content windows/ExperimentalFeatures.props -Raw
+          Write-Output $props
+          if ($props -notmatch '<RnwNewArch>true</RnwNewArch>') {
+            throw "Generated project is not New Architecture; repro is invalid."
+          }
+      - name: Route UWP packaging packages to nuget.org via package source mapping
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          # RNW's generated NuGet.config (templates/cpp-app/NuGet_Config, otherwise
+          # unmodified here, written to the project root as NuGet.config) registers
+          # two sources: Microsoft's "react-native-public" Azure DevOps feed (which
+          # hosts the Microsoft.ReactNative.* NuGet packages this
+          # UseExperimentalNuget=true project actually needs) and nuget.org. In an
+          # earlier run of this workflow (run 31841933184) that ADO feed's V3 index
+          # listed the classic UWP packaging package
+          # Microsoft.NETCore.UniversalWindowsPlatform (plus its runtime.win10-* /
+          # Microsoft.Net.Native.* dependencies), but every nupkg download from it
+          # returned 401; packages.config-style restore bound to that source and did
+          # not fall through to nuget.org, which also carries these standard public
+          # UWP toolchain packages. Add package source mapping (additive: both
+          # sources stay registered) so only Microsoft.ReactNative* resolves from
+          # the react-native feed and everything else, including these UWP toolchain
+          # packages, resolves from nuget.org.
+          $mappingLines = @(
+            '  <packageSourceMapping>',
+            '    <packageSource key="react-native">',
+            '      <package pattern="Microsoft.ReactNative*" />',
+            '    </packageSource>',
+            '    <packageSource key="Nuget.org">',
+            '      <package pattern="*" />',
+            '    </packageSource>',
+            '  </packageSourceMapping>'
+          )
+          $mapping = ($mappingLines -join "`n") + "`n"
+          $config = Get-Content NuGet.config -Raw
+          $config = $config -replace '</configuration>', "$mapping</configuration>"
+          Set-Content -Path NuGet.config -Value $config
+          Get-Content NuGet.config
+      - name: Autolink Windows native modules (control, before react-native-view-shot)
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npx --yes @react-native-community/cli autolink-windows --logging
+      - name: Build the control app project (no react-native-view-shot)
+        shell: pwsh
+        working-directory: ReproApp/windows
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild is not installed on this runner."
+          }
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include"
+          $sdkVersion = Get-ChildItem $sdkRoot -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName "um\Windows.h") } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $sdkVersion) {
+            throw "No Windows SDK with Windows.h is installed on this runner."
+          }
+          # Build via the .sln (not the standalone .vcxproj): the app's own
+          # ReproApp.vcxproj imports $(SolutionDir)\ExperimentalFeatures.props,
+          # and $(SolutionDir) is only defined when MSBuild is invoked against
+          # the .sln. Target only the app project (/t:ReproApp) so this still
+          # skips the separate UWP packaging (.wapproj) project, which failed
+          # on this runner with an unrelated error (MSB3774: could not find SDK
+          # "Microsoft.UniversalCRT.Debug, Version=10.0.22621.0") -- that
+          # target still pulls in every ProjectReference (native modules,
+          # including RNViewShot once added), just not the appx packaging step.
+          $sln = Get-ChildItem *.sln | Select-Object -First 1 -ExpandProperty Name
+          & $msbuild $sln /m /restore /t:ReproApp /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
+          if ($LASTEXITCODE -ne 0) {
+            throw "Control build (no react-native-view-shot) failed. This means the failure is environmental/toolchain, not caused by react-native-view-shot; see the log above for the real root cause before drawing any conclusion about view-shot."
+          }
+      - name: Add react-native-view-shot as the only third-party native dependency
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npm install --save-exact react-native-view-shot@4.0.3
+      - name: Autolink Windows native modules (with react-native-view-shot)
+        shell: pwsh
+        working-directory: ReproApp
+        run: |
+          npx --yes @react-native-community/cli autolink-windows --logging
+      - name: Build the app project with react-native-view-shot added
+        shell: pwsh
+        working-directory: ReproApp/windows
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+          if (-not $msbuild) {
+            throw "MSBuild is not installed on this runner."
+          }
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include"
+          $sdkVersion = Get-ChildItem $sdkRoot -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName "um\Windows.h") } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $sdkVersion) {
+            throw "No Windows SDK with Windows.h is installed on this runner."
+          }
+          # Same target as the control build above: build via the .sln,
+          # targeting only the app project (/t:ReproApp), which now has
+          # react-native-view-shot autolinked as a ProjectReference. This
+          # leg differs from the control leg only by the presence of
+          # react-native-view-shot.
+          $sln = Get-ChildItem *.sln | Select-Object -First 1 -ExpandProperty Name
+          & $msbuild $sln /m /restore /t:ReproApp /p:Configuration=Debug /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PlatformToolset=v145
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }

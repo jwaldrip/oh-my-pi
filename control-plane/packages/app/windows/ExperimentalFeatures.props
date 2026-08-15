@@ -5,23 +5,30 @@
     <!--
       Required for building a New Architecture project.
 
-      App projects should not change this value.
-
-      See https://microsoft.github.io/react-native-windows/docs/new-architecture
+      react-native-webview 15.0.0+ ships a Fabric-based Windows implementation.
+      react-native-view-shot has no New Architecture Windows implementation in
+      any published or unreleased version as of this writing (last checked
+      react-native-view-shot@5.1.1 and the gre/react-native-view-shot master
+      branch); it fails to build here until upstream migrates it.
     -->
     <RnwNewArch>true</RnwNewArch>
 
     <!--
       Changes compilation to assume use of Microsoft.ReactNative NuGet packages
       instead of building the framework from source. Defaults to true.
-
-      This is set during app project creation and should not be changed.
-
-      See https://microsoft.github.io/react-native-windows/docs/nuget
     -->
     <UseExperimentalNuget>true</UseExperimentalNuget>
 
+    <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
+    <RunCodegenWindows>false</RunCodegenWindows>
     <ReactExperimentalFeaturesSet>true</ReactExperimentalFeaturesSet>
   </PropertyGroup>
+
+  <!-- When using NuGet packages, prevent legacy community modules from pulling in Microsoft.ReactNative framework source builds. -->
+  <Target Name="RemoveFrameworkProjectReferences" BeforeTargets="ResolveProjectReferences;BeforeResolveReferences;_GetProjectReferenceTargetFrameworkProperties" Condition="'$(UseExperimentalNuget)'=='true'">
+    <ItemGroup>
+      <ProjectReference Remove="@(ProjectReference)" Condition="'%(FileName)' == 'Microsoft.ReactNative'" />
+    </ItemGroup>
+  </Target>
 
 </Project>
