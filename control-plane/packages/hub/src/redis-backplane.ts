@@ -42,6 +42,18 @@ export interface RedisBackplaneOptions {
   instanceId: string;
 }
 
+/**
+ * Narrows an unknown thrown/rejected value to Bun's specific "the socket
+ * closed while this was in flight" RedisError, the one documented shape of
+ * teardown noise `close()` deliberately swallows. Anything else keeps
+ * surfacing.
+ */
+function isRedisConnectionClosedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (!("code" in err)) return false;
+  return err.code === "ERR_REDIS_CONNECTION_CLOSED";
+}
+
 export class RedisBackplane implements Backplane {
   readonly instanceId: string;
   readonly #commands: RedisClient;
@@ -164,12 +176,34 @@ export class RedisBackplane implements Backplane {
     } catch {
       // Already gone, which is the state this was trying to reach.
     }
-    for (const client of [this.#subscriber, this.#commands]) {
-      try {
-        client.close();
-      } catch {
-        // Already closed. Nothing to release and nothing to report.
+
+    // Closing a client can still abort something in flight underneath it
+    // (the socket teardown itself, or a command whose response was already
+    // in transit), and that abort is the same kind of unhandled rejection
+    // as the subscription's above -- surfacing after this function's own
+    // try/catch has nothing left to run, not inside it. A narrow, temporary
+    // process-level handler is the only place that is observable at all.
+    // Scoped to teardown and to this one documented error so a genuinely
+    // unrelated failure during close is still reported, not hidden.
+    const swallowTeardownAbort = (err: unknown): void => {
+      if (isRedisConnectionClosedError(err)) return;
+      console.error("unexpected error while closing the redis backplane:", err);
+    };
+    process.on("unhandledRejection", swallowTeardownAbort);
+    try {
+      for (const client of [this.#subscriber, this.#commands]) {
+        try {
+          client.close();
+        } catch {
+          // Already closed. Nothing to release and nothing to report.
+        }
       }
+      // A closed socket's in-flight abort rejects on a later tick than the
+      // synchronous `close()` call above, so the handler must still be
+      // installed when that tick runs rather than being torn down with it.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off("unhandledRejection", swallowTeardownAbort);
     }
   }
 }
