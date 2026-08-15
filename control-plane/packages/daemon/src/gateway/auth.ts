@@ -66,6 +66,14 @@ export interface DeviceAuthOptions {
   now?: () => number;
 }
 
+/** What approving a pairing minted, and for whom. */
+export interface ApprovalResult {
+  /** The new device's credential. Returned once; only its hash is kept. */
+  token: string;
+  /** The name the pairing client chose at `beginPairing`, for the approver's own confirmation UI. */
+  name: string;
+}
+
 /** What a rotation withdrew and what it issued in its place. */
 export interface RotationResult {
   deviceId: string;
@@ -190,7 +198,7 @@ export class DeviceAuth {
    * The scopes recorded are the ones passed here. What the client asked for at
    * `beginPairing` was never captured, precisely so it cannot influence this.
    */
-  approvePairing(code: string, scopes: string[]): string {
+  approvePairing(code: string, scopes: string[]): ApprovalResult {
     this.#expirePairings();
     const pending = this.#pending.get(code);
     if (!pending) throw new PairingError("unknown or expired pairing code");
@@ -220,7 +228,7 @@ export class DeviceAuth {
       outcome: "ok",
       detail: { name: device.name, scopes: device.scopes },
     });
-    return token;
+    return { token, name: device.name };
   }
 
   /**

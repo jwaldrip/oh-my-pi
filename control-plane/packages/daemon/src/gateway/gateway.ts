@@ -679,7 +679,7 @@ export class Gateway {
    * influences either check, so pairing still grants nothing by itself.
    */
   approvePairing(code: string, scopes: string[]): string {
-    return this.#auth.approvePairing(code, scopes);
+    return this.#auth.approvePairing(code, scopes).token;
   }
 
   /**
@@ -1250,8 +1250,8 @@ export class Gateway {
       }
 
       try {
-        const token = this.#auth.approvePairing(body.code, requested);
-        return Response.json({ token });
+        const { token, name } = this.#auth.approvePairing(body.code, requested);
+        return Response.json({ token, name });
       } catch (err) {
         if (err instanceof PairingError) {
           return Response.json({ error: err.message }, { status: 404 });

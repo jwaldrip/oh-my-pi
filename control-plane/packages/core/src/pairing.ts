@@ -160,3 +160,127 @@ function safeUrl(value: string): URL | null {
     return null;
   }
 }
+
+/**
+ * A completed pairing, ready to save without another network round trip.
+ *
+ * Unlike `Endpoint`, this carries the bearer token -- which is exactly why it
+ * is never encoded as a `http(s)://` or `ompd://`/`ompctl://` URL. A token in
+ * a URL rides through OS deep-link dispatch (Universal Links validation,
+ * Android intent resolution, Handoff, Siri Suggestions indexing, share
+ * sheets), all of which log or index it somewhere a long-lived credential
+ * should never sit -- the same reasoning `Endpoint` above already rejects for
+ * its own, non-secret case. `BUNDLE_PREFIX` is deliberately not a registered
+ * URL scheme: no OS treats it as a link, so scanning one only ever reaches
+ * this app's own in-app QR reader, never the OS deep-link path.
+ *
+ * A `PairingBundle` is minted by a device that already holds `approve` scope
+ * -- the CLI (`ompd approve` / `ompd invite`) for a device's first pairing,
+ * or an already-paired app for a second device -- immediately after that
+ * device's own deliberate approval decision. It is never produced from an
+ * unauthenticated pairing code by itself.
+ */
+export type PairedConnection =
+  | { transport: "direct"; url: string; token: string; scopes: string[] }
+  | { transport: "hub"; hubUrl: string; daemonId: string; token: string; scopes: string[] };
+
+export interface PairingBundle {
+  v: 1;
+  /** The device name the approver chose, shown on the scanning side before it saves anything. */
+  label: string;
+  connection: PairedConnection;
+}
+
+/** Marks a scanned/pasted string as a pairing bundle, not a URL. See `PairingBundle` above. */
+export const BUNDLE_PREFIX = "ompd-pair-v1:";
+
+/** Render a bundle for a QR code or terminal display. Opaque text, not a link. */
+export function encodePairingBundle(bundle: PairingBundle): string {
+  return BUNDLE_PREFIX + toBase64Url(toUtf8(JSON.stringify(bundle)));
+}
+
+/** The inverse of `encodePairingBundle`, or null for anything malformed or foreign. */
+export function parsePairingBundle(raw: string): PairingBundle | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith(BUNDLE_PREFIX)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fromUtf8(fromBase64Url(trimmed.slice(BUNDLE_PREFIX.length))));
+  } catch {
+    return null;
+  }
+  return coercePairingBundle(parsed);
+}
+
+function coercePairingBundle(value: unknown): PairingBundle | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (v.v !== 1 || typeof v.label !== "string") return null;
+  const connection = coercePairedConnection(v.connection);
+  if (connection === null) return null;
+  return { v: 1, label: v.label, connection };
+}
+
+function coercePairedConnection(value: unknown): PairedConnection | null {
+  if (typeof value !== "object" || value === null) return null;
+  const c = value as Record<string, unknown>;
+  if (typeof c.token !== "string" || c.token.length === 0) return null;
+  if (!Array.isArray(c.scopes) || !c.scopes.every((s) => typeof s === "string")) return null;
+  const scopes = c.scopes as string[];
+  if (c.transport === "direct" && typeof c.url === "string" && isSocketUrl(c.url)) {
+    return { transport: "direct", url: c.url, token: c.token, scopes };
+  }
+  if (
+    c.transport === "hub" &&
+    typeof c.hubUrl === "string" &&
+    isHubUrl(c.hubUrl) &&
+    typeof c.daemonId === "string" &&
+    c.daemonId.length > 0
+  ) {
+    return { transport: "hub", hubUrl: normalizeHubUrl(c.hubUrl), daemonId: c.daemonId, token: c.token, scopes };
+  }
+  return null;
+}
+
+/** Portable base64url, without assuming `Buffer` (Bun/CLI) or `btoa` (Hermes/app) exist. */
+const B64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function toUtf8(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
+
+function fromUtf8(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] ?? 0;
+    const b1 = bytes[i + 1];
+    const b2 = bytes[i + 2];
+    out += B64URL_ALPHABET[b0 >> 2];
+    out += B64URL_ALPHABET[((b0 & 0x03) << 4) | ((b1 ?? 0) >> 4)];
+    out += b1 === undefined ? "" : B64URL_ALPHABET[((b1 & 0x0f) << 2) | ((b2 ?? 0) >> 6)];
+    out += b2 === undefined ? "" : B64URL_ALPHABET[b2 & 0x3f];
+  }
+  return out;
+}
+
+function fromBase64Url(text: string): Uint8Array {
+  const clean = text.replace(/[^A-Za-z0-9\-_]/g, "");
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const ch of clean) {
+    const index = B64URL_ALPHABET.indexOf(ch);
+    if (index === -1) continue;
+    buffer = (buffer << 6) | index;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(bytes);
+}

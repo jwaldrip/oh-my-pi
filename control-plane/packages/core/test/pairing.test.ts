@@ -10,13 +10,17 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  BUNDLE_PREFIX,
   describeEndpoint,
   encodeEndpoint,
+  encodePairingBundle,
   isHubUrl,
   isSocketUrl,
   normalizeHubUrl,
   parseEndpoint,
+  parsePairingBundle,
   type Endpoint,
+  type PairingBundle,
 } from "../src/index.ts";
 
 describe("parseEndpoint: what may become a connection", () => {
@@ -134,5 +138,82 @@ describe("describeEndpoint", () => {
     expect(describeEndpoint({ transport: "hub", hubUrl: "wss://hub.example.com", daemonId: "abc" })).toBe(
       "wss://hub.example.com (daemon abc)",
     );
+  });
+});
+
+describe("parsePairingBundle: the door a scanned or pasted QR comes through", () => {
+  const bundle: PairingBundle = {
+    v: 1,
+    label: "Jason's iPad",
+    connection: { transport: "direct", url: "ws://10.4.1.221:7777/v1/socket", token: "secret-token", scopes: ["read", "prompt"] },
+  };
+
+  test("a bundle round-trips through encode and parse", () => {
+    expect(parsePairingBundle(encodePairingBundle(bundle))).toEqual(bundle);
+  });
+
+  test("a hub connection round-trips too, with its daemon pin intact", () => {
+    const hubBundle: PairingBundle = {
+      v: 1,
+      label: "laptop",
+      connection: { transport: "hub", hubUrl: "wss://hub.example.com", daemonId: "abc123", token: "t", scopes: ["read"] },
+    };
+    expect(parsePairingBundle(encodePairingBundle(hubBundle))).toEqual(hubBundle);
+  });
+
+  test("the encoded form uses no scheme any OS or app registers, so nothing ever dispatches it as a link", () => {
+    // `new URL()` happily parses any `scheme:opaque` string -- that is not the
+    // property that keeps this off the OS deep-link path. What keeps it off
+    // is that `ompd-pair-v1` is not `ompctl`, `http`, or `https`: the only
+    // schemes this product's own manifests register with iOS/Android, so no
+    // OS ever offers to open this string in any app.
+    const encoded = encodePairingBundle(bundle);
+    expect(encoded.startsWith(BUNDLE_PREFIX)).toBe(true);
+    const scheme = new URL(encoded).protocol;
+    expect(["ompctl:", "http:", "https:"]).not.toContain(scheme);
+  });
+
+  test("a string missing the bundle prefix is refused, including a plausible endpoint URL", () => {
+    expect(parsePairingBundle("ws://10.4.1.221:7777/v1/socket")).toBeNull();
+    expect(parsePairingBundle("https://app.ompctl.ai/pair")).toBeNull();
+  });
+
+  test("prefixed garbage that is not valid base64/JSON is refused, not thrown", () => {
+    expect(parsePairingBundle(`${BUNDLE_PREFIX}not-base64!!!`)).toBeNull();
+  });
+
+  test("a bundle missing its token is refused", () => {
+    const withoutToken = JSON.parse(JSON.stringify(bundle));
+    delete withoutToken.connection.token;
+    const encoded = BUNDLE_PREFIX + Buffer.from(JSON.stringify(withoutToken)).toString("base64url");
+    expect(parsePairingBundle(encoded)).toBeNull();
+  });
+
+  test("a bundle whose scopes are not strings is refused", () => {
+    const bad = { ...bundle, connection: { ...bundle.connection, scopes: [1, 2] } };
+    const encoded = BUNDLE_PREFIX + Buffer.from(JSON.stringify(bad)).toString("base64url");
+    expect(parsePairingBundle(encoded)).toBeNull();
+  });
+
+  test("a hub connection with no daemon to pin is refused, same as parseEndpoint's rule", () => {
+    const bad = {
+      v: 1,
+      label: "x",
+      connection: { transport: "hub", hubUrl: "wss://hub.example.com", daemonId: "", token: "t", scopes: [] },
+    };
+    const encoded = BUNDLE_PREFIX + Buffer.from(JSON.stringify(bad)).toString("base64url");
+    expect(parsePairingBundle(encoded)).toBeNull();
+  });
+
+  test("a direct connection whose URL is not a socket URL is refused", () => {
+    const bad = { ...bundle, connection: { ...bundle.connection, url: "https://evil.example.com" } };
+    const encoded = BUNDLE_PREFIX + Buffer.from(JSON.stringify(bad)).toString("base64url");
+    expect(parsePairingBundle(encoded)).toBeNull();
+  });
+
+  test("wrong version tag is refused rather than coerced", () => {
+    const bad = { ...bundle, v: 2 };
+    const encoded = BUNDLE_PREFIX + Buffer.from(JSON.stringify(bad)).toString("base64url");
+    expect(parsePairingBundle(encoded)).toBeNull();
   });
 });

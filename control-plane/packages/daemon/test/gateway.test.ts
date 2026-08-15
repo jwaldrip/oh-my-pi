@@ -404,6 +404,30 @@ describe("pairing", () => {
     expect(() => h.gw.approvePairing(body.code, [SCOPE_MANAGE])).toThrow();
   });
 
+  test("approving a pairing returns the name the pairing client chose, alongside the token", async () => {
+    // A QR-code invite flow labels itself off this ("Pair with <name>?") --
+    // without it, an approver minting a bundle for another device would have
+    // no name to put in it besides one it made up.
+    const h = await harness();
+    const approver = await h.pair("operator", [SCOPE_READ, SCOPE_APPROVE]);
+
+    const pairRes = await h.http("/v1/pair", {
+      method: "POST",
+      body: JSON.stringify({ name: "Jason's iPad", publicKey: "pk_ipad" }),
+    });
+    const { code } = (await pairRes.json()) as { code: string };
+
+    const approveRes = await h.http(
+      "/v1/pairings/approve",
+      { method: "POST", body: JSON.stringify({ code, scopes: [SCOPE_READ] }) },
+      approver,
+    );
+    expect(approveRes.status).toBe(200);
+    const body = (await approveRes.json()) as { token?: unknown; name?: unknown };
+    expect(typeof body.token).toBe("string");
+    expect(body.name).toBe("Jason's iPad");
+  });
+
   test("scopes named by the client in the pairing body are ignored", async () => {
     // The whole reason pairing is two-step. A client that could pick its own
     // scopes would make every check behind this route decorative.
