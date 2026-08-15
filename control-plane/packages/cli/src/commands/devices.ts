@@ -5,12 +5,23 @@
  * and grants nothing, `approve` is the operator act that writes a device row
  * and mints its token. The daemon refuses to grant a scope the approving
  * device does not itself hold, so this CLI cannot mint an account more
- * powerful than the one it is using.
+ * powerful than the one it is using. `invite` composes the two calls for the
+ * common case where one operator is doing both; see its own doc comment for
+ * why that composition grants nothing the two steps could not.
  */
 
 import { randomUUID } from "node:crypto";
 import type { Device } from "@ompd/core";
-import { describeEndpoint, type EndpointOffer, type EndpointReach } from "@ompd/core/pairing";
+import {
+  describeEndpoint,
+  encodePairingBundle,
+  type Endpoint,
+  type EndpointOffer,
+  type EndpointReach,
+  type PairedConnection,
+  type PairingBundle,
+} from "@ompd/core/pairing";
+import QRCode from "qrcode";
 import type { Command } from "../args.ts";
 import { api, type CliContext } from "../client.ts";
 import { age, table } from "../format.ts";
@@ -21,6 +32,8 @@ interface PairResponse {
 
 interface ApproveResponse {
   token?: unknown;
+  /** The name the pairing client chose at `/v1/pair` time; absent means no QR code can be labeled. */
+  name?: unknown;
 }
 
 interface RotateResponse {
@@ -78,6 +91,70 @@ function printEndpointOffers(ctx: CliContext, offers: EndpointOffer[]): void {
       ctx.out(`      ${offer.note}`);
     }
   }
+}
+
+/**
+ * The endpoint a bundle should point at, picked by the same order an
+ * operator reads in `printEndpointOffers` above. Null covers both a failed
+ * lookup and an empty one -- the caller only needs to know whether there is
+ * anything to encode, not why there isn't.
+ */
+function bestEndpointOffer(offers: EndpointOffer[] | null): EndpointOffer | null {
+  if (offers === null) return null;
+  for (const reach of REACH_ORDER) {
+    const match = offers.find((offer) => offer.reach === reach);
+    if (match !== undefined) return match;
+  }
+  return null;
+}
+
+/** `Endpoint` plus the credential a scanning device saves alongside it. */
+function pairedConnectionFor(endpoint: Endpoint, token: string, scopes: string[]): PairedConnection {
+  return endpoint.transport === "direct"
+    ? { transport: "direct", url: endpoint.url, token, scopes }
+    : { transport: "hub", hubUrl: endpoint.hubUrl, daemonId: endpoint.daemonId, token, scopes };
+}
+
+/**
+ * The second half of a token's one-time printing: a QR code a phone can scan
+ * instead of retyping it, and a fallback line for when it cannot. Both are
+ * built from the token and scopes already on the screen above, so neither can
+ * grant more than that text already did.
+ *
+ * The encoded bundle goes to this terminal and nowhere else -- never a log,
+ * never a request body, never a file -- for the reason `PairingBundle`'s own
+ * doc comment gives for rejecting a URL: it carries the token. A missing name
+ * or endpoint is reported and skipped rather than thrown, because the token
+ * is already printed and a QR failure must never read as the command itself
+ * having failed.
+ */
+async function printPairingQr(
+  ctx: CliContext,
+  opts: { offers: EndpointOffer[] | null; label: string; token: string; scopes: string[] },
+): Promise<void> {
+  const offer = bestEndpointOffer(opts.offers);
+  if (offer === null) {
+    ctx.out("");
+    ctx.out("  no reachable endpoint to encode; skipping the QR code");
+    return;
+  }
+
+  const bundle: PairingBundle = {
+    v: 1,
+    label: opts.label,
+    connection: pairedConnectionFor(offer.endpoint, opts.token, opts.scopes),
+  };
+  const encoded = encodePairingBundle(bundle);
+  const qr = await QRCode.toString(encoded, { type: "terminal", small: true });
+
+  ctx.out("");
+  ctx.out('  or scan this with the app\'s "Scan a QR code instead" option on the pairing screen:');
+  for (const line of qr.split("\n")) {
+    if (line.length > 0) ctx.out(line);
+  }
+  ctx.out("");
+  ctx.out("  can't scan it? paste this string into the app's manual pairing field instead:");
+  ctx.out(`  ${encoded}`);
 }
 
 export async function pairCommand(
@@ -148,6 +225,82 @@ export async function approveCommand(
   ctx.out("  the token above is a secret; the endpoints below are not:");
   const approveOffers = await fetchEndpointOffers(ctx);
   if (approveOffers !== null) printEndpointOffers(ctx, approveOffers);
+
+  if (typeof response.name === "string") {
+    await printPairingQr(ctx, {
+      offers: approveOffers,
+      label: response.name,
+      token: response.token,
+      scopes: cmd.scopes,
+    });
+  } else {
+    ctx.out("");
+    ctx.out("  the daemon did not return the pairing's name, so no QR code was built");
+  }
+  return 0;
+}
+
+/**
+ * `pair` and `approve`, run back to back with the operator's own token.
+ *
+ * The two-step form exists so a *different* device can hold the approve
+ * decision -- a phone approving from wherever the operator already is, say.
+ * This is the same two HTTP calls for the common case where the operator is
+ * running both halves themselves and typing the code in between buys
+ * nothing. It grants no more than `approve` already would: the daemon still
+ * refuses any scope this shell's own token does not hold, so composing the
+ * calls here cannot mint an account more powerful than one `approve` could.
+ */
+export async function inviteCommand(
+  ctx: CliContext,
+  cmd: Extract<Command, { kind: "invite" }>,
+): Promise<number> {
+  const pairResponse = await api<PairResponse>(ctx, "/v1/pair", {
+    anonymous: true,
+    method: "POST",
+    body: {
+      name: cmd.name,
+      publicKey: `cli:${randomUUID()}`,
+    },
+  });
+
+  if (typeof pairResponse.code !== "string") {
+    ctx.err("the daemon did not return a pairing code");
+    return 1;
+  }
+
+  const approveResponse = await api<ApproveResponse>(ctx, "/v1/pairings/approve", {
+    method: "POST",
+    body: { code: pairResponse.code, scopes: cmd.scopes },
+  });
+
+  if (typeof approveResponse.token !== "string") {
+    ctx.err("the daemon approved the pairing but returned no token");
+    return 1;
+  }
+
+  ctx.out(`invited ${cmd.name}. scopes: ${cmd.scopes.join(", ")}`);
+  ctx.out("");
+  ctx.out(`  ${approveResponse.token}`);
+  ctx.out("");
+  ctx.out("  This token is shown once and is not recoverable. The daemon keeps only its");
+  ctx.out("  hash. Copy it now; if you lose it, rotate or invite again.");
+  ctx.out("  It lasts until you revoke the device or rotate the token.");
+
+  ctx.out("");
+  ctx.out("  the token above is a secret; the endpoints below are not:");
+  const inviteOffers = await fetchEndpointOffers(ctx);
+  if (inviteOffers !== null) printEndpointOffers(ctx, inviteOffers);
+
+  // Unlike `approve`, the name here is the operator's own typed positional
+  // rather than a value read back off the wire: this command chose it, so
+  // there is nothing to fall back on if it were somehow missing.
+  await printPairingQr(ctx, {
+    offers: inviteOffers,
+    label: cmd.name,
+    token: approveResponse.token,
+    scopes: cmd.scopes,
+  });
   return 0;
 }
 

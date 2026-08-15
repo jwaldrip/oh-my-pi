@@ -12,9 +12,13 @@
   },
   "dependencies": {
     "@ompd/core": "workspace:*",
-    "@ompd/daemon": "workspace:*"
+    "@ompd/daemon": "workspace:*",
+    "qrcode": "1.5.4"
   },
   "scripts": {
     "check": "bun ../../scripts/check-types.ts tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/qrcode": "1.5.6"
   }
 }

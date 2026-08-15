@@ -45,6 +45,7 @@ import {
 } from "../src/commands/service.ts";
 import { startupLines } from "../src/commands/daemon.ts";
 import { BINARY_MARKER, findCheckoutRoot } from "../src/install.ts";
+import { BUNDLE_PREFIX, parsePairingBundle } from "@ompd/core/pairing";
 import { homeIdFor, OMPD_VERSION, type Ompd } from "@ompd/daemon";
 import { run } from "../src/main.ts";
 
@@ -386,6 +387,18 @@ describe("argv parsing", () => {
     expect(() => parseCommand(["approve"])).toThrow(/missing <code>/);
   });
 
+  test("invite defaults to the same scopes as pair, unlike approve", () => {
+    expect(parseCommand(["invite", "phone"])).toEqual({
+      kind: "invite",
+      name: "phone",
+      scopes: ["read", "prompt"],
+    });
+    expect(parseCommand(["invite", "phone", "--scopes", "read,manage"])).toMatchObject({
+      scopes: ["read", "manage"],
+    });
+    expect(() => parseCommand(["invite"])).toThrow(/missing <name>/);
+  });
+
   test("agent and routine verbs take their one argument", () => {
     expect(parseCommand(["new", "/tmp/repo"])).toEqual({
       kind: "new",
@@ -688,6 +701,145 @@ describe("approve", () => {
     expect(await run(["approve", "123456", "--scopes", "read"], h.ctx)).toBe(0);
     expect(h.stdout()).toContain("tok_irrecoverable");
     expect(h.stderr()).toContain("could not list reachable endpoints");
+  });
+
+  test("prints a scannable QR bundle when the daemon returns the pairing's name", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/pairings/approve": { body: { token: "tok_scan_me", name: "phone" } },
+        "GET /v1/endpoints": {
+          body: {
+            offers: [
+              {
+                endpoint: { transport: "direct", url: "ws://10.4.1.221:7777/v1/socket" },
+                reach: "same-network",
+                note: "reachable from this Wi-Fi",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(await run(["approve", "123456", "--scopes", "read,prompt"], h.ctx)).toBe(0);
+    const out = h.stdout();
+    // Scannable ASCII art, not just the fallback text below it.
+    expect(out).toContain("█");
+    const fallback = out.split("\n").find((line) => line.trim().startsWith(BUNDLE_PREFIX));
+    expect(fallback).toBeDefined();
+    expect(parsePairingBundle((fallback ?? "").trim())).toEqual({
+      v: 1,
+      label: "phone",
+      connection: {
+        transport: "direct",
+        url: "ws://10.4.1.221:7777/v1/socket",
+        token: "tok_scan_me",
+        scopes: ["read", "prompt"],
+      },
+    });
+  });
+
+  test("skips the QR code, without failing, when the daemon omits the pairing's name", async () => {
+    const h = harness({
+      routes: { "POST /v1/pairings/approve": { body: { token: "tok_no_name" } } },
+    });
+    expect(await run(["approve", "123456", "--scopes", "read"], h.ctx)).toBe(0);
+    expect(h.stdout()).toContain("did not return the pairing's name");
+    expect(h.stdout()).not.toContain(BUNDLE_PREFIX);
+  });
+});
+
+describe("invite", () => {
+  test("mints a token that authenticates a later request, composing pair then approve", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/pair": { body: { code: "778899" } },
+        "POST /v1/pairings/approve": { body: { token: "tok_invited", name: "kitchen-tablet" } },
+      },
+    });
+
+    expect(await run(["invite", "kitchen-tablet", "--scopes", "read,prompt"], h.ctx)).toBe(0);
+
+    // pair first, unauthenticated; approve second, with the operator's own token.
+    // This is the daemon-side property that keeps `invite` from being a
+    // self-service grant: it is exactly the two calls `pair` and `approve`
+    // make separately, not a shortcut around either check.
+    expect(h.calls[0]).toMatchObject({
+      url: "/v1/pair",
+      method: "POST",
+      body: { name: "kitchen-tablet" },
+      authorization: null,
+    });
+    expect(h.calls[1]).toMatchObject({
+      url: "/v1/pairings/approve",
+      method: "POST",
+      body: { code: "778899", scopes: ["read", "prompt"] },
+      authorization: "Bearer tok_local",
+    });
+    expect(h.stdout()).toContain("tok_invited");
+
+    // The token is not just printed: it is what the paired device would
+    // present. A second harness, standing in for that device, proves it
+    // actually authenticates rather than merely looking right on screen.
+    const device = harness({
+      token: "tok_invited",
+      routes: { "GET /v1/agents": { body: { agents: [] } } },
+    });
+    expect(await run(["agents"], device.ctx)).toBe(0);
+    expect(device.calls[0]?.authorization).toBe("Bearer tok_invited");
+  });
+
+  test("prints a QR block that decodes back to the minted token", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/pair": { body: { code: "112233" } },
+        "POST /v1/pairings/approve": { body: { token: "tok_qr" } },
+        "GET /v1/endpoints": {
+          body: {
+            offers: [
+              {
+                endpoint: { transport: "hub", hubUrl: "wss://hub.example.com", daemonId: "dmn_9" },
+                reach: "anywhere",
+                note: "reachable from anywhere the hub is",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(await run(["invite", "phone", "--scopes", "read,prompt"], h.ctx)).toBe(0);
+    const out = h.stdout();
+    expect(out).toContain("█");
+    const fallback = out.split("\n").find((line) => line.trim().startsWith(BUNDLE_PREFIX));
+    expect(fallback).toBeDefined();
+    expect(parsePairingBundle((fallback ?? "").trim())).toEqual({
+      v: 1,
+      label: "phone",
+      connection: {
+        transport: "hub",
+        hubUrl: "wss://hub.example.com",
+        daemonId: "dmn_9",
+        token: "tok_qr",
+        scopes: ["read", "prompt"],
+      },
+    });
+  });
+
+  test("surfaces the daemon's scope_escalation refusal instead of crashing", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/pair": { body: { code: "445566" } },
+        "POST /v1/pairings/approve": {
+          status: 403,
+          body: { error: "scope_escalation", missing: ["manage"] },
+        },
+      },
+    });
+
+    expect(await run(["invite", "phone", "--scopes", "manage"], h.ctx)).toBe(1);
+    expect(h.stderr()).toContain("scope_escalation");
+    expect(h.stdout()).not.toContain("tok_");
   });
 });
 

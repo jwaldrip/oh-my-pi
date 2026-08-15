@@ -118,6 +118,8 @@ function pairingInstructions(url: string, tokenPath: string, offers: readonly En
     "    ompd pair <name> --scopes read,prompt",
     "    ompd approve <code> --scopes read,prompt",
     "  approve prints the token once, and the endpoints below beside it.",
+    "  or, from this machine, in one step:",
+    "    ompd invite <name> --scopes read,prompt",
     "",
   ];
 

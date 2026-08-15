@@ -39,6 +39,7 @@ export type Command =
   | { kind: "config"; action: "set"; key: string; value: string }
   | { kind: "pair"; name: string; scopes: string[] }
   | { kind: "approve"; code: string; scopes: string[] }
+  | { kind: "invite"; name: string; scopes: string[] }
   | { kind: "devices" }
   | { kind: "revoke"; deviceId: string }
   | { kind: "rotate"; deviceId?: string }
@@ -92,6 +93,8 @@ devices
                           begin pairing and print the code to approve
   approve <code> --scopes read,prompt,manage,approve
                           approve a pending pairing and print its token once
+  invite <name> [--scopes read,prompt]
+                          pair and approve in one step; prints the token and a QR code
   devices                 list paired devices
   revoke <deviceId>       revoke a device
   rotate [--device <id>]  replace a token; the old one stops working
@@ -311,6 +314,18 @@ export function parseCommand(argv: string[]): Command {
       // authority, and a default grant is one nobody chose.
       if (scopes === undefined) throw new UsageError("approve needs --scopes");
       return { kind: "approve", code, scopes: parseScopes(scopes) };
+    }
+
+    case "invite": {
+      rejectExtra(rest, 1, "invite");
+      const scopes = stringFlag(flags, "scopes");
+      return {
+        kind: "invite",
+        name: requirePositional(rest, 0, "name"),
+        // Same default as `pair`: the least useful grant that still lets a
+        // fresh device do something, since nobody explicitly chose it here.
+        scopes: scopes === undefined ? [SCOPE_READ, SCOPE_PROMPT] : parseScopes(scopes),
+      };
     }
 
     case "devices":

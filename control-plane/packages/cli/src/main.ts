@@ -28,6 +28,7 @@ import { startCommand, statusCommand } from "./commands/daemon.ts";
 import {
   approveCommand,
   devicesCommand,
+  inviteCommand,
   pairCommand,
   revokeCommand,
   rotateCommand,
@@ -75,6 +76,8 @@ export async function run(argv: string[], ctx: CliContext = defaultContext()): P
         return await pairCommand(ctx, command);
       case "approve":
         return await approveCommand(ctx, command);
+      case "invite":
+        return await inviteCommand(ctx, command);
       case "devices":
         return await devicesCommand(ctx);
       case "revoke":
