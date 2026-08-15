@@ -60,14 +60,15 @@ jobs:
       - name: Prove package-identity test can fail
         # Invert the assertion temporarily via a one-shot gradle property is hard;
         # instead run a tiny companion check that the test class is on the classpath
-        # and that APPLICATION_ID is the store id, failing this step if not.
+        # and that APPLICATION_ID is the store id (identity/product.json's
+        # android_package_id), failing this step if not.
         run: |
           cd android
           ./gradlew :app:compileDebugUnitTestJavaWithJavac :app:compileDebugUnitTestKotlin --console=plain
           # Extract APPLICATION_ID from generated BuildConfig
           bc=$(find app/build -name BuildConfig.java -o -name BuildConfig.kt | head -1)
           echo "BuildConfig=$bc"
-          grep -E 'sh\.ompd\.app' "$bc"
+          grep -E 'ai\.ompctl\.app' "$bc"
 
   android-instrumentation:
     name: Android emulator instrumentation
@@ -102,9 +103,13 @@ jobs:
           script: bash ./scripts/android-instrumentation-test.sh
 
   ios-sim:
-    name: iOS simulator UI smoke
+    name: iOS simulator UI smoke (${{ matrix.family }})
     runs-on: macos-15
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [iPhone, iPad]
     defaults:
       run:
         working-directory: control-plane/packages/app
@@ -130,4 +135,4 @@ jobs:
           cd ios
           pod install
       - name: Simulator smoke (LaunchSmokeUITests only)
-        run: bun run test:ios:sim
+        run: bun run test:ios:sim -- ${{ matrix.family }}

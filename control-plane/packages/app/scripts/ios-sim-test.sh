@@ -2,7 +2,10 @@
 # Simulator-safe UI smoke tests for ompd iOS (no live daemon).
 # Must run under an Xcode that has an iOS Simulator runtime installed
 # (workflow selects Xcode 16+ before invoking this script).
+#
+# Usage: ios-sim-test.sh [iPhone|iPad]  (default: iPhone)
 set -euo pipefail
+FAMILY="${1:-iPhone}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cleanup() { bash "$ROOT/scripts/stop-metro.sh" || true; }
 trap cleanup EXIT
@@ -14,11 +17,13 @@ echo "xcode $(xcodebuild -version | tr '\n' ' ')"
 # Prefer a generic destination name that exists on the selected Xcode.
 # Creating by UDID from a different Xcode install is what broke CI earlier.
 pick_destination() {
-  python3 - <<'PY'
-import json, subprocess, sys
+  DEVICE_FAMILY="$FAMILY" python3 - <<'PY'
+import json, os, subprocess, sys
 
 def run(args):
     return subprocess.check_output(args, text=True)
+
+family = os.environ.get("DEVICE_FAMILY", "iPhone")
 
 runtimes = json.loads(run(["xcrun", "simctl", "list", "runtimes", "-j"])).get("runtimes", [])
 ios_runtimes = [
@@ -34,16 +39,19 @@ runtime = ios_runtimes[0]
 print(f"runtime {runtime.get('name')} {runtime.get('identifier')}", file=sys.stderr)
 
 devices = json.loads(run(["xcrun", "simctl", "list", "devices", "available", "-j"])).get("devices", {})
-# Prefer already-booted iPhone on this runtime
+# Prefer an already-booted device of the requested family on this runtime
 for d in devices.get(runtime["identifier"], []):
-    if d.get("isAvailable") and "iPhone" in d.get("name", "") and d.get("state") == "Booted":
+    if d.get("isAvailable") and family in d.get("name", "") and d.get("state") == "Booted":
         print(d["udid"])
         print(f"using_booted {d['name']}", file=sys.stderr)
         sys.exit(0)
 
-# Prefer existing iPhone 16 / 15 / any iPhone on this runtime
-preferred_names = ["iPhone 16", "iPhone 16 Pro", "iPhone 15", "iPhone 15 Pro", "iPhone SE (3rd generation)"]
-candidates = [d for d in devices.get(runtime["identifier"], []) if d.get("isAvailable") and "iPhone" in d.get("name", "")]
+# Prefer an existing device of the requested family on this runtime
+preferred_names = {
+    "iPhone": ["iPhone 16", "iPhone 16 Pro", "iPhone 15", "iPhone 15 Pro", "iPhone SE (3rd generation)"],
+    "iPad": ["iPad (A16)", "iPad Air 11-inch (M4)", "iPad Pro 11-inch (M5)", "iPad mini (A17 Pro)"],
+}.get(family, [])
+candidates = [d for d in devices.get(runtime["identifier"], []) if d.get("isAvailable") and family in d.get("name", "")]
 for name in preferred_names:
     for d in candidates:
         if d.get("name") == name:
@@ -58,22 +66,22 @@ if candidates:
 
 # Create one
 devtypes = json.loads(run(["xcrun", "simctl", "list", "devicetypes", "-j"])).get("devicetypes", [])
-iphone_types = [t for t in devtypes if t.get("productFamily") == "iPhone"]
-# prefer iPhone 16 type id
+family_types = [t for t in devtypes if t.get("productFamily") == family]
 type_id = None
-for want in ["iPhone 16", "iPhone 15", "iPhone SE"]:
-    for t in iphone_types:
+type_name = None
+for want in preferred_names:
+    for t in family_types:
         if want in t.get("name", ""):
             type_id = t["identifier"]
             type_name = t["name"]
             break
     if type_id:
         break
-if not type_id and iphone_types:
-    type_id = iphone_types[0]["identifier"]
-    type_name = iphone_types[0]["name"]
+if not type_id and family_types:
+    type_id = family_types[0]["identifier"]
+    type_name = family_types[0]["name"]
 if not type_id:
-    sys.stderr.write("no iPhone device types\n")
+    sys.stderr.write(f"no {family} device types\n")
     sys.exit(1)
 name = f"ompd-ci-{type_name.replace(' ', '-')}"
 udid = run(["xcrun", "simctl", "create", name, type_id, runtime["identifier"]]).strip()

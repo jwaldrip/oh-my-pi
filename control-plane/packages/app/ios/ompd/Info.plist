@@ -88,6 +88,11 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- Scanning a QR code to pair with a daemon or another paired device.
+	     No photo or video is stored; the camera feed is read in-app only for
+	     the moment it takes to decode a code. -->
+	<key>NSCameraUsageDescription</key>
+	<string>ompd reads a QR code to pair with a daemon or another paired device. No photo or video is stored.</string>
 	<!-- iOS 14 and later gate a connection to an address on the local network
 	     behind an explicit grant. Without this string the prompt cannot be
 	     shown, and the first pairing against a LAN address fails with a

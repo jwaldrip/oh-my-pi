@@ -18,11 +18,4 @@ class PackageIdentityTest {
   fun applicationIdIsNotReactNativeTemplate() {
     assertNotEquals("com.ompd", BuildConfig.APPLICATION_ID)
   }
-
-  @Test
-  fun mainComponentNameIsOmpd() {
-    // MainActivity hard-codes the RN component name registered from JS.
-    // Keep this string locked so a rename in JS without native update fails CI.
-    assertEquals("ompd", "ompd")
-  }
 }

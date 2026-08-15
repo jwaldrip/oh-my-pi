@@ -2,6 +2,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Scanning a QR code to pair with a daemon or another paired device.
+         No photo or video is stored; only the in-app code scanner reads the
+         live camera feed for the moment it takes to decode a code. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
     <application
       android:name=".MainApplication"
       android:label="@string/app_name"

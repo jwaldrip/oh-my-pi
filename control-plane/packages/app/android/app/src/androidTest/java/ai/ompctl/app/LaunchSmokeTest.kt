@@ -30,6 +30,18 @@ class LaunchSmokeTest {
   }
 
   @Test
+  fun mainComponentNameMatchesWhatJsRegisters() {
+    // A plain JVM unit test cannot construct a real `ReactActivity`, so this lives here
+    // instead of `PackageIdentityTest`: calling the actual override, not a literal compared
+    // to itself, is what lets a rename on one side and not the other (native vs. app.json's
+    // `name`, which `index.js` passes to `AppRegistry.registerComponent`) fail this test
+    // instead of silently shipping an app that never renders anything.
+    ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+      scenario.onActivity { activity -> assertEquals("ompctl", activity.mainComponentName) }
+    }
+  }
+
+  @Test
   fun mainActivityRendersPairingOrConsole() {
     val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
     ActivityScenario.launch(MainActivity::class.java).use {
