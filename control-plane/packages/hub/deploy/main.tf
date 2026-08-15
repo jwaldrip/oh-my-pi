@@ -150,6 +150,20 @@ resource "google_cloud_run_v2_service" "hub" {
   }
 }
 
+# Same shape as `google_cloud_run_v2_service_iam_member.web_public` below:
+# daemons and phone clients arrive with no Google identity (see the comment
+# on `ingress` above), so IAM in front of the service would refuse every one
+# of them before the app's own daemon/token auth ever runs. Cloud Run
+# services do NOT default to public even with ingress=ALL; this binding is
+# required or the first apply ships a hub that 403s all traffic.
+resource "google_cloud_run_v2_service_iam_member" "hub_public" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.hub.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
 output "hub_url" {
   value = google_cloud_run_v2_service.hub.uri
 }
