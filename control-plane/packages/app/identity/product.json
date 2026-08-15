@@ -1,0 +1,14 @@
+{
+  "product": "ompctl",
+  "domain": "ompctl.ai",
+  "web_origin": "https://app.ompctl.ai",
+  "hub_origin": "https://hub.ompctl.ai",
+  "collab_path_prefix": "/collab",
+  "custom_url_scheme": "ompctl",
+  "ios_bundle_id": "ai.ompctl.app",
+  "android_package_id": "ai.ompctl.app",
+  "macos_bundle_id": "ai.ompctl.macos",
+  "windows_package_id": "ai.ompctl.app",
+  "session_uti": "ai.ompctl.session",
+  "launchd_label": "ai.ompctl"
+}

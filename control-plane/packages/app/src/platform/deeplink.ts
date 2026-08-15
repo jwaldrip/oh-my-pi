@@ -1,8 +1,8 @@
 /**
  * Collaboration links have exactly two ingress forms:
  *
- * - `ompd://collab/<roomId>` for custom-scheme delivery;
- * - `https://my.ompd.sh/collab/<roomId>` for verified iOS Universal Links and
+ * - `ompctl://collab/<roomId>` for custom-scheme delivery;
+ * - `https://app.ompctl.ai/collab/<roomId>` for verified iOS Universal Links and
  *   Android App Links.
  *
  * The room id identifies a session but grants no capability. Pairing remains
@@ -10,7 +10,7 @@
  * fragments are refused rather than becoming an accidental credential channel.
  */
 
-const COLLAB_ORIGIN = "https://my.ompd.sh";
+const COLLAB_ORIGIN = "https://app.ompctl.ai";
 const ROOM_ID = /^[A-Za-z0-9_-]{10,64}$/;
 
 export interface CollabDeepLink {
@@ -27,7 +27,7 @@ export type OpenCollabSession = (roomId: string) => void;
 
 /**
  * Recognises only the product-owned link forms. In particular, a URL whose
- * hostname merely contains `my.ompd.sh` must never become a navigation target.
+ * hostname merely contains `app.ompctl.ai` must never become a navigation target.
  */
 export function parseCollabDeepLink(raw: string): CollabDeepLink | null {
   let url: URL;
@@ -41,7 +41,7 @@ export function parseCollabDeepLink(raw: string): CollabDeepLink | null {
 
   const segments = url.pathname.split("/").filter(Boolean);
   let roomId: string;
-  if (url.protocol === "ompd:" && url.hostname === "collab") {
+  if (url.protocol === "ompctl:" && url.hostname === "collab") {
     if (segments.length !== 1) return null;
     roomId = segments[0] ?? "";
   } else if (url.protocol === "https:" && url.origin === COLLAB_ORIGIN) {

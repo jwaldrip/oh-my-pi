@@ -58,12 +58,18 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and push
+      - name: Build and push hub + web images
         run: |
+          REG="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd"
           gcloud builds submit \
             --project "${{ vars.GCP_PROJECT_ID }}" \
-            --tag "${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd/hub:${{ github.sha }}" \
+            --tag "${REG}/hub:${{ github.sha }}" \
             --file control-plane/packages/hub/deploy/Dockerfile \
+            .
+          gcloud builds submit \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --tag "${REG}/web:${{ github.sha }}" \
+            --file control-plane/packages/web/deploy/Dockerfile \
             .
 
       - uses: hashicorp/setup-terraform@v3
@@ -77,4 +83,13 @@ jobs:
             -var "region=${{ vars.GCP_REGION }}" \
             -var "network_id=${{ vars.GCP_NETWORK_ID }}" \
             -var "connector_id=${{ vars.GCP_VPC_CONNECTOR_ID }}" \
-            -var "image=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd/hub:${{ github.sha }}"
+            -var "image=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd/hub:${{ github.sha }}" \
+            -var "web_image=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd/web:${{ github.sha }}" \
+            -var "app_domain=${{ vars.OMPCTL_APP_DOMAIN || 'app.ompctl.ai' }}" \
+            -var "hub_domain=${{ vars.OMPCTL_HUB_DOMAIN || 'hub.ompctl.ai' }}" \
+            -var "apple_team_id=${{ vars.OMPCTL_APPLE_TEAM_ID }}" \
+            -var "play_cert_sha256=${{ vars.OMPCTL_PLAY_CERT_SHA256 }}"
+          echo "::group::Squarespace DNS records to create"
+          terraform output -json squarespace_dns_records
+          terraform output -json product_identity
+          echo "::endgroup::"

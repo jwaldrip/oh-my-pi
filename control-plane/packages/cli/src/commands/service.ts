@@ -23,7 +23,7 @@ import type { Command } from "../args.ts";
 import type { CliContext } from "../client.ts";
 import { defaultPrefix, resolveProgram, type ProgramResolution } from "../install.ts";
 
-export const LAUNCHD_LABEL = "sh.ompd";
+export const LAUNCHD_LABEL = "ai.ompctl";
 
 /**
  * Proof that ompd wrote a plist.

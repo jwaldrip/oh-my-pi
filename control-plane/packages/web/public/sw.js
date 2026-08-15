@@ -11,7 +11,7 @@
  * is enough for the app to open offline and say "offline" out loud.
  */
 
-const SHELL = "ompd-shell-v2";
+const SHELL = "ompctl-shell-v1";
 const SHELL_DOCUMENT = "/index.html";
 const PRECACHE = ["/", SHELL_DOCUMENT, "/manifest.webmanifest", "/icon.svg"];
 

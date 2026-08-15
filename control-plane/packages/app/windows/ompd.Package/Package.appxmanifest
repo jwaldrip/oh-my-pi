@@ -7,13 +7,13 @@
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="sh.ompd.app"
-    Publisher="CN=ompd"
+    Name="ai.ompctl.app"
+    Publisher="CN=ompctl"
     Version="1.0.0.0" />
 
   <Properties>
     <DisplayName>ompd</DisplayName>
-    <PublisherDisplayName>jwaldrip</PublisherDisplayName>
+    <PublisherDisplayName>ompctl</PublisherDisplayName>
     <Logo>Images\StoreLogo.png</Logo>
   </Properties>
 
@@ -31,7 +31,7 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="ompd"
+        DisplayName="ai.ompctl.app"
         Description="ompd"
         BackgroundColor="transparent"
         Square150x150Logo="Images\Square150x150Logo.png"
@@ -41,7 +41,7 @@
       </uap:VisualElements>
       <Extensions>
         <uap:Extension Category="windows.fileTypeAssociation">
-          <uap:FileTypeAssociation Name="sh.ompd.session">
+          <uap:FileTypeAssociation Name="ai.ompctl.session">
             <uap:DisplayName>OMP Session Handoff</uap:DisplayName>
             <uap:Logo>Images\Square44x44Logo.png</uap:Logo>
             <uap:SupportedFileTypes>

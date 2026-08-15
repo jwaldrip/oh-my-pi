@@ -1,4 +1,4 @@
-package sh.ompd.app
+package ai.ompctl.app
 
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -26,7 +26,7 @@ class LaunchSmokeTest {
   @Test
   fun useAppContext() {
     val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-    assertEquals("sh.ompd.app", appContext.packageName)
+    assertEquals("ai.ompctl.app", appContext.packageName)
   }
 
   @Test
@@ -68,7 +68,7 @@ class LaunchSmokeTest {
     if (device.findObject(By.text("Daemon endpoint")) != null) return "text:endpoint-label"
     if (device.findObject(By.text(Pattern.compile("(?i)connect"))) != null) return "text:connect"
     // Wait helper keeps CPU calm when nothing matches yet
-    device.wait(Until.hasObject(By.pkg("sh.ompd.app")), 250)
+    device.wait(Until.hasObject(By.pkg("ai.ompctl.app")), 250)
     return null
   }
 }

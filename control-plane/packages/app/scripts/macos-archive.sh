@@ -35,7 +35,7 @@ xcodebuild \
   -destination 'generic/platform=macOS' \
   -archivePath "$OUT/ompd-mac.xcarchive" \
   DEVELOPMENT_TEAM="$TEAM_ID" \
-  PRODUCT_BUNDLE_IDENTIFIER=sh.ompd.macos \
+  PRODUCT_BUNDLE_IDENTIFIER=ai.ompctl.macos \
   CODE_SIGN_STYLE=Automatic \
   "${AUTH_ARGS[@]}" \
   archive

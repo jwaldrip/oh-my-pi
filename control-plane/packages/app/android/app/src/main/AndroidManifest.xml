@@ -36,14 +36,14 @@
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.DEFAULT" />
             <category android:name="android.intent.category.BROWSABLE" />
-            <data android:scheme="ompd" android:host="collab" />
+            <data android:scheme="ompctl" android:host="collab" />
         </intent-filter>
         <!-- The domain validates this package/signing key through assetlinks.json. -->
         <intent-filter android:autoVerify="true">
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.DEFAULT" />
             <category android:name="android.intent.category.BROWSABLE" />
-            <data android:scheme="https" android:host="my.ompd.sh" android:pathPrefix="/collab" />
+            <data android:scheme="https" android:host="app.ompctl.ai" android:pathPrefix="/collab" />
         </intent-filter>
       </activity>
     </application>

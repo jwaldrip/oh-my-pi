@@ -1027,7 +1027,7 @@ function describe(cause: unknown): string {
  * shared state but is not a credential: device pairing and room membership are
  * still checked by the daemon after the native app opens it.
  */
-export const COLLAB_UNIVERSAL_LINK_ORIGIN = "https://my.ompd.sh";
+export const COLLAB_UNIVERSAL_LINK_ORIGIN = "https://app.ompctl.ai";
 const COLLAB_ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{10,64}$/;
 
 export function isCollabRoomId(roomId: string): boolean {

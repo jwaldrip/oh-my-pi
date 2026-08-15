@@ -142,3 +142,175 @@ resource "google_cloud_run_v2_service" "hub" {
 output "hub_url" {
   value = google_cloud_run_v2_service.hub.uri
 }
+
+
+# --- ompctl.ai edge: hub.ompctl.ai (relay) + app.ompctl.ai (web) -------------
+# Squarespace owns DNS for ompctl.ai. Terraform manages GCP only and outputs
+# the records Squarespace must create after apply.
+
+variable "app_domain" {
+  type        = string
+  description = "Public web + Universal Links host."
+  default     = "app.ompctl.ai"
+}
+
+variable "hub_domain" {
+  type        = string
+  description = "Public hub/relay host."
+  default     = "hub.ompctl.ai"
+}
+
+variable "web_image" {
+  type        = string
+  description = "Container image for the ompctl web console (app.ompctl.ai)."
+}
+
+variable "apple_team_id" {
+  type        = string
+  description = "Apple Team ID embedded in apple-app-site-association."
+  default     = ""
+}
+
+variable "play_cert_sha256" {
+  type        = string
+  description = "Play upload cert SHA-256 for assetlinks.json."
+  default     = ""
+}
+
+resource "google_service_account" "web" {
+  project    = var.project_id
+  account_id = "ompctl-web"
+}
+
+resource "google_cloud_run_v2_service" "web" {
+  project  = var.project_id
+  location = var.region
+  name     = "ompctl-web"
+
+  ingress = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    service_account = google_service_account.web.email
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 5
+    }
+
+    containers {
+      image = var.web_image
+
+      env {
+        name  = "OMPCTL_APPLE_TEAM_ID"
+        value = var.apple_team_id
+      }
+
+      env {
+        name  = "OMPCTL_PLAY_CERT_SHA256"
+        value = var.play_cert_sha256
+      }
+
+      env {
+        name  = "OMPCTL_IOS_BUNDLE_ID"
+        value = "ai.ompctl.app"
+      }
+
+      env {
+        name  = "OMPCTL_MACOS_BUNDLE_ID"
+        value = "ai.ompctl.macos"
+      }
+
+      env {
+        name  = "OMPCTL_ANDROID_PACKAGE"
+        value = "ai.ompctl.app"
+      }
+
+      resources {
+        cpu_idle = true
+        limits = {
+          cpu    = "1"
+          memory = "256Mi"
+        }
+      }
+
+      startup_probe {
+        http_get {
+          path = "/healthz"
+        }
+      }
+    }
+  }
+}
+
+resource "google_cloud_run_v2_service_iam_member" "web_public" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.web.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+resource "google_cloud_run_domain_mapping" "app" {
+  project  = var.project_id
+  location = var.region
+  name     = var.app_domain
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.web.name
+  }
+}
+
+resource "google_cloud_run_domain_mapping" "hub" {
+  project  = var.project_id
+  location = var.region
+  name     = var.hub_domain
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.hub.name
+  }
+}
+
+output "app_domain" { value = var.app_domain }
+output "hub_domain" { value = var.hub_domain }
+output "web_url" { value = google_cloud_run_v2_service.web.uri }
+
+output "squarespace_dns_records" {
+  description = "Create these at Squarespace DNS for ompctl.ai after apply."
+  value = {
+    app = [
+      for rr in try(google_cloud_run_domain_mapping.app.status[0].resource_records, []) : {
+        type   = rr.type
+        host   = var.app_domain
+        rrdata = rr.rrdata
+      }
+    ]
+    hub = [
+      for rr in try(google_cloud_run_domain_mapping.hub.status[0].resource_records, []) : {
+        type   = rr.type
+        host   = var.hub_domain
+        rrdata = rr.rrdata
+      }
+    ]
+  }
+}
+
+output "product_identity" {
+  value = {
+    ios_bundle_id     = "ai.ompctl.app"
+    android_package   = "ai.ompctl.app"
+    macos_bundle_id   = "ai.ompctl.macos"
+    windows_package   = "ai.ompctl.app"
+    web_origin        = "https://${var.app_domain}"
+    hub_origin        = "https://${var.hub_domain}"
+    collab_link_base  = "https://${var.app_domain}/collab"
+    custom_url_scheme = "ompctl"
+  }
+}

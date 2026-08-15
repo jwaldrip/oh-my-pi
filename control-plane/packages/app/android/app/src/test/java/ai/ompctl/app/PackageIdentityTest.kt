@@ -1,4 +1,4 @@
-package sh.ompd.app
+package ai.ompctl.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -11,7 +11,7 @@ import org.junit.Test
 class PackageIdentityTest {
   @Test
   fun applicationIdIsStoreIdentity() {
-    assertEquals("sh.ompd.app", BuildConfig.APPLICATION_ID)
+    assertEquals("ai.ompctl.app", BuildConfig.APPLICATION_ID)
   }
 
   @Test

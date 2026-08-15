@@ -31,7 +31,7 @@ xcodebuild \
   -destination 'generic/platform=iOS' \
   -archivePath "$OUT/ompd.xcarchive" \
   DEVELOPMENT_TEAM="$TEAM_ID" \
-  PRODUCT_BUNDLE_IDENTIFIER=sh.ompd.app \
+  PRODUCT_BUNDLE_IDENTIFIER=ai.ompctl.app \
   CODE_SIGN_STYLE=Automatic \
   "${AUTH_ARGS[@]}" \
   archive

@@ -197,7 +197,7 @@ no way to present one.
 ## Run it at login
 
 ```bash
-ompd install     # writes ~/Library/LaunchAgents/sh.ompd.plist and loads it
+ompd install     # writes ~/Library/LaunchAgents/ai.ompctl.plist and loads it
 ompd uninstall   # unloads and removes it
 ```
 
@@ -659,5 +659,5 @@ new work arrives, and only then tears down running agents. It exits non-zero
 only if that fails.
 
 If launchd is managing it, `ompd uninstall` is what stops it for good;
-`launchctl unload ~/Library/LaunchAgents/sh.ompd.plist` stops it until the next
+`launchctl unload ~/Library/LaunchAgents/ai.ompctl.plist` stops it until the next
 login.

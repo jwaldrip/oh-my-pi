@@ -855,7 +855,7 @@ describe("config", () => {
 
 describe("install and uninstall", () => {
   function writeForeignPlist(home: string): string {
-    const path = join(home, "Library", "LaunchAgents", "sh.ompd.plist");
+    const path = join(home, "Library", "LaunchAgents", "ai.ompctl.plist");
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, "<plist><dict><key>Label</key><string>someone.else</string></dict></plist>");
     return path;
@@ -926,7 +926,7 @@ describe("install and uninstall", () => {
     expect(await run(["install"], h.ctx)).toBe(0);
     const plist = readFileSync(path, "utf8");
     expect(plist).toContain(`<key>${PLIST_MARKER}</key>`);
-    expect(plist).toContain("<string>sh.ompd</string>");
+    expect(plist).toContain("<string>ai.ompctl</string>");
     expect(plist).toContain("start");
     expect(plist).toContain("--foreground");
     // The daemon launchd starts must use the same state directory this CLI does.

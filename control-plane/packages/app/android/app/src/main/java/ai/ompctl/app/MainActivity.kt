@@ -1,4 +1,4 @@
-package sh.ompd.app
+package ai.ompctl.app
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

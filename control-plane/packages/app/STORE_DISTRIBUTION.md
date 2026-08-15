@@ -4,10 +4,10 @@ Product identity (all platforms):
 
 | Platform | ID |
 |----------|----|
-| iOS | `sh.ompd.app` |
-| Android | `sh.ompd.app` |
-| macOS | `sh.ompd.macos` |
-| Windows | `sh.ompd.app` (Publisher `CN=ompd`) |
+| iOS | `ai.ompctl.app` |
+| Android | `ai.ompctl.app` |
+| macOS | `ai.ompctl.macos` |
+| Windows | `ai.ompctl.app` (Publisher `CN=ompd`) |
 
 ## Test tracks
 
@@ -36,7 +36,7 @@ Product identity (all platforms):
 
 GitHub-hosted macOS runners have no signing identities. The workflow imports the `.p12` into an ephemeral keychain and uses the ASC API key with `-allowProvisioningUpdates` so Xcode can create/download provisioning profiles at archive time.
 
-Create the ASC key under App Store Connect → Users and Access → Integrations → App Store Connect API, role **App Manager** (or Admin). Register bundle IDs `sh.ompd.app` and `sh.ompd.macos` before the first upload.
+Create the ASC key under App Store Connect → Users and Access → Integrations → App Store Connect API, role **App Manager** (or Admin). Register bundle IDs `ai.ompctl.app` and `ai.ompctl.macos` before the first upload.
 
 ### Google Play (Android Internal testing)
 
@@ -50,7 +50,7 @@ Create the ASC key under App Store Connect → Users and Access → Integrations
 
 Release builds **never** use `debug.keystore`. `./gradlew :app:bundleRelease` fails closed without the upload key.
 
-Play Console must already have app `sh.ompd.app` created (first AAB can be a manual draft upload if the API rejects the very first binary).
+Play Console must already have app `ai.ompctl.app` created (first AAB can be a manual draft upload if the API rejects the very first binary).
 
 ### Windows (optional later)
 

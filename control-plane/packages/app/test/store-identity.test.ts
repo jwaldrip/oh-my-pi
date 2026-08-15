@@ -7,26 +7,26 @@ const appRoot = join(import.meta.dir, "..");
 describe("store identity", () => {
   test("app.json pins platform package ids", () => {
     const cfg = JSON.parse(readFileSync(join(appRoot, "app.json"), "utf8"));
-    expect(cfg.ios.bundleIdentifier).toBe("sh.ompd.app");
-    expect(cfg.android.package).toBe("sh.ompd.app");
-    expect(cfg.macos.bundleIdentifier).toBe("sh.ompd.macos");
-    expect(cfg.windows.packageName).toBe("sh.ompd.app");
+    expect(cfg.ios.bundleIdentifier).toBe("ai.ompctl.app");
+    expect(cfg.android.package).toBe("ai.ompctl.app");
+    expect(cfg.macos.bundleIdentifier).toBe("ai.ompctl.macos");
+    expect(cfg.windows.packageName).toBe("ai.ompctl.app");
   });
 
-  test("iOS Xcode project uses sh.ompd.app", () => {
+  test("iOS Xcode project uses ai.ompctl.app", () => {
     const pbx = readFileSync(
       join(appRoot, "ios/ompd.xcodeproj/project.pbxproj"),
       "utf8",
     );
-    expect(pbx).toContain("PRODUCT_BUNDLE_IDENTIFIER = sh.ompd.app;");
+    expect(pbx).toContain("PRODUCT_BUNDLE_IDENTIFIER = ai.ompctl.app;");
     expect(pbx).not.toContain("org.reactjs.native.example");
     expect(pbx).toContain("LaunchSmokeUITests.swift");
   });
 
-  test("Android applicationId is sh.ompd.app and release is not debug-signed", () => {
+  test("Android applicationId is ai.ompctl.app and release is not debug-signed", () => {
     const gradle = readFileSync(join(appRoot, "android/app/build.gradle"), "utf8");
-    expect(gradle).toContain('applicationId "sh.ompd.app"');
-    expect(gradle).toContain('namespace "sh.ompd.app"');
+    expect(gradle).toContain('applicationId "ai.ompctl.app"');
+    expect(gradle).toContain('namespace "ai.ompctl.app"');
     const buildTypesIdx = gradle.indexOf("buildTypes");
     expect(buildTypesIdx).toBeGreaterThan(0);
     const buildTypes = gradle.slice(buildTypesIdx);
@@ -38,19 +38,19 @@ describe("store identity", () => {
     expect(gradle).toContain("debug.keystore is never used for release");
   });
 
-  test("Android kotlin sources live under sh/ompd/app", () => {
-    expect(existsSync(join(appRoot, "android/app/src/main/java/sh/ompd/app/MainActivity.kt"))).toBe(true);
+  test("Android kotlin sources live under ai/ompctl/app", () => {
+    expect(existsSync(join(appRoot, "android/app/src/main/java/ai/ompctl/app/MainActivity.kt"))).toBe(true);
     expect(existsSync(join(appRoot, "android/app/src/main/java/com/ompd/MainActivity.kt"))).toBe(false);
     const main = readFileSync(
-      join(appRoot, "android/app/src/main/java/sh/ompd/app/MainActivity.kt"),
+      join(appRoot, "android/app/src/main/java/ai/ompctl/app/MainActivity.kt"),
       "utf8",
     );
-    expect(main.startsWith("package sh.ompd.app")).toBe(true);
+    expect(main.startsWith("package ai.ompctl.app")).toBe(true);
   });
 
   test("native smoke tests exist for both mobile platforms", () => {
     expect(existsSync(join(appRoot, "ios/ompdUITests/LaunchSmokeUITests.swift"))).toBe(true);
-    expect(existsSync(join(appRoot, "android/app/src/test/java/sh/ompd/app/PackageIdentityTest.kt"))).toBe(true);
-    expect(existsSync(join(appRoot, "android/app/src/androidTest/java/sh/ompd/app/LaunchSmokeTest.kt"))).toBe(true);
+    expect(existsSync(join(appRoot, "android/app/src/test/java/ai/ompctl/app/PackageIdentityTest.kt"))).toBe(true);
+    expect(existsSync(join(appRoot, "android/app/src/androidTest/java/ai/ompctl/app/LaunchSmokeTest.kt"))).toBe(true);
   });
 });

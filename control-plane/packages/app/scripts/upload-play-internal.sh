@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AAB="${1:-$ROOT/android/app/build/outputs/bundle/release/app-release.aab}"
 test -f "$AAB"
 : "${OMPD_PLAY_SERVICE_ACCOUNT_JSON:?OMPD_PLAY_SERVICE_ACCOUNT_JSON path required}"
-PACKAGE_NAME="${OMPD_PLAY_PACKAGE_NAME:-sh.ompd.app}"
+PACKAGE_NAME="${OMPD_PLAY_PACKAGE_NAME:-ai.ompctl.app}"
 
 python3 - <<'PY' "$AAB" "$OMPD_PLAY_SERVICE_ACCOUNT_JSON" "$PACKAGE_NAME"
 import json, sys

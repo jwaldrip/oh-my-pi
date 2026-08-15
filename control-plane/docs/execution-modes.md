@@ -67,7 +67,7 @@ agent works the same as over a Chat session's agent.
 ## Universal Links & App Handoff (`.ompsession`)
 
 - **Universal Links for Collab:** Hub `/collab` join URLs use a universal-link
-  domain (`my.ompd.sh` / `app.ompd.sh`) registered with `apple-app-site-association`
+  domain (`app.ompctl.ai` / `app.ompctl.ai`) registered with `apple-app-site-association`
   (iOS/macOS) and `assetlinks.json` (Android). Clicking a join link opens our
   native app directly if installed, falling back to the web app in browser.
 - **Handoff File Format (`.ompsession`):** Handoff exports are saved as a

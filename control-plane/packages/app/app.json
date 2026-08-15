@@ -1,16 +1,16 @@
 {
-  "name": "ompd",
-  "displayName": "ompd",
+  "name": "ompctl",
+  "displayName": "ompctl",
   "ios": {
-    "bundleIdentifier": "sh.ompd.app"
+    "bundleIdentifier": "ai.ompctl.app"
   },
   "macos": {
-    "bundleIdentifier": "sh.ompd.macos"
+    "bundleIdentifier": "ai.ompctl.macos"
   },
   "android": {
-    "package": "sh.ompd.app"
+    "package": "ai.ompctl.app"
   },
   "windows": {
-    "packageName": "sh.ompd.app"
+    "packageName": "ai.ompctl.app"
   }
 }

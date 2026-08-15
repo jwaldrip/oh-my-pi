@@ -3,7 +3,7 @@ import { formatCollabJoinLink, isCollabRoomId } from "../src/hub.ts";
 
 describe("collab universal links", () => {
   test("emits the app-owned universal-link form for a room id", () => {
-    expect(formatCollabJoinLink("room_0123456789")).toBe("https://my.ompd.sh/collab/room_0123456789");
+    expect(formatCollabJoinLink("room_0123456789")).toBe("https://app.ompctl.ai/collab/room_0123456789");
   });
 
   test("refuses room ids that could change the link path or carry a capability", () => {

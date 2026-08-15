@@ -19,7 +19,7 @@
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>sh.ompd.session</string>
+				<string>ai.ompctl.session</string>
 			</array>
 		</dict>
 	</array>
@@ -33,7 +33,7 @@
 			<key>UTTypeDescription</key>
 			<string>OMP Session Handoff</string>
 			<key>UTTypeIdentifier</key>
-			<string>sh.ompd.session</string>
+			<string>ai.ompctl.session</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -46,7 +46,7 @@
 		</dict>
 	</array>
 	<key>CFBundleDisplayName</key>
-	<string>ompd</string>
+	<string>ompctl</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -63,15 +63,15 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<!-- `ompd://collab/<roomId>` is the explicit fallback to the Universal Link. -->
+	<!-- `ompctl://collab/<roomId>` is the explicit fallback to the Universal Link. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>sh.ompd.collab</string>
+			<string>ai.ompctl.collab</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>ompd</string>
+				<string>ompctl</string>
 			</array>
 		</dict>
 	</array>

@@ -19,7 +19,7 @@
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>sh.ompd.session</string>
+				<string>ai.ompctl.session</string>
 			</array>
 		</dict>
 	</array>
@@ -33,7 +33,7 @@
 			<key>UTTypeDescription</key>
 			<string>OMP Session Handoff</string>
 			<key>UTTypeIdentifier</key>
-			<string>sh.ompd.session</string>
+			<string>ai.ompctl.session</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
