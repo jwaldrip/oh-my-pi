@@ -87,7 +87,7 @@ for ROLE in \
   roles/run.admin \
   roles/artifactregistry.admin \
   roles/cloudbuild.builds.editor \
-  roles/serviceusage.serviceUsageConsumer \
+  roles/storage.admin \
   roles/redis.admin \
   roles/secretmanager.admin \
   roles/iam.serviceAccountAdmin \
@@ -103,21 +103,17 @@ do
   done
 done
 
-# 'gcloud builds submit' auto-creates and owns a project-owned staging
-# bucket named exactly "${PROJECT}_cloudbuild" on first use, which is fine
-# for an interactive human caller but fails for a service account: the SA
-# has cloudbuild.builds.editor, not storage.buckets.create, so its first
-# real submit dies with "forbidden from accessing the bucket". Pre-creating
-# it here and granting only object access (never bucket-admin) avoids
-# handing the deployer SA a standing bucket-creation right it does not
-# otherwise need.
-CLOUDBUILD_BUCKET="${PROJECT}_cloudbuild"
-echo "==> cloud build staging bucket"
-gcloud storage buckets describe "gs://${CLOUDBUILD_BUCKET}" --project "$PROJECT" >/dev/null 2>&1 || \
-  gcloud storage buckets create "gs://${CLOUDBUILD_BUCKET}" \
-    --project "$PROJECT" --location "$REGION" --uniform-bucket-level-access
-gcloud storage buckets add-iam-policy-binding "gs://${CLOUDBUILD_BUCKET}" \
-  --member "serviceAccount:${SA_EMAIL}" --role roles/storage.objectAdmin --quiet >/dev/null
+# 'gcloud builds submit' auto-creates a project-owned staging bucket named
+# exactly "${PROJECT}_cloudbuild" on first use, and its own preflight
+# discovers/creates it via a project-scoped bucket LIST, not a call scoped
+# to that one bucket -- IAM bound only to the bucket itself (objectAdmin,
+# even paired with legacyBucketReader) proved insufficient in practice: the
+# real first CI submit still failed "forbidden from accessing the bucket"
+# after both. roles/storage.admin above (project-scoped, matching every
+# other role in this list: full admin over one resource TYPE the stack
+# owns, not the project as a whole) is what actually unblocked it, verified
+# by reproducing the failure locally via --impersonate-service-account
+# before landing this.
 echo "==> artifact registry"
 gcloud artifacts repositories describe "$ARTIFACT_REPO" \
   --project "$PROJECT" --location "$REGION" >/dev/null 2>&1 || \

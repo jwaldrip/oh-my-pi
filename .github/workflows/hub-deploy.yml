@@ -66,18 +66,43 @@ jobs:
         # committed Cloud Build config (control-plane/packages/*/deploy/cloudbuild.yaml)
         # rather than one generated inline, which a `run: |` block's own YAML
         # indentation makes impossible to terminate correctly.
+        #
+        # `--async` + poll, not the default synchronous log-streaming submit:
+        # streaming requires the caller to be project Viewer/Owner (a
+        # primitive role Cloud Build checks specifically, not satisfied by
+        # any granular role such as logging.viewer), which the deployer SA
+        # deliberately does not hold. The build itself does not need it.
         run: |
           REG="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd"
-          gcloud builds submit \
-            --project "${{ vars.GCP_PROJECT_ID }}" \
-            --config control-plane/packages/hub/deploy/cloudbuild.yaml \
-            --substitutions "_IMAGE_TAG=${REG}/hub:${{ github.sha }}" \
-            .
-          gcloud builds submit \
-            --project "${{ vars.GCP_PROJECT_ID }}" \
-            --config control-plane/packages/web/deploy/cloudbuild.yaml \
-            --substitutions "_IMAGE_TAG=${REG}/web:${{ github.sha }}" \
-            .
+
+          submit_and_wait() {
+            local config="$1" tag="$2"
+            local id
+            id="$(gcloud builds submit \
+              --project "${{ vars.GCP_PROJECT_ID }}" \
+              --config "$config" \
+              --substitutions "_IMAGE_TAG=${tag}" \
+              --async \
+              --format='value(id)' \
+              .)"
+            echo "submitted build $id for $tag"
+            for i in $(seq 1 60); do
+              status="$(gcloud builds describe "$id" --project "${{ vars.GCP_PROJECT_ID }}" --format='value(status)')"
+              case "$status" in
+                SUCCESS) echo "build $id succeeded"; return 0 ;;
+                WORKING|QUEUED|PENDING) sleep 10 ;;
+                *)
+                  echo "::error::build $id ended in status $status"
+                  return 1
+                  ;;
+              esac
+            done
+            echo "::error::build $id did not finish within the poll window"
+            return 1
+          }
+
+          submit_and_wait control-plane/packages/hub/deploy/cloudbuild.yaml "${REG}/hub:${{ github.sha }}"
+          submit_and_wait control-plane/packages/web/deploy/cloudbuild.yaml "${REG}/web:${{ github.sha }}"
 
       - uses: hashicorp/setup-terraform@v3
 

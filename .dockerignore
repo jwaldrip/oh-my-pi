@@ -1,0 +1,16 @@
+# Reinstalled fresh inside every Docker build (bun install --frozen-lockfile);
+# shipping the host's copy only bloats the ~3GB build context and upload time.
+node_modules
+**/node_modules
+
+# Rust build artifacts. Nothing under control-plane/packages/hub or
+# control-plane/packages/web links against the Rust workspace.
+target
+crates/*/target
+bazel-*
+
+# Never belongs in a build context.
+.git
+
+# Editor/OS noise.
+.DS_Store
