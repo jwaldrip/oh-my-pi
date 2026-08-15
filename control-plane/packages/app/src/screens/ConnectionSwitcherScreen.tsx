@@ -1,11 +1,14 @@
 /** Choose the daemon this device's Console is currently attached to. */
 
 import type { JSX } from "react";
+import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { SCOPE_APPROVE } from "@ompd/core/contracts";
 import { SafeScreen } from "../design/SafeScreen.tsx";
 import { Body, Display, Kicker, Label } from "../design/text.tsx";
 import { ground, ink, signal, space, stroke, TOUCH_TARGET, type } from "../design/tokens.ts";
 import type { ConnectionList, SavedConnection } from "../platform/connection.ts";
+import { InviteScreen } from "./InviteScreen.tsx";
 
 export function ConnectionSwitcherScreen({
   connections,
@@ -18,12 +21,34 @@ export function ConnectionSwitcherScreen({
   onBack: () => void;
   onSelect: (id: string) => void;
 }): JSX.Element {
+  const [inviting, setInviting] = useState(false);
+  const active = connections.connections.find((entry) => entry.id === connections.activeId);
+  // Inviting spends this device's own `approve` scope, so the entry point
+  // stays gone rather than visible-but-refused when the active pairing
+  // doesn't hold it -- the daemon would refuse the mint anyway, and a
+  // control that always fails is worse than no control.
+  const canInvite = active !== undefined && active.connection.scopes.includes(SCOPE_APPROVE);
+
+  if (inviting && active !== undefined) {
+    return <InviteScreen connection={active.connection} onDone={() => setInviting(false)} />;
+  }
+
   return (
     <SafeScreen style={styles.screen} testID="connection-switcher">
       <View style={styles.heading}>
         <Kicker>Daemon</Kicker>
         <Display>Connections</Display>
         <Body>Choose where this device opens its console. Each pairing keeps its own credential.</Body>
+        {!canInvite ? null : (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setInviting(true)}
+            style={styles.invite}
+            testID="invite-device"
+          >
+            <Text style={styles.inviteText}>+ Invite device</Text>
+          </Pressable>
+        )}
       </View>
       <View style={styles.entries}>
         {connections.connections.map((entry) => (
@@ -103,4 +128,6 @@ const styles = StyleSheet.create({
   addText: { ...type.title, color: ink.inverse },
   back: { alignItems: "center", justifyContent: "center", minHeight: TOUCH_TARGET },
   backText: { ...type.label, color: ink.plain },
+  invite: { alignItems: "flex-start", justifyContent: "center", minHeight: TOUCH_TARGET },
+  inviteText: { ...type.label, color: signal.sage },
 });

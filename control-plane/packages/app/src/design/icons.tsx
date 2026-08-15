@@ -49,6 +49,7 @@ import {
   faPlugCircleXmark,
   faPlus,
   faPuzzlePiece,
+  faQrcode,
   faSignal,
   faSlash,
   faStore,
@@ -100,6 +101,7 @@ export type GlyphName =
   | "native"
   | "marketplace"
   | "warning"
+  | "qrcode"
   | "browser"
   | "unknown";
 
@@ -158,6 +160,9 @@ export const GLYPHS: Record<GlyphName, IconDefinition> = {
   native: faBuilding,
   marketplace: faStore,
   warning: faTriangleExclamation,
+  // A QR code is the one glyph in this set that names itself: the shape it
+  // draws IS the thing it means, for the two screens that show or read one.
+  qrcode: faQrcode,
   // The agent's own sandboxed WebView, which is a window it drives rather
   // than the globe `fetch` uses for an HTTP call with no page behind it.
   browser: faWindowMaximize,

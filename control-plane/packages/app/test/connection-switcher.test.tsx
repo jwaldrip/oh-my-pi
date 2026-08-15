@@ -78,4 +78,67 @@ describe("ConnectionSwitcherScreen", () => {
     });
     host.remove();
   });
+
+  test("the invite entry point is absent when the active connection's scopes exclude approve", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    act(() => {
+      root.render(<ConnectionSwitcherScreen connections={connections} onAdd={() => {}} onBack={() => {}} onSelect={() => {}} />);
+    });
+    expect(host.querySelector('[data-testid="invite-device"]')).toBeNull();
+
+    act(() => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  test("holding approve on the active connection surfaces an invite entry point that opens InviteScreen", async () => {
+    const approving: ConnectionList = {
+      activeId: "local",
+      connections: [
+        {
+          id: "local",
+          label: "Local",
+          connection: { transport: "direct", url: "ws://127.0.0.1:7777/v1/socket", token: "tok_local", scopes: ["read", "approve"] },
+        },
+      ],
+    };
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+
+    // InviteScreen mints on mount; this test is only about the switcher's
+    // gating and screen swap, so the mint itself is stubbed out rather than
+    // reaching a real daemon.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("network unavailable in test");
+    }) as unknown as typeof fetch;
+
+    act(() => {
+      root.render(<ConnectionSwitcherScreen connections={approving} onAdd={() => {}} onBack={() => {}} onSelect={() => {}} />);
+    });
+    expect(button(host, "invite-device")).not.toBeNull();
+
+    act(() => {
+      button(host, "invite-device").click();
+    });
+    expect(host.querySelector('[data-testid="invite"]')).not.toBeNull();
+
+    // Let InviteScreen's stubbed mint reject and settle before tearing down,
+    // so no promise is still in flight against an unmounted tree.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    globalThis.fetch = originalFetch;
+    act(() => {
+      root.unmount();
+    });
+    host.remove();
+  });
 });

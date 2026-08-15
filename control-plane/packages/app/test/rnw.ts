@@ -97,7 +97,21 @@ mock.module("react-native", () => ({
 }));
 
 /** `react-native-svg`'s element names, mapped onto their DOM equivalents. */
-const SVG_ELEMENTS = ["Svg", "Path", "Rect", "Circle", "Ellipse", "Line", "G", "Defs", "Mask", "ClipPath"] as const;
+const SVG_ELEMENTS = [
+  "Svg",
+  "Path",
+  "Rect",
+  "Circle",
+  "Ellipse",
+  "Line",
+  "G",
+  "Defs",
+  "Mask",
+  "ClipPath",
+  "Image",
+  "LinearGradient",
+  "Stop",
+] as const;
 
 interface SvgProps {
   children?: ReactNode;
@@ -105,15 +119,76 @@ interface SvgProps {
 }
 
 const stub: Record<string, unknown> = {};
+const SVG_TAG_OVERRIDES: Partial<Record<(typeof SVG_ELEMENTS)[number], string>> = {
+  Svg: "svg",
+  ClipPath: "clipPath",
+  LinearGradient: "linearGradient",
+};
 for (const name of SVG_ELEMENTS) {
-  const tag = name === "Svg" ? "svg" : name === "ClipPath" ? "clipPath" : name.toLowerCase();
-  const component = ({ children, ...props }: SvgProps) => createElement(tag, props, children);
+  const tag = SVG_TAG_OVERRIDES[name] ?? name.toLowerCase();
+  // `react-native-svg`'s real web build maps `testID` to `data-testid`, the
+  // same translation RNW does for its own primitives; without it, a real
+  // component built on these elements (e.g. `react-native-qrcode-svg`, which
+  // forwards its own `testID` straight to `<Svg>`) triggers React's unknown-
+  // DOM-attribute warning on every render.
+  const component = ({ children, testID, ...props }: SvgProps & { testID?: string }) =>
+    createElement(tag, testID === undefined ? props : { ...props, "data-testid": testID }, children);
   component.displayName = name;
   stub[name] = component;
 }
 stub.default = stub.Svg;
 
 mock.module("react-native-svg", () => stub);
+
+// `react-native-vision-camera` reaches into native camera hardware bun cannot
+// touch. The stub renders an inert placeholder and, critically, captures
+// whichever `codeScanner` the currently-mounted `<Camera isActive>` was given
+// so a test can drive a scan the same way `typeInto` drives a `TextInput`:
+// through the same callback the real native layer would eventually call,
+// never by reaching into `ScanScreen`'s own state.
+interface MockCodeScanner {
+  onCodeScanned: (codes: Array<{ type: string; value?: string }>, frame: { width: number; height: number }) => void;
+}
+let activeCodeScanner: MockCodeScanner | null = null;
+let cameraPermissionGranted = true;
+let cameraDeviceAvailable = true;
+
+/** Feed one decoded value to whichever `<Camera>` is currently active, as if the native scanner had just decoded it. */
+export function scanCode(value: string): void {
+  if (activeCodeScanner === null) {
+    throw new Error("no active code scanner: is <Camera isActive codeScanner=…> mounted?");
+  }
+  activeCodeScanner.onCodeScanned([{ type: "qr", value }], { width: 0, height: 0 });
+}
+
+/** Simulate the user denying (or the platform lacking) camera access/hardware for the next render. */
+export function setCameraAvailability(options: { permission?: boolean; device?: boolean }): void {
+  if (options.permission !== undefined) cameraPermissionGranted = options.permission;
+  if (options.device !== undefined) cameraDeviceAvailable = options.device;
+}
+
+/** Restore the default granted-permission, present-device, no-active-scanner state after a test. */
+export function resetCameraMock(): void {
+  activeCodeScanner = null;
+  cameraPermissionGranted = true;
+  cameraDeviceAvailable = true;
+}
+
+mock.module("react-native-vision-camera", () => ({
+  Camera: ({ codeScanner, isActive, testID }: { codeScanner?: MockCodeScanner; isActive?: boolean; testID?: string }) => {
+    activeCodeScanner = isActive === true ? (codeScanner ?? null) : null;
+    return createElement("div", { "data-testid": testID });
+  },
+  useCameraDevice: () => (cameraDeviceAvailable ? { id: "mock-back-camera", position: "back" } : undefined),
+  useCameraPermission: () => ({
+    hasPermission: cameraPermissionGranted,
+    requestPermission: () => {
+      cameraPermissionGranted = true;
+      return Promise.resolve(true);
+    },
+  }),
+  useCodeScanner: (config: MockCodeScanner) => config,
+}));
 
 // Renders nothing and answers nothing: `WebViewDriver` owns every reply
 // through its own ref handle, so a stub that pretended to navigate would be

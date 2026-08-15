@@ -20,6 +20,7 @@ import { Glyph } from "../design/icons.tsx";
 import { SafeScreen } from "../design/SafeScreen.tsx";
 import { Body, Display, Kicker, Label } from "../design/text.tsx";
 import type { Connection } from "../platform/connection.ts";
+import { ScanScreen } from "./ScanScreen.tsx";
 import { ground, ink, signal, signalWash, space, stroke, TOUCH_TARGET, type } from "../design/tokens.ts";
 
 export function PairScreen({
@@ -33,9 +34,25 @@ export function PairScreen({
 }): JSX.Element {
   const [raw, setRaw] = useState("");
   const [token, setToken] = useState("");
+  const [scanning, setScanning] = useState(false);
   const { width } = useWindowDimensions();
   const endpoint = parseEndpoint(raw);
   const ready = endpoint !== null && token.trim().length > 0;
+
+  // A scanned bundle already carries a token and an endpoint together; it
+  // saves through the same `onPair` the manual form uses below, so a scan
+  // and a paste are indistinguishable to everything downstream of this screen.
+  if (scanning) {
+    return (
+      <ScanScreen
+        onCancel={() => setScanning(false)}
+        onScanned={(connection) => {
+          setScanning(false);
+          onPair(connection);
+        }}
+      />
+    );
+  }
 
   return (
     <SafeScreen style={styles.screen} testID="pair">
@@ -56,6 +73,16 @@ export function PairScreen({
           On the machine running the daemon: ompd pair for a code, then ompd approve that code. It prints
           a token and the endpoints this device can reach. Paste both here.
         </Body>
+
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setScanning(true)}
+          style={styles.scanEntry}
+          testID="pair-scan-entry"
+        >
+          <Glyph color={ink.plain} name="qrcode" size={14} />
+          <Label color={ink.plain}>Scan a QR code instead</Label>
+        </Pressable>
 
         <Field label="Daemon endpoint" value={raw} onChange={setRaw} testID="pair-endpoint" />
         {raw.trim().length === 0 ? null : (
@@ -165,4 +192,5 @@ const styles = StyleSheet.create({
     marginTop: space.snug,
   },
   cancel: { alignItems: "center", justifyContent: "center", minHeight: TOUCH_TARGET },
+  scanEntry: { alignItems: "center", flexDirection: "row", gap: space.snug, minHeight: TOUCH_TARGET },
 });
