@@ -75,6 +75,16 @@ export class RedisBackplane implements Backplane {
       }
     });
 
+    // Only the subscriber's silent death represents a routing hole (see
+    // below): the commands client carries no standing state to lose, so its
+    // close is unremarkable. But Bun's RedisClient reports every close
+    // through this hook whether or not a handler is attached, and an
+    // unhandled one surfaces as an unhandled error between test runs rather
+    // than anything either `close()`'s try/catch or the caller can observe.
+    // A handler -- even a no-op one -- is what makes that reporting land
+    // somewhere instead of nowhere.
+    commands.onclose = () => {};
+
     // The window this closes: the process is alive and holding both websockets
     // while its subscriber connection is not. Envelopes addressed here vanish
     // with nothing to notice, so both legs of every cross-instance session

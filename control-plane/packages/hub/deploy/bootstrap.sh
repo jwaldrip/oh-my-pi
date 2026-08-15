@@ -36,12 +36,14 @@ ARTIFACT_REPO="ompd"
 SA_EMAIL="${SA}@${PROJECT}.iam.gserviceaccount.com"
 
 echo "==> project $PROJECT"
-if ! gcloud projects describe "$PROJECT" >/dev/null 2>&1; then
-  gcloud projects create "$PROJECT" \
-    --name="ompctl" \
-    --set-as-default=false
-else
+# `describe` failing means either the project doesn't exist yet or this
+# identity lacks access to a project someone else owns under this id.
+# Attempting create proves which: a real ALREADY_EXISTS is unambiguous,
+# where a bare "not found" from describe alone is not.
+if gcloud projects describe "$PROJECT" >/dev/null 2>&1; then
   echo "    already exists"
+else
+  gcloud projects create "$PROJECT" --name="ompctl"
 fi
 
 echo "==> linking billing account $BILLING_ACCOUNT_ID"
@@ -68,6 +70,14 @@ gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT" >/dev/null
     --display-name "ompctl CI deployer" \
     --description "Builds images and applies Terraform for control-plane/packages/hub and web."
 
+# IAM is eventually consistent: a service account created seconds ago can
+# still 404 the resource-manager binding call below. Wait until it is
+# actually visible rather than racing it.
+for i in $(seq 1 30); do
+  gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT" >/dev/null 2>&1 && break
+  sleep 2
+done
+
 # Scoped to what hub/main.tf actually touches. Not owner, not editor: a
 # compromised CI run should be able to redeploy this stack, not take the
 # project. iam.serviceAccountAdmin/resourcemanager.projectIamAdmin are
@@ -85,10 +95,12 @@ for ROLE in \
   roles/compute.networkAdmin \
   roles/vpcaccess.admin
 do
-  gcloud projects add-iam-policy-binding "$PROJECT" \
-    --member "serviceAccount:${SA_EMAIL}" --role "$ROLE" --quiet >/dev/null
+  for i in $(seq 1 5); do
+    gcloud projects add-iam-policy-binding "$PROJECT" \
+      --member "serviceAccount:${SA_EMAIL}" --role "$ROLE" --quiet >/dev/null 2>&1 && break
+    sleep 3
+  done
 done
-
 echo "==> artifact registry"
 gcloud artifacts repositories describe "$ARTIFACT_REPO" \
   --project "$PROJECT" --location "$REGION" >/dev/null 2>&1 || \
