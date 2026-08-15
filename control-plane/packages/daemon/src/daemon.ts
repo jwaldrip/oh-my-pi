@@ -27,7 +27,8 @@
  * nothing that was not already held. It is a convenience for someone who is
  * already the operator, never a way in for someone who is not.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { joinAssistantText, type LocalHost, type SpawnLocalHostOptions } from "@ompd/acp";
@@ -594,6 +595,13 @@ export class Ompd {
       skills: { list: listSkillCatalog },
       connectors: { list: listConnectorCatalog },
       tasks: this.#tasks,
+      syncConfig: {
+        read: () => {
+          const config = loadConfig(this.#home);
+          return { policyMode: config.policyMode, keepAwake: config.keepAwake };
+        },
+        apply: (settings) => this.#applySyncConfig(settings),
+      },
       // A rotation can be driven from any device, including a phone. The one
       // credential that also lives on disk has to follow, or `ompd rotate`
       // from the console leaves the CLI on this machine holding a token the
@@ -621,6 +629,30 @@ export class Ompd {
     });
     sendWebViewAction = (agentId, requestId, action) =>
       this.#gateway.sendWebViewAction(agentId, requestId, action);
+  }
+
+  #applySyncConfig(settings: { policyMode: OmpdConfig["policyMode"]; keepAwake: boolean }): void {
+    const path = join(this.#home, "config.json");
+    let current: Record<string, unknown> = {};
+    if (existsSync(path)) {
+      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`${path} must contain a JSON object`);
+      }
+      current = parsed as Record<string, unknown>;
+    }
+    const next = { ...current, ...settings };
+    loadConfig(this.#home, next);
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      renameSync(temp, path);
+      chmodSync(path, 0o600);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+    this.#config = { ...this.#config, ...settings };
+    this.#onLog("imported policy configuration; restart ompd to apply it to active policy and sleep guard");
   }
 
   /**

@@ -36,6 +36,7 @@ import {
   type HostSpec,
   type PersistCollabVoiceNoteInput,
   type QueuedIntent,
+  type Routine,
   type Run,
   type ServerFrame,
   type SessionLiveStatus,
@@ -255,6 +256,111 @@ export interface ConnectorCatalog {
 }
 
 /**
+ * The two persisted settings that may move between daemons. Binding, hub,
+ * binary and credential settings deliberately have no place in this surface.
+ */
+export interface SyncSettings {
+  policyMode: "strict" | "standard" | "trusted";
+  keepAwake: boolean;
+}
+
+export interface SyncConfig {
+  read(): SyncSettings;
+  apply(settings: SyncSettings): void;
+}
+const SYNC_DOCUMENT_KEYS: Record<string, true> = {
+  policyMode: true,
+  keepAwake: true,
+  routines: true,
+  skills: true,
+  connectors: true,
+};
+const SYNC_ROUTINE_KEYS: Record<string, true> = {
+  id: true,
+  name: true,
+  enabled: true,
+  trigger: true,
+  prompt: true,
+  cwd: true,
+  singleton: true,
+  timeoutSeconds: true,
+  labels: true,
+  createdAt: true,
+};
+const FORBIDDEN_SYNC_KEY = /(token|credential|bearer|authorization|process|pid|host)/i;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasForbiddenSyncField(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasForbiddenSyncField);
+  if (!isRecord(value)) return false;
+  return Object.entries(value).some(([key, child]) =>
+    (key !== "secretRef" && FORBIDDEN_SYNC_KEY.test(key)) || hasForbiddenSyncField(child),
+  );
+}
+
+function isTrigger(value: unknown): value is Routine["trigger"] {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  const keys = Object.keys(value);
+  switch (value.kind) {
+    case "manual":
+      return keys.length === 1;
+    case "interval":
+      return keys.every((key) => key === "kind" || key === "seconds") &&
+        typeof value.seconds === "number" &&
+        Number.isFinite(value.seconds);
+    case "cron":
+      return keys.every((key) => key === "kind" || key === "expression" || key === "timezone") &&
+        typeof value.expression === "string" &&
+        (value.timezone === undefined || typeof value.timezone === "string");
+    case "webhook":
+      return keys.every((key) => key === "kind" || key === "secretRef") && typeof value.secretRef === "string";
+    default:
+      return false;
+  }
+}
+
+function isSyncRoutine(value: unknown): value is SyncRoutine {
+  if (
+    !isRecord(value) ||
+    hasForbiddenSyncField(value) ||
+    Object.keys(value).some((key) => SYNC_ROUTINE_KEYS[key] !== true)
+  ) {
+    return false;
+  }
+  return (
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.enabled === "boolean" &&
+    isTrigger(value.trigger) &&
+    typeof value.prompt === "string" &&
+    typeof value.cwd === "string" &&
+    typeof value.singleton === "boolean" &&
+    (value.timeoutSeconds === undefined || typeof value.timeoutSeconds === "number") &&
+    isRecord(value.labels) &&
+    Object.values(value.labels).every((label) => typeof label === "string") &&
+    typeof value.createdAt === "string"
+  );
+}
+
+function parseSyncDocument(value: unknown): SyncDocument | null {
+  if (!isRecord(value) || hasForbiddenSyncField(value)) return null;
+  if (Object.keys(value).some((key) => SYNC_DOCUMENT_KEYS[key] !== true)) return null;
+  if (
+    (value.policyMode !== "strict" && value.policyMode !== "standard" && value.policyMode !== "trusted") ||
+    typeof value.keepAwake !== "boolean" ||
+    !Array.isArray(value.routines) ||
+    !Array.isArray(value.skills) ||
+    !Array.isArray(value.connectors) ||
+    !value.routines.every(isSyncRoutine)
+  ) {
+    return null;
+  }
+  return value as unknown as SyncDocument;
+}
+/**
  * The slice of task lifecycle the gateway needs. `create` and `cancel` take
  * the resolved `Actor` and are expected to authorize it themselves -- see
  * `TaskManager` in `../workspace/tasks.ts` -- so the scope checks below are
@@ -276,6 +382,25 @@ export interface TaskCatalog {
 export interface FederationIntentQueue {
   replica: boolean;
   syncToken: string;
+}
+
+export interface SyncRoutine {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: Routine["trigger"];
+  prompt: string;
+  cwd: string;
+  singleton: boolean;
+  timeoutSeconds?: number;
+  labels: Record<string, string>;
+  createdAt: string;
+}
+
+export interface SyncDocument extends SyncSettings {
+  routines: SyncRoutine[];
+  skills: SkillSummary[];
+  connectors: ConnectorSummary[];
 }
 
 export interface GatewayOptions {
@@ -329,6 +454,12 @@ export interface GatewayOptions {
    * feature off rather than pretending to have queued something.
    */
   routines?: RoutineRunner;
+  /**
+   * Owns the durable, non-secret configuration sync settings. The gateway
+   * asks this seam for every export and calls it before reporting an import,
+   * rather than making a constructor-time config copy authoritative.
+   */
+  syncConfig?: SyncConfig;
   /**
    * Reads and writes a session's ACP config options (mode, model). Absent,
    * `/v1/agents/:id/config` reports the feature off rather than inventing a
@@ -508,6 +639,7 @@ export class Gateway {
   #onTokenRotated: ((deviceId: string, token: string) => string | undefined) | undefined;
   #skills: SkillCatalog | undefined;
   #connectors: ConnectorCatalog | undefined;
+  #syncConfig: SyncConfig | undefined;
   #tasks: TaskCatalog | undefined;
   #sessionIndex: SessionIndex | undefined;
   #endpoints: (() => EndpointOffer[]) | undefined;
@@ -546,6 +678,7 @@ export class Gateway {
     this.#routines = opts.routines;
     this.#sessions = opts.sessions;
     this.#onTokenRotated = opts.onTokenRotated;
+    this.#syncConfig = opts.syncConfig;
     this.#skills = opts.skills;
     this.#connectors = opts.connectors;
     this.#tasks = opts.tasks;
@@ -1358,6 +1491,57 @@ export class Gateway {
         createHash("sha256").update(secret).digest("hex"),
       );
       return Response.json({ secret }, { status: 201 });
+    }
+
+    if (path === "/v1/sync/export" && req.method === "GET") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const config = this.#syncConfig;
+      const skills = this.#skills;
+      const connectors = this.#connectors;
+      if (!config || !skills || !connectors) {
+        return Response.json({ error: "sync_unavailable" }, { status: 503 });
+      }
+      try {
+        return Response.json({
+          ...config.read(),
+          routines: this.#store.listRoutines().map(({ host: _host, ...routine }) => routine),
+          skills: await skills.list(),
+          connectors: await connectors.list(),
+        } satisfies SyncDocument);
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "sync export failed" },
+          { status: 502 },
+        );
+      }
+    }
+
+    if (path === "/v1/sync/import" && req.method === "POST") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const config = this.#syncConfig;
+      if (!config) return Response.json({ error: "sync_unavailable" }, { status: 503 });
+      let body: unknown;
+      try {
+        body = await req.json();
+      } catch {
+        return Response.json({ error: "invalid_sync_document" }, { status: 400 });
+      }
+      const document = parseSyncDocument(body);
+      if (document === null) return Response.json({ error: "invalid_sync_document" }, { status: 400 });
+      try {
+        config.apply({ policyMode: document.policyMode, keepAwake: document.keepAwake });
+        for (const routine of document.routines) {
+          // Execution hosts never travel. Imported routines execute locally,
+          // through the receiving daemon's own supervisor.
+          this.#store.upsertRoutine({ ...routine, host: { kind: "local" } });
+        }
+        return Response.json({ ok: true, routines: document.routines.length });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "sync import failed" },
+          { status: 400 },
+        );
+      }
     }
 
     if (path === "/v1/routines" && req.method === "GET") {
