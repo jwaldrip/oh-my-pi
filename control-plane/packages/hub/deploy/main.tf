@@ -14,8 +14,19 @@
 # correctness mechanism. The routing table therefore lives outside the process.
 # Without this the service only works pinned to a single instance.
 
+# Backend and provider pins.
+#
+# The bucket is intentionally NOT hardcoded here (unlike cld/field-agent):
+# ompctl lives in its own GCP project rather than waldrip-net, so the bucket
+# name is supplied at `terraform init -backend-config="bucket=..."` time by
+# CI. `prefix` alone is safe to commit; it carries no account information.
 terraform {
   required_version = ">= 1.9"
+
+  backend "gcs" {
+    prefix = "hub"
+  }
+
   required_providers {
     google = {
       source  = "hashicorp/google"
