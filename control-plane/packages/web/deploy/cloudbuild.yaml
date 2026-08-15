@@ -1,0 +1,7 @@
+# Builds the ompctl web console image from the repo root (build context)
+# using the Dockerfile in this directory. See hub/deploy/cloudbuild.yaml for
+# why this exists instead of `gcloud builds submit --tag`.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "control-plane/packages/web/deploy/Dockerfile", "-t", "${_IMAGE_TAG}", "."]
+images: ["${_IMAGE_TAG}"]

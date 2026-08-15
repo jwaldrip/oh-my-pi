@@ -59,17 +59,24 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Build and push hub + web images
+        # `gcloud builds submit --tag ... --file ...` does not exist: `--tag`
+        # mode hardcodes `docker build -t TAG .` against `./Dockerfile` in the
+        # source root, with no flag to point it at a different Dockerfile
+        # path. Both images live outside the repo root, so each has its own
+        # committed Cloud Build config (control-plane/packages/*/deploy/cloudbuild.yaml)
+        # rather than one generated inline, which a `run: |` block's own YAML
+        # indentation makes impossible to terminate correctly.
         run: |
           REG="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ompd"
           gcloud builds submit \
             --project "${{ vars.GCP_PROJECT_ID }}" \
-            --tag "${REG}/hub:${{ github.sha }}" \
-            --file control-plane/packages/hub/deploy/Dockerfile \
+            --config control-plane/packages/hub/deploy/cloudbuild.yaml \
+            --substitutions "_IMAGE_TAG=${REG}/hub:${{ github.sha }}" \
             .
           gcloud builds submit \
             --project "${{ vars.GCP_PROJECT_ID }}" \
-            --tag "${REG}/web:${{ github.sha }}" \
-            --file control-plane/packages/web/deploy/Dockerfile \
+            --config control-plane/packages/web/deploy/cloudbuild.yaml \
+            --substitutions "_IMAGE_TAG=${REG}/web:${{ github.sha }}" \
             .
 
       - uses: hashicorp/setup-terraform@v3
