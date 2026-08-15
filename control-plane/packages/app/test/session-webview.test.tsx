@@ -1,13 +1,11 @@
 /**
- * When the session screen offers and withdraws its WebView.
+ * When a selected session offers and withdraws its embedded WebView target.
  *
- * Registration is a wire fact, not a local one: mounting tells the daemon this
- * device is the agent's action target, and withdrawing leaves it with none. So
- * the count matters as much as the order. A screen that re-registers on every
- * render would churn two frames per update frame of a live turn, and in the
- * window between the withdraw and the re-offer an action dispatched by the
- * agent fails with "no registered WebView" for a pane the operator never
- * closed.
+ * Registration belongs to the selected screen, not to the human's pane
+ * preference: an inbound action must be able to open the sandbox itself. The
+ * count still matters as much as the order. A screen that re-registers on
+ * every update frame creates a window where the daemon sees no target for an
+ * agent that never actually left.
  *
  * This file therefore renders for real, through react-dom into a happy-dom
  * document, rather than asserting markup: the property under test is a
@@ -20,6 +18,7 @@ import { describe, expect, test } from "bun:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Agent } from "@ompd/core/contracts";
+import type { PendingWebViewAction } from "../src/console/state.ts";
 import { EMPTY_SESSION } from "../src/session/model.ts";
 
 // Dynamic on purpose, the same way `smoke.test.tsx` loads its screens: bun
@@ -54,10 +53,11 @@ interface Harness {
   /** Render again with fresh callback identities, as a real parent does. */
   rerender: (agent?: Agent) => void;
   toggle: () => void;
+  browserIsOpen: () => boolean;
   unmount: () => void;
 }
 
-function mountScreen(): Harness {
+function mountScreen(pendingWebViewAction?: PendingWebViewAction): Harness {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -79,6 +79,7 @@ function mountScreen(): Harness {
           onCancel={() => {}}
           onDecide={() => {}}
           onDecidePlan={() => {}}
+          pendingWebViewAction={pendingWebViewAction}
           // Fresh closures every render, exactly as `Console` builds them.
           onMountWebView={() => {
             calls.push("mount");
@@ -110,6 +111,7 @@ function mountScreen(): Harness {
         control.click();
       });
     },
+    browserIsOpen: () => host.querySelector('[data-testid="session-browser"]') !== null,
     unmount: () => {
       act(() => {
         root.unmount();
@@ -121,17 +123,23 @@ function mountScreen(): Harness {
 
 
 describe("the session screen's WebView registration", () => {
-  test("a closed pane never registers", () => {
+  test("a selected screen registers even while its browser pane is closed", () => {
     const h = mountScreen();
     h.rerender();
-    expect(h.calls).toEqual([]);
+    expect(h.calls).toEqual(["mount"]);
     h.unmount();
   });
 
-  test("opening the pane registers exactly once", () => {
+  test("opening the pane does not churn the selected screen's registration", () => {
     const h = mountScreen();
     h.toggle();
     expect(h.calls).toEqual(["mount"]);
+    h.unmount();
+  });
+
+  test("an inbound action opens the sandbox even when the human left it closed", () => {
+    const h = mountScreen({ requestId: "request-1", action: { kind: "observe" } });
+    expect(h.browserIsOpen()).toBe(true);
     h.unmount();
   });
 
@@ -139,7 +147,6 @@ describe("the session screen's WebView registration", () => {
     // The defect this exists to catch: a live turn re-renders the log
     // constantly, and each of those would otherwise withdraw and re-offer.
     const h = mountScreen();
-    h.toggle();
     h.rerender();
     h.rerender({ ...AGENT, state: "busy" });
     h.rerender({ ...AGENT, lastActiveAt: "2026-01-01T00:01:00.000Z" });
@@ -147,13 +154,13 @@ describe("the session screen's WebView registration", () => {
     h.unmount();
   });
 
-  test("closing the pane withdraws it, and reopening offers it again", () => {
+  test("closing and reopening the pane leaves the target registered", () => {
     const h = mountScreen();
     h.toggle();
     h.toggle();
-    expect(h.calls).toEqual(["mount", "unmount"]);
+    expect(h.calls).toEqual(["mount"]);
     h.toggle();
-    expect(h.calls).toEqual(["mount", "unmount", "mount"]);
+    expect(h.calls).toEqual(["mount"]);
     h.unmount();
   });
 
@@ -161,15 +168,13 @@ describe("the session screen's WebView registration", () => {
     // The registration names an agent. Carrying it silently onto the next one
     // would hand a second agent a target nobody offered it.
     const h = mountScreen();
-    h.toggle();
     h.rerender({ ...AGENT, id: "agt_0000000000000002", name: "quartermaster" });
     expect(h.calls).toEqual(["mount", "unmount", "mount"]);
     h.unmount();
   });
 
-  test("leaving the screen with the pane open withdraws it", () => {
+  test("leaving the selected screen withdraws its target", () => {
     const h = mountScreen();
-    h.toggle();
     h.unmount();
     expect(h.calls).toEqual(["mount", "unmount"]);
   });

@@ -7,16 +7,15 @@
  * stream produce byte-identical state to a live daemon.
  */
 
-import { useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { AppState } from "react-native";
-import type { AgentId, ApprovalChoice, ApprovalScope, PlanReviewChoice } from "@ompd/core/contracts";
+import type { AgentId, ApprovalChoice, ApprovalScope, PlanReviewChoice, WebViewActionResult } from "@ompd/core/contracts";
 import { OmpdClient } from "@ompd/core/ompd-client";
 import type { Connection } from "../platform/connection.ts";
 import { createHubSocketFactory } from "../platform/socket.ts";
 import { apply, emptyConsole } from "./state.ts";
 import type { ConsoleState } from "./state.ts";
-import { routeWebViewAction } from "./webview.ts";
-import type { WebViewTarget } from "./webview.ts";
+import { NO_MOUNTED_WEBVIEW } from "./webview.ts";
 
 export type { WebViewTarget } from "./webview.ts";
 
@@ -28,10 +27,12 @@ export interface ConsoleActions {
   decide: (agentId: AgentId, requestId: string, choice: ApprovalChoice, scope?: ApprovalScope) => void;
   decidePlan: (agentId: AgentId, requestId: string, choice: PlanReviewChoice) => void;
   dismiss: () => void;
-  /** Offer a mounted WebView as this agent's action target. */
-  mountWebView: (agentId: AgentId, target: WebViewTarget) => void;
-  /** Withdraw it. Safe to call for an agent that never mounted one. */
+  /** Register this selected screen as the agent's live WebView target. */
+  mountWebView: (agentId: AgentId) => void;
+  /** Withdraw the selected screen's target. Safe to call after a failed mount. */
   unmountWebView: (agentId: AgentId) => void;
+  /** Deliver one matching driver result and clear its pending action. */
+  webViewResult: (agentId: AgentId, requestId: string, result: WebViewActionResult) => void;
 }
 
 /**
@@ -72,12 +73,26 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
   const backfilled = useRef(new Set<AgentId>());
 
   /**
-   * The WebView currently mounted for each agent. A ref, for the same reason
-   * `backfilled` is one: the frame handler below is registered once and must
-   * see the target that is mounted when an action lands, not the one that was
-   * mounted when the effect ran.
+   * Screen registration is separate from driver mounting. A registered screen
+   * can receive an action, open its pane, and then mount the driver that will
+   * execute it.
    */
-  const targets = useRef(new Map<AgentId, WebViewTarget>());
+  const mountedWebViews = useRef(new Set<AgentId>());
+  /**
+   * Lifecycle bookkeeping only. The action itself lives in the reducer; this
+   * map lets a late driver completion lose to an unmount or replacement.
+   */
+  const pendingWebViewRequests = useRef(new Map<AgentId, string>());
+
+  const settleWebViewAction = useCallback(
+    (agentId: AgentId, requestId: string, result: WebViewActionResult) => {
+      if (pendingWebViewRequests.current.get(agentId) !== requestId) return;
+      pendingWebViewRequests.current.delete(agentId);
+      client.webViewResult(agentId, requestId, result);
+      dispatch({ t: "webview_result", agentId, requestId });
+    },
+    [client],
+  );
 
   useEffect(() => {
     const offs = [
@@ -106,9 +121,22 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
         dispatch({ t: "unauthorized", event });
       }),
       client.on("webview_action", (event) => {
-        void routeWebViewAction(targets.current.get(event.agentId), event.action, (result) => {
-          client.webViewResult(event.agentId, event.requestId, result);
-        });
+        if (!mountedWebViews.current.has(event.agentId)) {
+          client.webViewResult(event.agentId, event.requestId, {
+            kind: "error",
+            message: NO_MOUNTED_WEBVIEW,
+          });
+          return;
+        }
+        const priorRequestId = pendingWebViewRequests.current.get(event.agentId);
+        if (priorRequestId !== undefined && priorRequestId !== event.requestId) {
+          settleWebViewAction(event.agentId, priorRequestId, {
+            kind: "error",
+            message: "a newer WebView action arrived before this request completed",
+          });
+        }
+        pendingWebViewRequests.current.set(event.agentId, event.requestId);
+        dispatch({ t: "webview_action", agentId: event.agentId, requestId: event.requestId, action: event.action });
       }),
     ];
     client.start();
@@ -116,7 +144,7 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
       for (const off of offs) off();
       client.close();
     };
-  }, [client]);
+  }, [client, settleWebViewAction]);
 
   // Phones suspend timers in the background, so a pending backoff may be hours
   // stale by the time the app is looked at again.
@@ -162,16 +190,24 @@ export function useConsole(connection: Connection): [ConsoleState, ConsoleAction
       dismiss() {
         dispatch({ t: "dismiss" });
       },
-      mountWebView(agentId, target) {
-        targets.current.set(agentId, target);
+      mountWebView(agentId) {
+        if (mountedWebViews.current.has(agentId)) return;
+        mountedWebViews.current.add(agentId);
         client.registerWebView(agentId);
       },
       unmountWebView(agentId) {
-        if (!targets.current.delete(agentId)) return;
+        if (!mountedWebViews.current.delete(agentId)) return;
+        const requestId = pendingWebViewRequests.current.get(agentId);
+        if (requestId !== undefined) {
+          settleWebViewAction(agentId, requestId, { kind: "error", message: NO_MOUNTED_WEBVIEW });
+        }
         client.unregisterWebView(agentId);
       },
+      webViewResult(agentId, requestId, result) {
+        settleWebViewAction(agentId, requestId, result);
+      },
     }),
-    [client],
+    [client, settleWebViewAction],
   );
 
   return [state, actions];
