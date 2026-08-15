@@ -87,6 +87,7 @@ for ROLE in \
   roles/run.admin \
   roles/artifactregistry.admin \
   roles/cloudbuild.builds.editor \
+  roles/serviceusage.serviceUsageConsumer \
   roles/redis.admin \
   roles/secretmanager.admin \
   roles/iam.serviceAccountAdmin \
