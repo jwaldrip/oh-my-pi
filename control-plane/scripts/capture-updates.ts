@@ -53,6 +53,30 @@ const result = await host.client.prompt(
 );
 console.log(`stopReason=${result.stopReason}`);
 
+/**
+ * `available_commands_update` advertises every command and skill the operator
+ * has installed, descriptions included. On a real machine that is a personal
+ * inventory -- clients, finances, family -- and this file's output is a
+ * committed test fixture, so capturing it verbatim publishes it. The fixture
+ * exists to pin the *shape* of each update, never the operator's command list,
+ * so the list is replaced with a synthetic one that keeps every field the
+ * renderer reads (including one entry with `input` and one without).
+ */
+const SYNTHETIC_COMMANDS: ReadonlyArray<Record<string, unknown>> = [
+  { name: "help", description: "Show the available commands" },
+  { name: "model", description: "Choose the model for this session", input: { hint: "<model-id>" } },
+  { name: "resume", description: "Resume an earlier session", input: { hint: "<session-id>" } },
+];
+
+function scrubUpdate(update: unknown): unknown {
+  if (update === null || typeof update !== "object") return update;
+  const rec = update as Record<string, unknown>;
+  if (rec.sessionUpdate !== "available_commands_update") return update;
+  return { ...rec, availableCommands: SYNTHETIC_COMMANDS };
+}
+
+for (const entry of stream) entry.update = scrubUpdate(entry.update);
+
 const byKind = new Map<string, unknown>();
 const counts = new Map<string, number>();
 for (const entry of stream) {

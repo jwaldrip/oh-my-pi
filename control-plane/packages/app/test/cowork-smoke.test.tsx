@@ -42,7 +42,7 @@ const MARKETPLACE_PLUGINS: Record<string, string[]> = {
   "haiku-method": ["haiku-start", "haiku-pickup", "haiku-zap", "haiku-gate-review"],
   darkrun: ["darkrun-new", "darkrun-pickup", "darkrun-checkpoint"],
   "im-a-cto": ["writing-coach", "story-mine", "voice-builder"],
-  phoneware: ["phoneware-billing", "phoneware-carrier", "phoneware-context"],
+  "acme-ops": ["acme-billing", "acme-carrier", "acme-context"],
   xlsx: ["xlsx"],
   pdf: ["pdf"],
   docx: ["docx"],
@@ -69,8 +69,8 @@ const CONNECTED_CONNECTORS = [
 ];
 
 const DOWN_CONNECTORS: Array<{ name: string; error: string }> = [
-  { name: "netsapiens", error: "OAuth token expired 2026-01-01T00:00:00Z" },
-  { name: "clerk-chat", error: "ECONNREFUSED 127.0.0.1:8443" },
+  { name: "vendor-voice", error: "OAuth token expired 2026-01-01T00:00:00Z" },
+  { name: "vendor-chat", error: "ECONNREFUSED 127.0.0.1:8443" },
   { name: "postiz", error: "" }, // no reason reported by the daemon
 ];
 
