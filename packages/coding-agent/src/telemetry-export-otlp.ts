@@ -161,7 +161,7 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 	}
 
 	const flushTimer = setInterval(() => {
-		flushTelemetryExport().catch(() => {});
+		void flushTelemetryExport();
 	}, FLUSH_INTERVAL_MS);
 	flushTimer.unref();
 
@@ -411,11 +411,20 @@ function logAttributeValue(value: unknown): AttributeValue | undefined {
 	return String(value);
 }
 
-/** Flush buffered spans, log records, and metrics across all registered providers. */
+/**
+ * Flush buffered spans, log records, and metrics across all registered providers.
+ *
+ * Never rejects. Callers sit on exit paths (print mode flushes before writing the
+ * model's error to stderr), and a collector that answers 5xx must not turn into the
+ * error the user sees: with `Promise.all` an `OTLPExporterError` replaced
+ * `Google API error (400): ...` wholesale and printed a stack trace into the
+ * exporter instead. Export failures are already reported through the OTel diag
+ * logger; here they are only waited for.
+ */
 export async function flushTelemetryExport(): Promise<void> {
 	const flushes: Promise<void>[] = [];
 	if (traceProvider) flushes.push(traceProvider.forceFlush());
 	if (logProvider) flushes.push(logProvider.forceFlush());
 	if (meterProvider) flushes.push(meterProvider.forceFlush());
-	await Promise.all(flushes);
+	await Promise.allSettled(flushes);
 }

@@ -94,7 +94,7 @@ describe("initTelemetryExport gating", () => {
 });
 
 describe("initTelemetryExport signals export path", () => {
-	it("exports every OTLP/proto signal and merged resource attributes", async () => {
+	it("exports every OTLP/proto signal, merges resource attributes, and survives a failing collector", async () => {
 		// Positive initialization registers process-global providers, so each
 		// scenario still runs in its own process. Starting the independent probes
 		// together avoids serially paying three Bun startup and exporter-flush waits.
@@ -102,6 +102,7 @@ describe("initTelemetryExport signals export path", () => {
 			["traces", "./otel-export-probe.ts"],
 			["logs and metrics", "./otel-signals-probe.ts"],
 			["resource attributes", "./otel-resource-probe.ts"],
+			["flush against failing collector", "./otel-flush-failure-probe.ts"],
 		] as const;
 		const results = await Promise.all(
 			probes.map(async ([name, relativePath]) => {
@@ -122,6 +123,7 @@ describe("initTelemetryExport signals export path", () => {
 			traces: 0,
 			"logs and metrics": 0,
 			"resource attributes": 0,
+			"flush against failing collector": 0,
 		});
 	}, 20_000);
 });
