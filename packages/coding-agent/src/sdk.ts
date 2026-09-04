@@ -1875,13 +1875,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return next;
 			},
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
-			getTodoPhases: () => session.getTodoPhases(),
+			// These four are read by tool `description` getters, which run while the
+			// system prompt's tool table is rendered — before `session` is assigned
+			// below — whenever inlineToolDescriptors resolves on (every Gemini model
+			// under `auto`). The workpool `yield` tool's getter hit the bare access
+			// and every Gemini subagent died at spawn with
+			// `undefined is not an object (evaluating 'rt.getWorkPoolYieldItems')`.
+			getTodoPhases: () => session?.getTodoPhases() ?? [],
 			setTodoPhases: phases => session.setTodoPhases(phases),
-			getWorkPoolYieldItems: () => session.getWorkPoolYieldItems(),
+			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
-			getCheckpointState: () => session.getCheckpointState(),
+			getCheckpointState: () => session?.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
-			getLastCompletedRewind: () => session.getLastCompletedRewind(),
+			getLastCompletedRewind: () => session?.getLastCompletedRewind(),
 			getToolChoiceQueue: () => session.toolChoiceQueue,
 			buildToolChoice: name => {
 				const m = session.model;
