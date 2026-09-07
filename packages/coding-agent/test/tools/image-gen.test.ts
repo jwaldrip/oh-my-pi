@@ -770,11 +770,111 @@ describe("imageGenTool", () => {
 		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 
 		expect(requestUrls).toEqual([
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
 			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
 			"https://api.x.ai/v1/images/generations",
 		]);
 		expect(result.details?.provider).toBe("xai");
 	});
+	it("generates with the image model the Antigravity account actually serves", async () => {
+		// This account serves gemini-3.1-flash-image; the historical default wire
+		// id is not an entity on the project, so assuming it 404s and the image
+		// silently comes from a different provider instead.
+		setImageProviderOrder(["antigravity", "xai"]);
+		const requestUrls: string[] = [];
+		let generationModel: string | undefined;
+		const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.includes(":fetchAvailableModels")) {
+				return Response.json({ imageGenerationModelIds: ["gemini-3.1-flash-image"] });
+			}
+			if (url.includes("streamGenerateContent")) {
+				generationModel = (JSON.parse(String(init?.body)) as { model?: string }).model;
+				if (generationModel !== "gemini-3.1-flash-image") {
+					return Response.json({ error: { message: "Requested entity was not found." } }, { status: 404 });
+				}
+				return new Response(
+					`data: ${JSON.stringify({
+						response: {
+							candidates: [
+								{
+									content: {
+										parts: [
+											{
+												inlineData: {
+													data: Buffer.from("antigravity-image").toString("base64"),
+													mimeType: "image/png",
+												},
+											},
+										],
+									},
+								},
+							],
+						},
+					})}\n\n`,
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			throw new Error(`Unexpected provider request: ${url}`);
+		}) as unknown as typeof fetch;
+		const ctx = createAntigravityXAIContext(undefined, fetchMock);
+
+		const result = await imageGenTool.execute("call-ag-served-model", { subject: "a fox" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(generationModel).toBe("gemini-3.1-flash-image");
+		expect(result.details?.provider).toBe("antigravity");
+		expect(result.details?.model).toBe("gemini-3.1-flash-image");
+		expect(result.details?.imageCount).toBe(1);
+		// Antigravity served it, so xAI is never asked.
+		expect(requestUrls.some(url => url.startsWith("https://api.x.ai/"))).toBe(false);
+	});
+
+	it("keeps the default Antigravity image model when discovery is unavailable", async () => {
+		setImageProviderOrder(["antigravity"]);
+		let generationModel: string | undefined;
+		const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			if (url.includes(":fetchAvailableModels")) {
+				return new Response("Forbidden", { status: 403 });
+			}
+			if (url.includes("streamGenerateContent")) {
+				generationModel = (JSON.parse(String(init?.body)) as { model?: string }).model;
+				return new Response(
+					`data: ${JSON.stringify({
+						response: {
+							candidates: [
+								{
+									content: {
+										parts: [
+											{
+												inlineData: {
+													data: Buffer.from("default-model-image").toString("base64"),
+													mimeType: "image/png",
+												},
+											},
+										],
+									},
+								},
+							],
+						},
+					})}\n\n`,
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			throw new Error(`Unexpected provider request: ${url}`);
+		}) as unknown as typeof fetch;
+		const ctx = createAntigravityXAIContext(undefined, fetchMock);
+
+		const result = await imageGenTool.execute("call-ag-default-model", { subject: "a fox" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(generationModel).toBe("gemini-3-pro-image");
+		expect(result.details?.provider).toBe("antigravity");
+		expect(result.details?.model).toBe("gemini-3-pro-image");
+	});
+
 	it("skips active providers that do not support the requested aspect ratio", async () => {
 		const requestUrls: string[] = [];
 		const fetchMock = (async (input: string | URL | Request) => {

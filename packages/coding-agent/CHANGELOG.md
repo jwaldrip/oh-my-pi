@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `generate_image` now asks Antigravity which image model the account is served instead of assuming the `gemini-3-pro-image` wire id. An account whose `imageGenerationModelIds` is `["gemini-3.1-flash-image"]` answers `404 Requested entity was not found.` for that id; the provider loop classified the 404 as a credentialed HTTP failure and continued to the next provider, so Antigravity could never generate an image and the failure was invisible whenever any later provider succeeded ([#11106](https://github.com/can1357/oh-my-pi/issues/11106)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

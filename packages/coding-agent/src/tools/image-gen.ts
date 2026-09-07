@@ -54,6 +54,7 @@ const OPENAI_IMAGE_MIME_TYPE = "image/webp";
 
 const DEFAULT_ANTIGRAVITY_ENDPOINT_PROD = "https://daily-cloudcode-pa.googleapis.com";
 const DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+const ANTIGRAVITY_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const IMAGE_SYSTEM_INSTRUCTION =
 	"You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";
 
@@ -605,6 +606,73 @@ async function findAntigravityCredentials(
 		apiKey: parsed.accessToken,
 		projectId: parsed.projectId,
 	};
+}
+function resolveAntigravityEndpoints(): string[] {
+	try {
+		const mode = settings.get("providers.antigravityEndpoint");
+		if (mode === "production") return [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
+		if (mode === "sandbox") return [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+	} catch {
+		// Settings unavailable; fall through to the auto-failover pair.
+	}
+	return [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+}
+
+/**
+ * Resolves the image model this Antigravity account is actually served.
+ *
+ * `DEFAULT_ANTIGRAVITY_MODEL` is a wire id that not every account carries. An
+ * account whose `imageGenerationModelIds` is `["gemini-3.1-flash-image"]`
+ * answers `404 Requested entity was not found.` for `gemini-3-pro-image`, and
+ * the provider loop classifies that as a credentialed HTTP failure and moves
+ * on, so Antigravity can never win a request and the 404 only ever surfaces
+ * when every other provider fails too. The account's own discovery response
+ * names the model it will serve, so ask it before generating and keep the
+ * constant as the fallback for when discovery is unavailable.
+ */
+async function resolveAntigravityImageModel(
+	bearer: string,
+	projectId: string,
+	endpoints: readonly string[],
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string> {
+	for (const endpoint of endpoints) {
+		let resp: Response;
+		try {
+			resp = await fetchImpl(`${endpoint}${ANTIGRAVITY_AVAILABLE_MODELS_PATH}`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${bearer}`,
+					"Content-Type": "application/json",
+					"User-Agent": getAntigravityUserAgent(),
+				},
+				body: JSON.stringify({ project: projectId }),
+				signal,
+			});
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			// Endpoint unreachable; try the failover endpoint.
+			continue;
+		}
+		// A credential entitled only to the sandbox endpoint answers 403 here.
+		if (!resp.ok) continue;
+		try {
+			const payload = (await resp.json()) as { imageGenerationModelIds?: unknown };
+			const ids = Array.isArray(payload.imageGenerationModelIds)
+				? payload.imageGenerationModelIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+				: [];
+			// Keep the historical default when the account still carries it, so
+			// accounts that work today keep serving the same model.
+			const model = ids.includes(DEFAULT_ANTIGRAVITY_MODEL) ? DEFAULT_ANTIGRAVITY_MODEL : ids[0];
+			if (model) return model;
+		} catch (error) {
+			if (signal?.aborted) throw error;
+		}
+		// The endpoint answered but named no image model; asking again is pointless.
+		break;
+	}
+	return DEFAULT_ANTIGRAVITY_MODEL;
 }
 
 async function findXAIImageCredentials(modelRegistry?: ModelRegistry): Promise<ImageApiKey | null> {
@@ -1343,6 +1411,10 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						}
 
 						const prompt = assemblePrompt(params);
+						const endpoints = resolveAntigravityEndpoints();
+						// Assigned inside the auth callback so discovery runs against the
+						// same (possibly rotated) credential that generates the image.
+						let antigravityModel = DEFAULT_ANTIGRAVITY_MODEL;
 						const antigravityKey: ApiKey = ctx.modelRegistry.resolver("google-antigravity", {
 							sessionId,
 							modelId: DEFAULT_ANTIGRAVITY_MODEL,
@@ -1357,26 +1429,21 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								const rotated = parseAntigravityCredentials(key);
 								const bearer = rotated?.accessToken ?? key;
 								const projectId = rotated?.projectId ?? apiKey.projectId!;
+								antigravityModel = await resolveAntigravityImageModel(
+									bearer,
+									projectId,
+									endpoints,
+									fetchImpl,
+									requestSignal,
+								);
 								const requestBody = buildAntigravityRequest(
 									prompt,
-									model,
+									antigravityModel,
 									projectId,
 									params.aspect_ratio,
 									params.image_size,
 									resolvedImages,
 								);
-
-								let endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-								try {
-									const mode = settings.get("providers.antigravityEndpoint");
-									if (mode === "production") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
-									} else if (mode === "sandbox") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-									}
-								} catch {
-									// Ignored
-								}
 
 								let resp: Response | undefined;
 								let lastError: Error | undefined;
@@ -1448,7 +1515,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								content: [{ type: "text", text: `No image data returned.${messageText}` }],
 								details: {
 									provider,
-									model,
+									model: antigravityModel,
 									imageCount: 0,
 									imagePaths: [],
 									images: [],
@@ -1461,10 +1528,15 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const imagePaths = await saveImagesToTemp(parsed.images);
 
 						return {
-							content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, responseText) }],
+							content: [
+								{
+									type: "text",
+									text: buildResponseSummary(provider, antigravityModel, imagePaths, responseText),
+								},
+							],
 							details: {
 								provider,
-								model,
+								model: antigravityModel,
 								imageCount: parsed.images.length,
 								imagePaths,
 								images: parsed.images,
