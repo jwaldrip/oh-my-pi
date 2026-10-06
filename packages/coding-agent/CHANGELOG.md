@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Fixed dead task-isolation sandboxes leaking under `~/.omp/wt`: session startup now asynchronously reaps clean sandboxes whose owning process died, postmortem cleanup removes interrupted sandboxes on normal and signal exit when they contain no unique work, `omp worktree clear` preserves sandboxes holding unmerged work unless `--force` is given, and isolation cloning no longer duplicates nested linked worktrees into `m/` ([#14566](https://github.com/can1357/oh-my-pi/pull/14566) by [@jwaldrip](https://github.com/jwaldrip)).
 - Fixed Tern's agents pill missing while a finished subagent runs again after an IRC message woke or revived it; it now counts running agents as the status-line badge does
 - Fixed browser `tab.goto`, `back`, `forward` and `reload` timing out on pages whose ad, chat or other iframe never finishes loading, although the page itself had loaded ([#14421](https://github.com/can1357/oh-my-pi/pull/14421) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the token count after a snapcompact compaction (divider and RPC result) disagreeing with the context count right after it ([#14291](https://github.com/can1357/oh-my-pi/pull/14291) by [@will-bogusz](https://github.com/will-bogusz))

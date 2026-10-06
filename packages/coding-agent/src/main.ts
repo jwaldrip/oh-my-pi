@@ -2229,7 +2229,10 @@ export async function runRootCommand(
 			// discovery arms; running these concurrently contends for the event loop and stretches
 			// every parallel arm by ~30ms. Interactive startup defers it further, behind the first
 			// frame (see `startDeferredStartupWork`), for the same reason.
-			if (!isInteractive) modelRegistry.refreshInBackground();
+			if (!isInteractive) {
+				modelRegistry.refreshInBackground();
+				void import("./cli/worktree-cli").then(m => m.triggerIsolationReap()).catch(() => {});
+			}
 			return result;
 		};
 
@@ -2465,6 +2468,7 @@ export async function runRootCommand(
 					);
 				}
 				void startBackgroundModelDiscovery?.();
+				void import("./cli/worktree-cli").then(m => m.triggerIsolationReap()).catch(() => {});
 			};
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
