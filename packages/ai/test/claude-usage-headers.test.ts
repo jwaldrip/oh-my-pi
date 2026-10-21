@@ -833,7 +833,6 @@ describe("claude paid-usage ranking state", () => {
 			limitId: "anthropic:extra",
 		});
 		expect(extraUsage?.remaining).toBeCloseTo(9.26, 10);
-
 	});
 	it("reports disabled paid usage separately from missing paid fields", async () => {
 		const report = await fetchClaudeUsageReport({
