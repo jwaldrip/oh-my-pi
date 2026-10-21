@@ -1650,7 +1650,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 }
 
-
 function usageReportMatchesCredential(report: UsageReport, credential: OAuthCredential): boolean {
 	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
 	const credentialOrg = credential.orgId?.trim().toLowerCase();
@@ -1720,4 +1719,3 @@ function findMatchingReportIndex(reports: UsageReport[], overlay: UsageReport): 
 	}
 	return -1;
 }
-

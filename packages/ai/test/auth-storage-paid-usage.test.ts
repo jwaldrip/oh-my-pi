@@ -46,7 +46,11 @@ function usageProvider(ledger: ReadonlyMap<string, LedgerEntry>): UsageProvider 
 	};
 }
 
-async function createStorage(args: { accounts: readonly string[]; policies: AuthAccountPolicies; ledger: ReadonlyMap<string, LedgerEntry> }): Promise<AuthStorage> {
+async function createStorage(args: {
+	accounts: readonly string[];
+	policies: AuthAccountPolicies;
+	ledger: ReadonlyMap<string, LedgerEntry>;
+}): Promise<AuthStorage> {
 	const storage = new AuthStorage(await SqliteAuthCredentialStore.open(":memory:"), {
 		accountPolicies: args.policies,
 		usageProviderResolver: provider => (provider === PROVIDER ? usageProvider(args.ledger) : undefined),
