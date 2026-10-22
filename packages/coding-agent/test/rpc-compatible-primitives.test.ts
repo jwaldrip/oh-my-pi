@@ -181,9 +181,18 @@ async function withRpcServer<T>(
 		}
 		throw new Error("Timed out waiting for RPC frame");
 	};
+	let callbackFailed = false;
+	let callbackFailure: unknown;
+	let childStderr = "";
+	let result!: T;
 	try {
 		await child.stdin.flush?.();
-		return await run(send, next, sendRaw);
+		try {
+			result = await run(send, next, sendRaw);
+		} catch (error) {
+			callbackFailed = true;
+			callbackFailure = error;
+		}
 	} finally {
 		try {
 			child.stdin.end();
@@ -191,8 +200,13 @@ async function withRpcServer<T>(
 		child.kill();
 		await child.exited.catch(() => {});
 		await pump.catch(() => {});
-		await stderrPromise.catch(() => {});
+		childStderr = await stderrPromise.catch(error => `Unable to collect child stderr: ${String(error)}`);
 	}
+	if (callbackFailed) {
+		const message = callbackFailure instanceof Error ? callbackFailure.message : String(callbackFailure);
+		throw new Error(`${message}\n\nRPC child stderr:\n${childStderr}`, { cause: callbackFailure });
+	}
+	return result;
 }
 
 describe("RpcWordPredictor", () => {
@@ -272,7 +286,14 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 	test("set_slow_mode rejects a non-boolean enabled before touching the persisted Claude setting", async () => {
 		await withRpcServer(async (send, next) => {
 			send({ type: "get_state", id: "slow-state" });
-			const state = (await next()).data as { slowModeSupported: unknown; slowModeScope: unknown };
+			const slowState = await next();
+			expect(slowState, JSON.stringify(slowState)).toMatchObject({
+				id: "slow-state",
+				type: "response",
+				command: "get_state",
+				success: true,
+			});
+			const state = slowState.data as { slowModeSupported: unknown; slowModeScope: unknown };
 			expect([state.slowModeSupported, state.slowModeScope]).toEqual([true, "global"]);
 			send({ type: "set_slow_mode", id: "slow-bad", enabled: "false" });
 			expect(await next()).toEqual({
@@ -323,6 +344,12 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 			expect(setOff.success).toBe(true);
 			send({ type: "get_state", id: "state-off" });
 			const stateOff = await next();
+			expect(stateOff, JSON.stringify(stateOff)).toMatchObject({
+				id: "state-off",
+				type: "response",
+				command: "get_state",
+				success: true,
+			});
 			expect((stateOff.data as { thinkingLevel: unknown }).thinkingLevel).toBe("off");
 
 			// Command discovery stays an OMP dialect: the Pi-spelled alias is
@@ -371,6 +398,12 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 
 			send({ type: "get_state", id: "after-malformed" });
 			const ok = await next();
+			expect(ok, JSON.stringify(ok)).toMatchObject({
+				id: "after-malformed",
+				type: "response",
+				command: "get_state",
+				success: true,
+			});
 			expect(ok.id).toBe("after-malformed");
 			expect(ok.success).toBe(true);
 		});
