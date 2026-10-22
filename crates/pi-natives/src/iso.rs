@@ -148,8 +148,8 @@ pub async fn iso_start(
 	let resolved = kind.map_or_else(BackendKind::native, from_napi_kind);
 	let lower_path = std::path::PathBuf::from(lower);
 	let merged_path = std::path::PathBuf::from(merged);
-	let exclude_paths = pi_iso::normalize_exclude_paths(exclude_paths.unwrap_or_default())
-		.map_err(to_napi_error)?;
+	let exclude_paths =
+		pi_iso::normalize_exclude_paths(exclude_paths.unwrap_or_default()).map_err(to_napi_error)?;
 	tokio::task::spawn_blocking(move || {
 		pi_iso::backend(resolved).start_with_exclusions(&lower_path, &merged_path, &exclude_paths)
 	})

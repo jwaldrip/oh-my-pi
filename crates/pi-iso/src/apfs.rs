@@ -158,8 +158,8 @@ mod imp {
 		for entry in fs::read_dir(src_dir)
 			.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src_dir.display())))?
 		{
-			let entry =
-				entry.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src_dir.display())))?;
+			let entry = entry
+				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src_dir.display())))?;
 			let src = entry.path();
 			let relative = src.strip_prefix(root).map_err(|_| {
 				IsoError::other(format!(
@@ -178,15 +178,20 @@ mod imp {
 				continue;
 			}
 			let dst = dst_dir.join(entry.file_name());
-			if file_type.is_dir() && exclude_paths.iter().any(|excluded| excluded.starts_with(relative)) {
+			if file_type.is_dir()
+				&& exclude_paths
+					.iter()
+					.any(|excluded| excluded.starts_with(relative))
+			{
 				clone_excluding(&src, &dst, root, exclude_paths)?;
 			} else {
 				cow::clonefile(&src, &dst, CLONE_NOFOLLOW)
 					.map_err(|err| clone_error(&src, &dst, &err))?;
 			}
 		}
-		fs::set_permissions(dst_dir, source_permissions)
-			.map_err(|err| IsoError::other(format!("set permissions on {}: {err}", dst_dir.display())))?;
+		fs::set_permissions(dst_dir, source_permissions).map_err(|err| {
+			IsoError::other(format!("set permissions on {}: {err}", dst_dir.display()))
+		})?;
 		Ok(())
 	}
 
@@ -340,20 +345,15 @@ mod tests {
 			fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
 		}
 
-		let result = backend().start_with_exclusions(
-			&lower,
-			&merged,
-			&[PathBuf::from("private/ancestor/discard")],
-		);
+		let result = backend()
+			.start_with_exclusions(&lower, &merged, &[PathBuf::from("private/ancestor/discard")]);
 		if matches!(result, Err(crate::IsoError::Unavailable(_))) {
 			let _ = fs::remove_dir_all(root);
 			return;
 		}
 		result.unwrap();
 
-		let mode = |path: &std::path::Path| {
-			fs::metadata(path).unwrap().permissions().mode() & 0o777
-		};
+		let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
 		assert_eq!(mode(&lower), 0o700);
 		assert_eq!(mode(&merged), 0o700);
 		assert_eq!(mode(&merged.join("private/ancestor")), 0o700);

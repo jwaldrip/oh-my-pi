@@ -35,7 +35,9 @@ pub fn canonical_existing_dir(
 /// Reject roots, parent traversal, and duplicate or overlapping paths so a
 /// caller cannot make a copy backend escape its source or create ambiguous
 /// filtering rules.
-pub fn normalize_relative_subtrees(paths: impl IntoIterator<Item = String>) -> IsoResult<Vec<PathBuf>> {
+pub fn normalize_relative_subtrees(
+	paths: impl IntoIterator<Item = String>,
+) -> IsoResult<Vec<PathBuf>> {
 	let mut normalized = Vec::new();
 	for raw in paths {
 		let path = Path::new(&raw);
@@ -43,7 +45,10 @@ pub fn normalize_relative_subtrees(paths: impl IntoIterator<Item = String>) -> I
 		for component in path.components() {
 			match component {
 				Component::Normal(part) => relative.push(part),
-				Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+				Component::CurDir
+				| Component::ParentDir
+				| Component::RootDir
+				| Component::Prefix(_) => {
 					return Err(IsoError::other(format!(
 						"isolation exclusion must be a normalized relative subtree: {raw:?}"
 					)));
@@ -51,15 +56,16 @@ pub fn normalize_relative_subtrees(paths: impl IntoIterator<Item = String>) -> I
 			}
 		}
 		if relative.as_os_str().is_empty() {
-			return Err(IsoError::other(
-				"isolation exclusion must name a non-empty relative subtree",
-			));
+			return Err(IsoError::other("isolation exclusion must name a non-empty relative subtree"));
 		}
 		normalized.push(relative);
 	}
 	normalized.sort();
 	for (index, path) in normalized.iter().enumerate() {
-		if normalized[..index].iter().any(|earlier| path.starts_with(earlier)) {
+		if normalized[..index]
+			.iter()
+			.any(|earlier| path.starts_with(earlier))
+		{
 			return Err(IsoError::other(format!(
 				"isolation exclusions must be disjoint relative subtrees: {}",
 				path.display()
@@ -71,7 +77,9 @@ pub fn normalize_relative_subtrees(paths: impl IntoIterator<Item = String>) -> I
 
 /// Whether `relative` is the named excluded subtree or lies below it.
 pub fn is_excluded_subtree(relative: &Path, exclude_paths: &[PathBuf]) -> bool {
-	exclude_paths.iter().any(|excluded| relative.starts_with(excluded))
+	exclude_paths
+		.iter()
+		.any(|excluded| relative.starts_with(excluded))
 }
 
 /// Creates `merged`'s parent and clears whatever is at `merged` with `remove`,
@@ -197,12 +205,10 @@ mod tests {
 
 	#[test]
 	fn normalizes_disjoint_relative_exclusion_subtrees() {
-		let paths = normalize_relative_subtrees(vec!["apps/web/.verify".to_owned(), "scratch".to_owned()])
-			.expect("valid disjoint paths");
-		assert_eq!(
-			paths,
-			vec![PathBuf::from("apps/web/.verify"), PathBuf::from("scratch")]
-		);
+		let paths =
+			normalize_relative_subtrees(vec!["apps/web/.verify".to_owned(), "scratch".to_owned()])
+				.expect("valid disjoint paths");
+		assert_eq!(paths, vec![PathBuf::from("apps/web/.verify"), PathBuf::from("scratch")]);
 		assert!(is_excluded_subtree(Path::new("apps/web/.verify/run"), &paths));
 		assert!(!is_excluded_subtree(Path::new("apps/web/runtime"), &paths));
 	}

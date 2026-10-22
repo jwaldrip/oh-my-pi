@@ -121,7 +121,14 @@ mod imp {
 		let result = (|| {
 			fs::create_dir(merged)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-			tree::copy_dir_contents_with_exclusions(&lower, merged, &lower, skip, exclude_paths, &Reflink)?;
+			tree::copy_dir_contents_with_exclusions(
+				&lower,
+				merged,
+				&lower,
+				skip,
+				exclude_paths,
+				&Reflink,
+			)?;
 			Reflink.finish_dir(&lower, merged)
 		})();
 		if result.is_err() {

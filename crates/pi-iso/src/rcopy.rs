@@ -11,7 +11,10 @@
 //! file-system magic; the caller pays full filesystem-copy cost up front
 //! and an `rm -rf` on teardown.
 
-use std::{fs::FileType, path::{Path, PathBuf}};
+use std::{
+	fs::FileType,
+	path::{Component, Path, PathBuf},
+};
 
 use async_trait::async_trait;
 
@@ -132,8 +135,8 @@ fn git_worktree_remove(merged: &Path) -> IsoResult<()> {
 /// worktree at `merged`. Four passes mirror what `git status` would report at
 /// `lower` while retaining ordinary ignored runtime input:
 ///
-///  1. **Staged:** `git diff --binary --cached` from lower, applied to both
-///     the index and the working tree of `merged`.
+///  1. **Staged:** `git diff --binary --cached` from lower, applied to both the
+///     index and the working tree of `merged`.
 ///  2. **Unstaged:** `git diff --binary` from lower, applied to the working
 ///     tree only.
 ///  3. **Untracked:** every path listed by `git ls-files --others
@@ -159,32 +162,61 @@ fn seed_dirty_state(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> I
 	}
 
 	let untracked = git_capture(lower, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-	copy_listed_paths(lower, merged, &untracked, exclude_paths)?;
 	let ignored = git_capture(
 		lower,
 		["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"].as_slice(),
 	)?;
-	copy_listed_paths(lower, merged, &ignored, exclude_paths)
+	let paths = normalize_listed_paths(&[&untracked, &ignored])?;
+	copy_listed_paths(lower, merged, &paths, exclude_paths)
+}
+
+/// Normalize Git's NUL-delimited path lists once, then drop entries already
+/// covered by an ancestor. `--directory` may collapse an ignored tree while a
+/// second list names a child, and copying both would overwrite a first-copy
+/// readonly Git object.
+fn normalize_listed_paths(lists: &[&[u8]]) -> IsoResult<Vec<PathBuf>> {
+	let mut paths = Vec::new();
+	for list in lists {
+		for path_bytes in list.split(|byte| *byte == 0) {
+			if path_bytes.is_empty() {
+				continue;
+			}
+			let raw = std::str::from_utf8(path_bytes)
+				.map_err(|err| IsoError::other(format!("git listed path is not valid UTF-8: {err}")))?;
+			let mut normalized = PathBuf::new();
+			for component in Path::new(raw).components() {
+				match component {
+					Component::Normal(part) => normalized.push(part),
+					Component::CurDir => {},
+					Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+						return Err(IsoError::other(format!(
+							"git listed path is not a relative subtree: {raw:?}"
+						)));
+					},
+				}
+			}
+			if !normalized.as_os_str().is_empty() {
+				paths.push(normalized);
+			}
+		}
+	}
+	paths.sort_unstable();
+	paths.dedup_by(|path, ancestor| path.starts_with(ancestor));
+	Ok(paths)
 }
 
 fn copy_listed_paths(
 	lower: &Path,
 	merged: &Path,
-	paths: &[u8],
+	paths: &[PathBuf],
 	exclude_paths: &[PathBuf],
 ) -> IsoResult<()> {
-	for path_bytes in paths.split(|byte| *byte == 0) {
-		if path_bytes.is_empty() {
-			continue;
-		}
-		let relative = std::str::from_utf8(path_bytes)
-			.map_err(|err| IsoError::other(format!("untracked path is not valid UTF-8: {err}")))?;
-		let relative_path = Path::new(relative);
+	for relative_path in paths {
 		if tree::is_excluded_subtree(relative_path, exclude_paths) {
 			continue;
 		}
-		let src = lower.join(relative);
-		let dst = merged.join(relative);
+		let src = lower.join(relative_path);
+		let dst = merged.join(relative_path);
 		if let Some(parent) = dst.parent() {
 			std::fs::create_dir_all(parent)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", parent.display())))?;
@@ -467,6 +499,17 @@ mod tests {
 			.file_type();
 		assert!(file_type.is_symlink_dir(), "expected a directory link, got {file_type:?}");
 		assert_eq!(fs::read(link.join("inner.txt")).expect("read through link"), b"inner");
+	}
+
+	#[test]
+	fn listed_paths_copy_each_covered_subtree_once() {
+		let paths = normalize_listed_paths(&[
+			b"apps/web/.verify/\0runtime/.env\0".as_slice(),
+			b"apps/web/.verify/same-origin-unrelated/.git/objects/9d/object\0runtime/.env\0"
+				.as_slice(),
+		])
+		.expect("relative git paths");
+		assert_eq!(paths, vec![PathBuf::from("apps/web/.verify"), PathBuf::from("runtime/.env")]);
 	}
 
 	struct TempDirGuard(PathBuf);

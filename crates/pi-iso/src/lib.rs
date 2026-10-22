@@ -25,7 +25,11 @@
 	allow(unused_imports, dead_code, reason = "platform without an isolation backend")
 )]
 
-use std::{ffi::OsStr, fmt, path::{Path, PathBuf}};
+use std::{
+	ffi::OsStr,
+	fmt,
+	path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 
@@ -298,12 +302,7 @@ pub trait IsolationBackend: Send + Sync {
 
 	/// Clone `lower` into `merged` copy-on-write, omitting named top-level
 	/// entries.
-	fn clone_tree(
-		&self,
-		_lower: &Path,
-		_merged: &Path,
-		_skip: &[&OsStr],
-	) -> IsoResult<()> {
+	fn clone_tree(&self, _lower: &Path, _merged: &Path, _skip: &[&OsStr]) -> IsoResult<()> {
 		Err(IsoError::unavailable(format!("{} cannot clone a directory tree in place", self.kind())))
 	}
 
