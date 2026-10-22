@@ -14,13 +14,14 @@ jobs:
       name: Trace pi-shell cancellation fixture
       runs-on: ubuntu-22.04
       env:
-         TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
          TEST_NAME: shell::tests::cancellation_keeps_output_open_for_a_term_trap_that_writes
       steps:
          - uses: actions/checkout@v4
 
          - name: Prepare diagnostic evidence directory
            shell: bash
+           env:
+              TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
            run: |
               set -euo pipefail
               mkdir -p "$TRACE_ARTIFACT_DIR"
@@ -50,6 +51,7 @@ jobs:
            shell: bash
            env:
               BAZELRC: ${{ steps.cache.outputs.rc }}
+              TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
            run: |
               set -euo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -79,6 +81,8 @@ jobs:
            if: always()
            id: collect
            shell: bash
+           env:
+              TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
            run: |
               set -euo pipefail
               trace_archive=""
@@ -124,6 +128,7 @@ jobs:
            env:
               BAZEL_EXIT_CODE: ${{ steps.run_fixture.outputs.bazel_exit_code }}
               TRACE_PRESENT: ${{ steps.collect.outputs.trace_present }}
+              TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
            run: |
               set -euo pipefail
               log="$TRACE_ARTIFACT_DIR/bazel-test.log"
