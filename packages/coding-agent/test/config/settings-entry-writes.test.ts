@@ -146,6 +146,39 @@ describe("Settings entry-level writes", () => {
 		};
 	}
 
+	it("temporary proof: retained fixture stays isolated across a suspended write", async () => {
+		const first = fixtureForTest();
+		const ready = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		let second: SettingsFixture | undefined;
+		const pending = (async () => {
+			const settings = await first.load({}, { retry: { fallbackChains: { smol: ["overlay/cheap"] } } });
+			ready.resolve();
+			await resume.promise;
+			cfgRetryFallbackChains.setEntry(settings, "slow", ["user/slow-fallback"]);
+			await settings.flush();
+			return { disk: await first.readConfig(), effective: cfgRetryFallbackChains.get(settings) };
+		})();
+		try {
+			await ready.promise;
+			second = createFixture();
+			await second.load({ retry: { fallbackChains: { slow: ["user/slow"] } } }, {});
+			fixture = second;
+			resume.resolve();
+			const observed = await pending;
+			const secondDisk = await second.readConfig();
+			process.stdout.write(`${JSON.stringify({ first: first.configPath, second: second.configPath, observed, secondDisk })}\n`);
+			expect(observed.disk).toEqual({ retry: { fallbackChains: { slow: ["user/slow-fallback"] } } });
+			expect(observed.effective).toEqual({ smol: ["overlay/cheap"], slow: ["user/slow-fallback"] });
+			expect(secondDisk).toEqual({ retry: { fallbackChains: { slow: ["user/slow"] } } });
+		} finally {
+			resume.resolve();
+			await pending.catch(() => {});
+			fixture = first;
+			if (second && ownedRoots.delete(second.tempDir)) second.tempDir.removeSync();
+		}
+	});
+
 	it("persists one fallback chain without the chains a --config overlay supplies", async () => {
 		const testFixture = fixtureForTest();
 		const settings = await testFixture.load({}, { retry: { fallbackChains: { smol: ["overlay/cheap"] } } });
