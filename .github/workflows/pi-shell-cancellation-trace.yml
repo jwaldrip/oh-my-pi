@@ -32,16 +32,13 @@ jobs:
          - id: cache
            uses: ./.github/actions/bazel-cache
 
-         - name: Install trace tools
+         - name: Install strace
            shell: bash
            run: |
               set -euo pipefail
-              packages=()
-              command -v strace >/dev/null 2>&1 || packages+=(strace)
-              command -v unzip >/dev/null 2>&1 || packages+=(unzip)
-              if [ "${#packages[@]}" -gt 0 ]; then
+              if ! command -v strace >/dev/null 2>&1; then
                 sudo apt-get update
-                sudo apt-get install --yes "${packages[@]}"
+                sudo apt-get install --yes strace
               fi
               strace --version
 
@@ -64,7 +61,9 @@ jobs:
                 --test_arg=--exact \
                 --test_arg="$TEST_NAME" \
                 --test_arg=--nocapture \
-                --run_under="/bin/sh -c ': \"\${TEST_UNDECLARED_OUTPUTS_DIR:?Bazel did not provide TEST_UNDECLARED_OUTPUTS_DIR}\" && test -w \"\$TEST_UNDECLARED_OUTPUTS_DIR\" && exec /usr/bin/strace -f -ttt -T -s 256 -e trace=%process,%signal,openat,write,close,clock_nanosleep,nanosleep -o \"\$TEST_UNDECLARED_OUTPUTS_DIR/cancellation.strace\" \"\$@\"' cancellation-trace-run-under" \
+                --sandbox_writable_path="$TRACE_ARTIFACT_DIR" \
+                --test_env=PI_SHELL_TRACE_DIR="$TRACE_ARTIFACT_DIR" \
+                --run_under="/bin/sh -c ': \"\${PI_SHELL_TRACE_DIR:?Bazel did not provide PI_SHELL_TRACE_DIR}\" && test -w \"\$PI_SHELL_TRACE_DIR\" && exec /usr/bin/strace -f -ttt -T -s 256 -e trace=%process,%signal,openat,write,close,clock_nanosleep,nanosleep -o \"\$PI_SHELL_TRACE_DIR/cancellation.strace\" \"\$@\"' cancellation-trace-run-under" \
                 2>&1 | tee "$TRACE_ARTIFACT_DIR/bazel-test.log"
               statuses=("${PIPESTATUS[@]}")
               bazel_status="${statuses[0]}"
@@ -77,7 +76,7 @@ jobs:
                 exit "$tee_status"
               fi
 
-         - name: Collect Bazel test outputs
+         - name: Confirm direct trace output
            if: always()
            id: collect
            shell: bash
@@ -85,31 +84,11 @@ jobs:
               TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
            run: |
               set -euo pipefail
-              trace_archive=""
-              target_log=""
-              if [ -d bazel-testlogs ]; then
-                trace_archive="$(find bazel-testlogs -type f -name outputs.zip -print -quit)"
-                target_log="$(find bazel-testlogs -type f -path '*pi-shell_test*' -name test.log -print -quit)"
-              fi
-              if [ -n "$target_log" ]; then
-                cp "$target_log" "$TRACE_ARTIFACT_DIR/pi-shell-test.log"
-              fi
-              if [ -n "$trace_archive" ]; then
-                cp "$trace_archive" "$TRACE_ARTIFACT_DIR/undeclared-outputs.zip"
-                mkdir -p "$TRACE_ARTIFACT_DIR/undeclared-outputs"
-                if ! unzip -o -qq "$trace_archive" -d "$TRACE_ARTIFACT_DIR/undeclared-outputs"; then
-                  echo "::error::could not extract Bazel undeclared outputs"
-                fi
-              fi
-              trace=""
-              if [ -d "$TRACE_ARTIFACT_DIR/undeclared-outputs" ]; then
-                trace="$(find "$TRACE_ARTIFACT_DIR/undeclared-outputs" -type f -name cancellation.strace -print -quit)"
-              fi
-              if [ -n "$trace" ] && [ -s "$trace" ]; then
-                cp "$trace" "$TRACE_ARTIFACT_DIR/cancellation.strace"
+              trace="$TRACE_ARTIFACT_DIR/cancellation.strace"
+              if [ -s "$trace" ]; then
                 echo "trace_present=true" >> "$GITHUB_OUTPUT"
               else
-                echo "::error::strace output was not retained in Bazel undeclared outputs"
+                echo "::error::strace did not write a readable trace to the sandbox-writable artifact directory"
                 echo "trace_present=false" >> "$GITHUB_OUTPUT"
               fi
 
