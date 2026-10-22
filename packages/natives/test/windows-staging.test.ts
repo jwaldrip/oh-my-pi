@@ -24,10 +24,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	cleanupStaleNativeVersions,
 	getAddonFilenames,
 	initLoaderContext,
-	prepareNativeVersionDir,
 	resolveLoaderCandidates,
 	shouldStageNodeModulesAddon,
 } from "../native/loader-state.js";
@@ -172,29 +170,125 @@ describe("windows native addon staging", () => {
 		}
 	});
 
-	it("removes only older version directories after the current native version loads", async () => {
+	it("retains old cache files while reusing a populated private current cache", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
-		const currentMajor = Number.parseInt(packageJson.version, 10);
-		const futureVersion = `${currentMajor + 1}.0.0`;
-		const staleVersion = "15.10.11";
-		const freshVersion = "15.10.12";
+		const nativeDir = path.join(import.meta.dir, "../native");
+		const platformTag = `${process.platform}-${process.arch}`;
+		const addonFilenames = getAddonFilenames({
+			tag: platformTag,
+			arch: process.arch,
+			variant: process.arch === "x64" ? "baseline" : null,
+		});
+		const availableNativeFiles = new Set(await fs.readdir(nativeDir));
+		const currentAddonFilenames = addonFilenames.filter(filename => availableNativeFiles.has(filename));
+		const versionedDir = path.join(nativesDir, packageJson.version);
+		const oldFiles = [
+			path.join(nativesDir, "15.10.11", "held.node"),
+			path.join(nativesDir, "18.12.5", "retained.node"),
+		];
+		const oldVersionDirs = oldFiles.map(filePath => path.dirname(filePath));
+
 		try {
-			await fs.mkdir(path.join(nativesDir, staleVersion));
-			await fs.mkdir(path.join(nativesDir, freshVersion));
-			await fs.mkdir(path.join(nativesDir, packageJson.version));
-			await fs.mkdir(path.join(nativesDir, futureVersion));
-			await fs.mkdir(path.join(nativesDir, "not-a-version"));
-			await Bun.write(path.join(nativesDir, "README.txt"), "not a version directory");
-			await fs.utimes(path.join(nativesDir, staleVersion), new Date(0), new Date(0));
-			await fs.utimes(path.join(nativesDir, freshVersion), new Date(0), new Date(0));
-			prepareNativeVersionDir(path.join(nativesDir, freshVersion));
-
-			const removed = cleanupStaleNativeVersions({ nativesDir, currentVersion: packageJson.version });
-
-			expect(removed.map(filePath => path.basename(filePath))).toEqual([staleVersion]);
-			expect((await fs.readdir(nativesDir)).sort()).toEqual(
-				["README.txt", freshVersion, packageJson.version, futureVersion, "not-a-version"].sort(),
+			expect(currentAddonFilenames.length).toBeGreaterThan(0);
+			await fs.mkdir(versionedDir, { recursive: true });
+			await Promise.all(
+				currentAddonFilenames.map(filename =>
+					fs.copyFile(path.join(nativeDir, filename), path.join(versionedDir, filename)),
+				),
 			);
+			await Promise.all(
+				oldFiles.map(async (filePath, index) => {
+					await fs.mkdir(path.dirname(filePath), { recursive: true });
+					await fs.writeFile(filePath, `older cache ${index}`);
+				}),
+			);
+			await Promise.all(oldVersionDirs.map(dir => fs.utimes(dir, new Date(0), new Date(0))));
+
+			const oldFilesBefore = await Promise.all(
+				oldFiles.map(async filePath => ({
+					filePath,
+					bytes: await fs.readFile(filePath),
+					stat: await fs.stat(filePath),
+				})),
+			);
+			const currentAddonsBefore = new Map(
+				await Promise.all(
+					currentAddonFilenames.map(async filename => {
+						const filePath = path.join(versionedDir, filename);
+						return [filePath, await fs.stat(filePath)] as const;
+					}),
+				),
+			);
+			const heldOldFile = await fs.open(oldFiles[0], "r");
+
+			try {
+				// This covers only already-populated caches under the patched process's
+				// private root. First-writer races and old processes using the default
+				// root are separate compatibility paths.
+				const loaderStatePath = path.join(import.meta.dir, "../native/loader-state.js");
+				// The child must load after its isolated environment is installed, so
+				// this test intentionally imports the loader dynamically.
+				const loadCurrentAddon = async () => {
+					const child = Bun.spawn(
+						[
+							process.execPath,
+							"--eval",
+							`(async () => {
+								const { loadNative, nativeAddonStatus } = await import(${JSON.stringify(loaderStatePath)});
+								loadNative();
+								const status = nativeAddonStatus();
+								if (!status) throw new Error("native addon did not report a successful load");
+								process.stdout.write(status.path);
+							})().catch(error => {
+								console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+								process.exitCode = 1;
+							});`,
+						],
+						{
+							env: {
+								...process.env,
+								PI_COMPILED: "1",
+								PI_NATIVES_DIR: nativesDir,
+								PI_NATIVE_VARIANT: process.arch === "x64" ? "baseline" : "",
+								__PI_NATIVE_VARIANT_CACHE: "",
+							},
+							stdout: "pipe",
+							stderr: "pipe",
+						},
+					);
+					const [exitCode, stdout, stderr] = await Promise.all([
+						child.exited,
+						new Response(child.stdout).text(),
+						new Response(child.stderr).text(),
+					]);
+					expect(exitCode, stderr).toBe(0);
+					return stdout.trim();
+				};
+
+				const firstLoad = await loadCurrentAddon();
+				const concurrentLoads = await Promise.all([loadCurrentAddon(), loadCurrentAddon()]);
+				const repeatedLoad = await loadCurrentAddon();
+				for (const loadedPath of [firstLoad, ...concurrentLoads, repeatedLoad]) {
+					expect(currentAddonsBefore.has(loadedPath)).toBe(true);
+				}
+
+				for (const [filePath, before] of currentAddonsBefore) {
+					const after = await fs.stat(filePath);
+					expect(after.ino).toBe(before.ino);
+					expect(after.nlink).toBe(before.nlink);
+				}
+				for (const { filePath, bytes, stat } of oldFilesBefore) {
+					expect(await fs.readFile(filePath)).toEqual(bytes);
+					const after = await fs.stat(filePath);
+					expect(after.ino).toBe(stat.ino);
+					expect(after.nlink).toBe(stat.nlink);
+				}
+				expect((await fs.readdir(nativesDir)).sort()).toEqual(
+					["15.10.11", "18.12.5", packageJson.version].sort(),
+				);
+			} finally {
+				await heldOldFile.close();
+			}
 		} finally {
 			await fs.rm(nativesDir, { recursive: true, force: true });
 		}

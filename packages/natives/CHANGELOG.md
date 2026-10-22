@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed filtered isolation materialization omitting only explicitly verified duplicate checkout subtrees before filesystem copy, mount, or snapshot fallback.
+- Native startup no longer prunes prior version cache directories, so patched sessions leave older runtimes' addon files alone.
 
 ## [18.12.5] - 2026-10-21
 

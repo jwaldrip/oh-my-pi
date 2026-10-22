@@ -193,73 +193,13 @@ export function resolveLoaderCandidates({
 
 // =========================================================================
 
-function parseReleaseVersion(version) {
-	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
-}
-
-function isOlderReleaseVersion(candidate, current) {
-	const candidateParts = parseReleaseVersion(candidate);
-	const currentParts = parseReleaseVersion(current);
-	if (!candidateParts || !currentParts) return false;
-	for (let index = 0; index < candidateParts.length; index++) {
-		if (candidateParts[index] !== currentParts[index]) {
-			return candidateParts[index] < currentParts[index];
-		}
-	}
-	return false;
-}
-
-// A concurrently starting older OMP binary creates or refreshes this directory
-// before extracting its addon. Keep fresh directories long enough for that
-// startup to finish; a later launch can reclaim them once they are genuinely
-// stale.
-const NATIVE_CACHE_CLEANUP_GRACE_MS = 10 * 60_000;
-
 /**
- * Create a version cache directory and refresh its activity timestamp before
- * extraction or staging begins. Recursive mkdir does not update the mtime of
- * an existing directory, so the explicit touch is what protects interrupted
- * or partially populated caches from concurrent cleanup.
+ * Create a version cache directory before extraction or staging begins.
  *
  * @param {string} versionedDir
  */
 export function prepareNativeVersionDir(versionedDir) {
 	fs.mkdirSync(versionedDir, { recursive: true });
-	const now = new Date();
-	fs.utimesSync(versionedDir, now, now);
-}
-
-/**
- * Remove version-pinned native cache directories older than the loaded package.
- * Best-effort by design: permission errors and concurrent processes must not
- * abort startup after the native addon has already loaded successfully.
- *
- * @param {{ nativesDir: string; currentVersion: string }} input
- * @returns {string[]}
- */
-export function cleanupStaleNativeVersions({ nativesDir, currentVersion }) {
-	const removed = [];
-	let entries;
-	try {
-		entries = fs.readdirSync(nativesDir, { withFileTypes: true });
-	} catch {
-		return removed;
-	}
-
-	for (const entry of entries) {
-		if (!entry.isDirectory() || !isOlderReleaseVersion(entry.name, currentVersion)) continue;
-		const targetPath = path.join(nativesDir, entry.name);
-		try {
-			const stat = fs.statSync(targetPath);
-			if (Date.now() - stat.mtimeMs < NATIVE_CACHE_CLEANUP_GRACE_MS) continue;
-			fs.rmSync(targetPath, { recursive: true, force: true });
-			removed.push(targetPath);
-		} catch {
-			// Stale caches are opportunistic cleanup only.
-		}
-	}
-	return removed;
 }
 
 // Side-effectful loader. Everything below runs only when `loadNative()` is
@@ -737,9 +677,8 @@ function installNativeTokioRuntime(bindings) {
 /**
  * Point the addon at `<nativesDir>/grammars`, where the agent downloads the
  * tree-sitter grammars that load as WebAssembly on demand (pi-utils
- * `getNativeGrammarsDir()` resolves the same path). Version cleanup never
- * touches it: only release-version directories are removed. Older addons
- * predating the export link every grammar and need no directory.
+ * `getNativeGrammarsDir()` resolves the same path). Older addons predating
+ * the export link every grammar and need no directory.
  */
 function configureGrammarDir(bindings, nativesDir) {
 	const setGrammarDir = bindings.__ompSetGrammarDir;
@@ -881,7 +820,6 @@ export function loadNative() {
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
-	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;
 		} catch (err) {
