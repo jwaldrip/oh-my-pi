@@ -77,13 +77,6 @@ export interface NativeLoaderContext {
 
 export function initLoaderContext(overrides?: InitLoaderContextOverrides): NativeLoaderContext;
 
-export interface CleanupStaleNativeVersionsInput {
-	nativesDir: string;
-	currentVersion: string;
-}
-
-export function cleanupStaleNativeVersions(input: CleanupStaleNativeVersionsInput): string[];
-
 export function prepareNativeVersionDir(versionedDir: string): void;
 
 export interface ExtractEmbeddedAddonsInput {
