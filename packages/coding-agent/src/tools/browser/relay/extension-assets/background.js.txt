@@ -1,4 +1,4 @@
-// extension/debugger-ownership.ts
+// packages/browser-relay/extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
     if (!target.attached || target.tabId === undefined)
@@ -13,7 +13,7 @@ async function ownedDebuggerTabs(targets, probe) {
   return owned.filter((tabId) => tabId !== undefined);
 }
 
-// extension/background.ts
+// packages/browser-relay/extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
@@ -309,8 +309,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "omp-relay-keepalive")
     connect();
 });
-chrome.storage.onChanged.addListener((_changes, areaName) => {
-  if (areaName !== "local")
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !("port" in changes) && !("token" in changes))
     return;
   ws?.close();
   connect();
