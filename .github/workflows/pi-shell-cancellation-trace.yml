@@ -2,6 +2,20 @@ name: Trace pi-shell cancellation fixture
 
 on:
    workflow_dispatch:
+      inputs:
+         operation:
+            description: Diagnostic producer to run
+            required: true
+            type: choice
+            options:
+               - trace
+               - darwin-addon
+            default: trace
+         candidate_ref:
+            description: Immutable candidate commit SHA for darwin-addon
+            required: true
+            type: string
+            default: c84b6e5615089d82b6c767a1843654b2f9e0c5ef
 
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -12,6 +26,7 @@ permissions:
 jobs:
    trace_cancellation:
       name: Trace pi-shell cancellation fixture
+      if: github.repository == 'jwaldrip/oh-my-pi' && github.ref == 'refs/heads/verify/cancellation-trace-20261022' && inputs.operation == 'trace'
       runs-on: ubuntu-22.04
       env:
          TEST_NAME: shell::tests::cancellation_keeps_output_open_for_a_term_trap_that_writes
@@ -133,3 +148,93 @@ jobs:
                 echo "::error::the traced fixture failed with Bazel exit code $BAZEL_EXIT_CODE"
                 exit 1
               fi
+   build_candidate_darwin_arm64:
+      if: github.repository == 'jwaldrip/oh-my-pi' && github.ref == 'refs/heads/verify/cancellation-trace-20261022' && inputs.operation == 'darwin-addon'
+      name: Build candidate Darwin arm64 native addon
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              ref: ${{ inputs.candidate_ref }}
+              fetch-depth: 1
+              persist-credentials: false
+
+         - name: Validate candidate source and native cache inputs
+           id: provenance
+           shell: bash
+           env:
+              REQUESTED_CANDIDATE: ${{ inputs.candidate_ref }}
+              NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
+           run: |
+              set -euo pipefail
+              if ! [[ "$REQUESTED_CANDIDATE" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                echo "::error::candidate_ref must be an immutable 40-character commit SHA"
+                exit 1
+              fi
+              candidate_sha="$(git rev-parse --verify HEAD)"
+              if [ "${candidate_sha,,}" != "${REQUESTED_CANDIDATE,,}" ]; then
+                echo "::error::checkout resolved $candidate_sha instead of $REQUESTED_CANDIDATE"
+                exit 1
+              fi
+              if [ -z "$NATIVE_INPUTS_HASH" ]; then
+                echo "::error::native cache-input hash is empty"
+                exit 1
+              fi
+              echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+              echo "native_inputs_hash=$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
+
+         - id: cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Build Darwin arm64 native addon
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.cache.outputs.rc }}
+           run: |
+              set -eo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              : > "$RUNNER_TEMP/bazel-build.log"
+              bazelisk --bazelrc="$BAZELRC" build "//:natives-darwin-arm64" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+
+         - name: Stage candidate addon and provenance
+           id: stage
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.cache.outputs.rc }}
+              CANDIDATE_SHA: ${{ steps.provenance.outputs.candidate_sha }}
+              NATIVE_INPUTS_HASH: ${{ steps.provenance.outputs.native_inputs_hash }}
+           run: |
+              set -euo pipefail
+              source_node=bazel-bin/natives-darwin-arm64/pi_natives.darwin-arm64.node
+              if [ ! -s "$source_node" ]; then
+                echo "::error::Bazel did not produce $source_node"
+                exit 1
+              fi
+              artifact_dir="$RUNNER_TEMP/candidate-darwin-arm64"
+              mkdir -p "$artifact_dir"
+              cp -L "$source_node" "$artifact_dir/pi_natives.darwin-arm64.node"
+              cp "$RUNNER_TEMP/bazel-build.log" "$artifact_dir/bazel-build.log"
+              node_sha256="$(sha256sum "$artifact_dir/pi_natives.darwin-arm64.node" | cut -d' ' -f1)"
+              bazelrc_sha256="$(sha256sum "$BAZELRC" | cut -d' ' -f1)"
+              toolchain_sha256="$(sha256sum rust-toolchain.toml | cut -d' ' -f1)"
+              cat > "$artifact_dir/provenance.json" <<EOF
+              {
+                "candidate_sha": "$CANDIDATE_SHA",
+                "native_inputs_hash": "$NATIVE_INPUTS_HASH",
+                "target": "//:natives-darwin-arm64",
+                "bazel_config": "ci",
+                "bazelrc_sha256": "$bazelrc_sha256",
+                "rust_toolchain_sha256": "$toolchain_sha256",
+                "artifact": "pi_natives.darwin-arm64.node",
+                "artifact_sha256": "$node_sha256"
+              }
+              EOF
+              echo "artifact_sha256=$node_sha256" >> "$GITHUB_OUTPUT"
+
+         - name: Upload candidate Darwin arm64 native addon
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: candidate-darwin-arm64-${{ steps.provenance.outputs.candidate_sha }}
+              path: ${{ runner.temp }}/candidate-darwin-arm64
+              if-no-files-found: error
+              retention-days: 7
