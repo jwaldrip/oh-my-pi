@@ -706,14 +706,22 @@ describe("pickElectronTarget", () => {
 	);
 
 	test("names the refused CDP websocket instead of reporting [object ErrorEvent]", async () => {
+		let deadEndpointRequested = false;
 		// `/json/version` answers, but its debugger websocket refuses the upgrade.
 		const cdp = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
-			fetch: (request, server) =>
-				new URL(request.url).pathname === "/json/version"
-					? Response.json({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.port}/devtools/browser/gone` })
-					: new Response("gone", { status: 404 }),
+			fetch: (request, server) => {
+				const { pathname } = new URL(request.url);
+				if (pathname === "/json/version") {
+					return Response.json({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.port}/devtools/browser/gone` });
+				}
+				if (pathname === "/devtools/browser/gone") {
+					deadEndpointRequested = true;
+					return new Response("gone", { status: 404 });
+				}
+				return new Response("unexpected CDP request", { status: 500 });
+			},
 		});
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -728,11 +736,10 @@ describe("pickElectronTarget", () => {
 					{ session, toolCallId: "refused-websocket" },
 				),
 			);
-			expect(error).toBeInstanceOf(Error);
+			expect(deadEndpointRequested).toBe(true);
 			expect(error).toMatchObject({
-				message: expect.stringContaining(
-					`WebSocket connection to 'ws://127.0.0.1:${cdp.port}/devtools/browser/gone'`,
-				),
+				message: `WebSocket connection to 'ws://127.0.0.1:${cdp.port}/devtools/browser/gone' failed: Unexpected server response: 404`,
+				cause: expect.objectContaining({ message: "Unexpected server response: 404" }),
 			});
 		} finally {
 			cdp.stop(true);
