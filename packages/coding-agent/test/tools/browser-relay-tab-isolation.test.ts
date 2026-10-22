@@ -67,6 +67,8 @@ interface RelayBrowser {
 	browser: Browser;
 	/** The relay extension's service worker, for reading Chrome's own tab state. */
 	extension: WebWorker;
+	/** Stable identity Chrome persisted for this browser's relay extension. */
+	relayInstanceId: string;
 }
 
 interface RelayFixture extends RelayBrowser {
@@ -75,7 +77,108 @@ interface RelayFixture extends RelayBrowser {
 	origin: string;
 	/** Another Chromium with its own profile and the same extension, as a second browser on the relay. */
 	launchBrowser(): Promise<RelayBrowser>;
+	/** Wait until this browser identity's extension completed another relay hello. */
+	waitForRelayConnection(instanceId: string, after?: number): Promise<void>;
+	relayConnectionCount(instanceId: string): number;
 	close(): Promise<void>;
+}
+
+interface RelayConnectionTracker {
+	log(message: string, data?: Record<string, unknown>): void;
+	count(instanceId: string): number;
+	wait(instanceId: string, after?: number): Promise<void>;
+}
+
+function createRelayConnectionTracker(
+	log?: (message: string, data?: Record<string, unknown>) => void,
+): RelayConnectionTracker {
+	const counts = new Map<string, number>();
+	const waiters = new Map<string, Set<() => void>>();
+	return {
+		log(message, data) {
+			log?.(message, data);
+			const instanceId = data?.instanceId;
+			if (message !== "extension connected" || typeof instanceId !== "string") return;
+			counts.set(instanceId, (counts.get(instanceId) ?? 0) + 1);
+			for (const waiter of waiters.get(instanceId) ?? []) waiter();
+		},
+		count(instanceId) {
+			return counts.get(instanceId) ?? 0;
+		},
+		wait(instanceId, after = 0) {
+			if ((counts.get(instanceId) ?? 0) > after) return Promise.resolve();
+			const ready = Promise.withResolvers<void>();
+			const waiter = () => {
+				if ((counts.get(instanceId) ?? 0) > after) ready.resolve();
+			};
+			const instanceWaiters = waiters.get(instanceId) ?? new Set<() => void>();
+			instanceWaiters.add(waiter);
+			waiters.set(instanceId, instanceWaiters);
+			if ((counts.get(instanceId) ?? 0) > after) ready.resolve();
+			return ready.promise.finally(() => {
+				instanceWaiters.delete(waiter);
+				if (instanceWaiters.size === 0) waiters.delete(instanceId);
+			});
+		},
+	};
+}
+
+async function readRelayInstanceId(extension: WebWorker): Promise<string> {
+	const instanceId = await extension.evaluate(`
+		(() => {
+			const { promise, resolve, reject } = Promise.withResolvers();
+			const finish = value => {
+				chrome.storage.onChanged.removeListener(onChanged);
+				resolve(value);
+			};
+			const onChanged = (changes, areaName) => {
+				const change = changes.relayInstanceId;
+				if (areaName !== "local" || typeof change?.newValue !== "string" || change.newValue.length === 0) return;
+				finish(change.newValue);
+			};
+			chrome.storage.onChanged.addListener(onChanged);
+			chrome.storage.local.get({ relayInstanceId: "" }).then(({ relayInstanceId }) => {
+				if (typeof relayInstanceId === "string" && relayInstanceId.length > 0) finish(relayInstanceId);
+			}, error => {
+				chrome.storage.onChanged.removeListener(onChanged);
+				reject(error);
+			});
+			return promise;
+		})()
+	`);
+	if (typeof instanceId !== "string" || instanceId.length === 0) throw new Error("Missing relay extension instance ID");
+	return instanceId;
+}
+
+async function writeRelayStorage(
+	extension: WebWorker,
+	key: "relayInstanceId" | "token",
+	value: string,
+): Promise<void> {
+	await extension.evaluate(`
+		(() => {
+			const { promise, resolve, reject } = Promise.withResolvers();
+			const key = ${JSON.stringify(key)};
+			const value = ${JSON.stringify(value)};
+			const onChanged = (changes, areaName) => {
+				if (areaName !== "local" || !(key in changes)) return;
+				chrome.storage.onChanged.removeListener(onChanged);
+				resolve();
+			};
+			chrome.storage.onChanged.addListener(onChanged);
+			chrome.storage.local.set({ [key]: value }).catch(error => {
+				chrome.storage.onChanged.removeListener(onChanged);
+				reject(error);
+			});
+			return promise;
+		})()
+	`);
+}
+
+async function relaySocketCloseCount(extension: WebWorker): Promise<number> {
+	const count = await extension.evaluate("globalThis.testRelaySocketCloseCount ?? 0");
+	if (typeof count !== "number") throw new Error("Relay socket close count is not a number");
+	return count;
 }
 
 /**
@@ -88,7 +191,8 @@ async function launchRelayFixture(
 	log?: (message: string, data?: Record<string, unknown>) => void,
 ): Promise<RelayFixture> {
 	const port = await findFreeCdpPort();
-	const server = startRelayServer({ port, group: false, log });
+	const relayConnections = createRelayConnectionTracker(log);
+	const server = startRelayServer({ port, group: false, log: relayConnections.log });
 	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-isolation-"));
 	const pages = Bun.serve({
 		port: 0,
@@ -126,7 +230,7 @@ async function launchRelayFixture(
 			await browser.waitForTarget(target => target.type() === "service_worker", { timeout: 15_000 })
 		).worker();
 		if (!extension) throw new Error("Missing relay extension worker");
-		return { browser, extension };
+		return { browser, extension, relayInstanceId: await readRelayInstanceId(extension) };
 	}
 	try {
 		for (const file of ["manifest.json", "options.html", "options.js"]) {
@@ -149,22 +253,30 @@ chrome.tabs.remove = tabId => {
 	}
 	return removeTab(tabId);
 };
+const closeRelaySocket = WebSocket.prototype.close;
+globalThis.testRelaySocketCloseCount = 0;
+WebSocket.prototype.close = function (...args) {
+	globalThis.testRelaySocketCloseCount++;
+	return closeRelaySocket.apply(this, args);
+};
 chrome.storage.local.set({ port: ${port} }).then(() => {
 ${background}
 });`,
 		);
-		const { browser, extension } = await launchBrowser();
+		const relayBrowser = await launchBrowser();
 		const cdpUrl = `http://127.0.0.1:${port}`;
-		// Finish the extension hello before the native CDP client attaches to the sentinel.
+		// Finish this browser's own extension hello before the native CDP client attaches to the sentinel.
+		await relayConnections.wait(relayBrowser.relayInstanceId);
 		const outcome = await waitForRelayExtension(cdpUrl);
 		if (outcome !== "ready") throw new Error(`Relay fixture handshake failed: ${outcome}`);
 		return {
-			browser,
-			extension,
+			...relayBrowser,
 			server,
 			cdpUrl,
 			origin: `http://127.0.0.1:${pages.port}`,
 			launchBrowser,
+			waitForRelayConnection: relayConnections.wait,
+			relayConnectionCount: relayConnections.count,
 			close,
 		};
 	} catch (error) {
@@ -262,14 +374,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 	}, 60_000);
 
 	it("opens a default tab in the browser of the tab omp used last, not the first selected one", async () => {
-		const secondHello = Promise.withResolvers<void>();
-		let hellos = 0;
-		const fixture = await launchRelayFixture(message => {
-			if (message === "extension connected" && ++hellos === 2) secondHello.resolve();
-		});
+		const fixture = await launchRelayFixture();
 		// The first browser shows the first selected tab, which a new tab would otherwise follow.
+		const humanUrl = `${fixture.origin}/human`;
 		const human = await fixture.browser.newPage();
-		await human.goto(`${fixture.origin}/human`);
+		await human.goto(humanUrl);
 		await human.bringToFront();
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const names = [
@@ -283,16 +392,56 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			// Borrowing waits until the relay lists the tab, so the first browser's selected tab is listed first.
 			const inFirst = await acquireTab(names[0]!, relay, { target: "Human sentinel", timeoutMs: 15_000 });
 			const other = await fixture.launchBrowser();
+			await fixture.waitForRelayConnection(other.relayInstanceId);
 			// The relay announces a browser's tabs to connected clients only as they change after its hello.
-			await secondHello.promise;
 			await (await other.browser.newPage()).goto(`${fixture.origin}/first`);
 			const inSecond = await acquireTab(names[1]!, relay, { target: "First", timeoutMs: 15_000 });
 			expect(browserOf(inSecond.tab.targetId)).not.toBe(browserOf(inFirst.tab.targetId));
 			const owned = await acquireTab(names[2]!, relay, { url: `${fixture.origin}/second`, timeoutMs: 15_000 });
 			expect(browserOf(owned.tab.targetId)).toBe(browserOf(inSecond.tab.targetId));
+			expect(human.isClosed()).toBeFalse();
+			expect(human.url()).toBe(humanUrl);
+			expect(await human.title()).toBe("Human sentinel");
 		} finally {
 			for (const name of names) await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
+	it("keeps the relay connection for identity storage writes and redials it for relay settings", async () => {
+		const fixture = await launchRelayFixture();
+		const humanUrl = `${fixture.origin}/human`;
+		const human = await fixture.browser.newPage();
+		await human.goto(humanUrl);
+		await human.bringToFront();
+		try {
+			const connections = fixture.relayConnectionCount(fixture.relayInstanceId);
+			const closes = await relaySocketCloseCount(fixture.extension);
+			expect(connections).toBeGreaterThan(0);
+
+			await writeRelayStorage(
+				fixture.extension,
+				"relayInstanceId",
+				`${fixture.relayInstanceId}-independent-write`,
+			);
+			expect(await relaySocketCloseCount(fixture.extension)).toBe(closes);
+			expect(fixture.relayConnectionCount(fixture.relayInstanceId)).toBe(connections);
+			expect(fixture.server.bridge.ready).toBeTrue();
+			expect(human.isClosed()).toBeFalse();
+			expect(human.url()).toBe(humanUrl);
+			expect(await human.title()).toBe("Human sentinel");
+
+			const redialed = fixture.waitForRelayConnection(fixture.relayInstanceId, connections);
+			await writeRelayStorage(fixture.extension, "token", crypto.randomUUID());
+			expect(await relaySocketCloseCount(fixture.extension)).toBe(closes + 1);
+			await redialed;
+			expect(fixture.relayConnectionCount(fixture.relayInstanceId)).toBe(connections + 1);
+			expect(fixture.server.bridge.ready).toBeTrue();
+			expect(human.isClosed()).toBeFalse();
+			expect(human.url()).toBe(humanUrl);
+			expect(await human.title()).toBe("Human sentinel");
+		} finally {
 			await fixture.close();
 		}
 	}, 60_000);
