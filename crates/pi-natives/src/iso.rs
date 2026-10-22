@@ -135,9 +135,11 @@ pub fn iso_resolve(preferred: Option<IsoBackendKind>) -> task::Promise<IsoResolv
 }
 
 /// Materialise `merged` as a writable view of `lower` using the requested
-/// backend. `kind` defaults to the native backend. `exclude_paths` contains
-/// disjoint normalized relative subtrees that must be omitted before a backend
-/// allocates a copy, snapshot, or mount.
+/// backend.
+///
+/// `kind` defaults to the native backend. `exclude_paths` contains disjoint
+/// normalized relative subtrees omitted before a backend allocates a copy,
+/// snapshot, or mount.
 #[napi]
 pub async fn iso_start(
 	kind: Option<IsoBackendKind>,
