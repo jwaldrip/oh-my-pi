@@ -1,0 +1,151 @@
+name: Trace pi-shell cancellation fixture
+
+on:
+   workflow_dispatch:
+
+env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+   contents: read
+
+jobs:
+   trace_cancellation:
+      name: Trace pi-shell cancellation fixture
+      runs-on: ubuntu-22.04
+      env:
+         TRACE_ARTIFACT_DIR: ${{ runner.temp }}/pi-shell-cancellation-trace
+         TEST_NAME: shell::tests::cancellation_keeps_output_open_for_a_term_trap_that_writes
+      steps:
+         - uses: actions/checkout@v4
+
+         - name: Prepare diagnostic evidence directory
+           shell: bash
+           run: |
+              set -euo pipefail
+              mkdir -p "$TRACE_ARTIFACT_DIR"
+              : > "$TRACE_ARTIFACT_DIR/bazel-test.log"
+
+         - uses: ./.github/actions/bun-install
+
+         - id: cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Install trace tools
+           shell: bash
+           run: |
+              set -euo pipefail
+              packages=()
+              command -v strace >/dev/null 2>&1 || packages+=(strace)
+              command -v unzip >/dev/null 2>&1 || packages+=(unzip)
+              if [ "${#packages[@]}" -gt 0 ]; then
+                sudo apt-get update
+                sudo apt-get install --yes "${packages[@]}"
+              fi
+              strace --version
+
+         - name: Run exact cancellation fixture under strace
+           id: run_fixture
+           continue-on-error: true
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              # Trace only this test process tree. Its existing test deadlines bound
+              # output without truncating the process and signal events under study.
+              set +e
+              bazelisk --bazelrc="$BAZELRC" test //crates/pi-shell:pi-shell_test \
+                --cache_test_results=no \
+                --test_output=all \
+                --test_arg=--exact \
+                --test_arg="$TEST_NAME" \
+                --test_arg=--nocapture \
+                --run_under="/bin/sh -c ': \"\${TEST_UNDECLARED_OUTPUTS_DIR:?Bazel did not provide TEST_UNDECLARED_OUTPUTS_DIR}\" && test -w \"\$TEST_UNDECLARED_OUTPUTS_DIR\" && exec /usr/bin/strace -f -ttt -T -s 256 -e trace=%process,%signal,openat,write,close,clock_nanosleep,nanosleep -o \"\$TEST_UNDECLARED_OUTPUTS_DIR/cancellation.strace\" \"\$@\"' cancellation-trace-run-under" \
+                2>&1 | tee "$TRACE_ARTIFACT_DIR/bazel-test.log"
+              statuses=("${PIPESTATUS[@]}")
+              bazel_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              set -e
+              printf '%s\n' "$bazel_status" > "$TRACE_ARTIFACT_DIR/bazel-exit-code"
+              echo "bazel_exit_code=$bazel_status" >> "$GITHUB_OUTPUT"
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain the complete Bazel test log"
+                exit "$tee_status"
+              fi
+
+         - name: Collect Bazel test outputs
+           if: always()
+           id: collect
+           shell: bash
+           run: |
+              set -euo pipefail
+              trace_archive=""
+              target_log=""
+              if [ -d bazel-testlogs ]; then
+                trace_archive="$(find bazel-testlogs -type f -name outputs.zip -print -quit)"
+                target_log="$(find bazel-testlogs -type f -path '*pi-shell_test*' -name test.log -print -quit)"
+              fi
+              if [ -n "$target_log" ]; then
+                cp "$target_log" "$TRACE_ARTIFACT_DIR/pi-shell-test.log"
+              fi
+              if [ -n "$trace_archive" ]; then
+                cp "$trace_archive" "$TRACE_ARTIFACT_DIR/undeclared-outputs.zip"
+                mkdir -p "$TRACE_ARTIFACT_DIR/undeclared-outputs"
+                if ! unzip -o -qq "$trace_archive" -d "$TRACE_ARTIFACT_DIR/undeclared-outputs"; then
+                  echo "::error::could not extract Bazel undeclared outputs"
+                fi
+              fi
+              trace=""
+              if [ -d "$TRACE_ARTIFACT_DIR/undeclared-outputs" ]; then
+                trace="$(find "$TRACE_ARTIFACT_DIR/undeclared-outputs" -type f -name cancellation.strace -print -quit)"
+              fi
+              if [ -n "$trace" ] && [ -s "$trace" ]; then
+                cp "$trace" "$TRACE_ARTIFACT_DIR/cancellation.strace"
+                echo "trace_present=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::error::strace output was not retained in Bazel undeclared outputs"
+                echo "trace_present=false" >> "$GITHUB_OUTPUT"
+              fi
+
+         - name: Upload cancellation trace
+           if: always()
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: pi-shell-cancellation-strace
+              path: ${{ runner.temp }}/pi-shell-cancellation-trace
+              if-no-files-found: error
+              retention-days: 14
+
+         - name: Verify diagnostic evidence
+           if: always()
+           shell: bash
+           env:
+              BAZEL_EXIT_CODE: ${{ steps.run_fixture.outputs.bazel_exit_code }}
+              TRACE_PRESENT: ${{ steps.collect.outputs.trace_present }}
+           run: |
+              set -euo pipefail
+              log="$TRACE_ARTIFACT_DIR/bazel-test.log"
+              if [ ! -s "$log" ]; then
+                echo "::error::the Bazel invocation produced no retained test log"
+                exit 1
+              fi
+              runs="$(grep -Ec '^[[:space:]]*running 1 test[[:space:]]*$' "$log" || true)"
+              fixture_lines="$(grep -Fc "test $TEST_NAME ..." "$log" || true)"
+              if [ "$runs" -ne 1 ] || [ "$fixture_lines" -ne 1 ]; then
+                echo "::error::expected exactly one execution of $TEST_NAME; found running-1-test=$runs and fixture-lines=$fixture_lines"
+                exit 1
+              fi
+              if [ "$TRACE_PRESENT" != true ]; then
+                echo "::error::the fixture ran without a readable strace artifact"
+                exit 1
+              fi
+              if [ -z "$BAZEL_EXIT_CODE" ]; then
+                echo "::error::the Bazel exit status was not recorded"
+                exit 1
+              fi
+              if [ "$BAZEL_EXIT_CODE" -ne 0 ]; then
+                echo "::error::the traced fixture failed with Bazel exit code $BAZEL_EXIT_CODE"
+                exit 1
+              fi
