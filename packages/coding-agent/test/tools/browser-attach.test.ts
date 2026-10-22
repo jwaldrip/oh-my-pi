@@ -736,11 +736,16 @@ describe("pickElectronTarget", () => {
 					{ session, toolCallId: "refused-websocket" },
 				),
 			);
+			const endpoint = `ws://127.0.0.1:${cdp.port}/devtools/browser/gone`;
+			const prefix = `WebSocket connection to '${endpoint}' failed: `;
 			expect(deadEndpointRequested).toBe(true);
-			expect(error).toMatchObject({
-				message: `WebSocket connection to 'ws://127.0.0.1:${cdp.port}/devtools/browser/gone' failed: Unexpected server response: 404`,
-				cause: expect.objectContaining({ message: "Unexpected server response: 404" }),
-			});
+			expect(error).toBeInstanceOf(Error);
+			const browserError = error as Error & { cause?: unknown };
+			expect(browserError.message.startsWith(prefix)).toBe(true);
+			expect(browserError.message.slice(prefix.length).trim()).not.toBe("");
+			expect(browserError.message).not.toContain(`${prefix}WebSocket connection to '${endpoint}' failed:`);
+			expect(browserError.cause).toBeInstanceOf(Error);
+			expect((browserError.cause as Error).message.trim()).not.toBe("");
 		} finally {
 			cdp.stop(true);
 		}

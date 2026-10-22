@@ -750,7 +750,7 @@ diff --git a/lib/puppeteer/node/NodeWebSocketTransport.js b/lib/puppeteer/node/N
 index a1af6472f4fb346978e3bd073ddb34963b129da2..951b5968947edaf24775716ccbab31d3fe98fabe 100644
 --- a/lib/puppeteer/node/NodeWebSocketTransport.js
 +++ b/lib/puppeteer/node/NodeWebSocketTransport.js
-@@ -25,7 +25,11 @@ export class NodeWebSocketTransport {
+@@ -25,7 +25,13 @@ export class NodeWebSocketTransport {
              ws.addEventListener('open', () => {
                  return resolve(new NodeWebSocketTransport(ws));
              });
@@ -758,7 +758,9 @@ index a1af6472f4fb346978e3bd073ddb34963b129da2..951b5968947edaf24775716ccbab31d3
 +            // Include the endpoint and handshake failure: the raw ErrorEvent
 +            // stringifies to "[object ErrorEvent]" wherever it surfaces.
 +            ws.addEventListener('error', event => {
-+                reject(new Error(`WebSocket connection to '${ws.url}' failed: ${event.message}`, { cause: event.error }));
++                const prefix = `WebSocket connection to '${ws.url}' failed:`;
++                const message = event.message.startsWith(prefix) ? event.message : `${prefix} ${event.message}`;
++                reject(new Error(message, { cause: event.error }));
 +            });
          });
      }
