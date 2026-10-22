@@ -755,11 +755,11 @@ index a1af6472f4fb346978e3bd073ddb34963b129da2..951b5968947edaf24775716ccbab31d3
                  return resolve(new NodeWebSocketTransport(ws));
              });
 -            ws.addEventListener('error', reject);
-            // Include the endpoint and handshake failure: the raw ErrorEvent
-            // stringifies to "[object ErrorEvent]" wherever it surfaces.
-            ws.addEventListener('error', event => {
-                reject(new Error(`WebSocket connection to '${ws.url}' failed: ${event.message}`, { cause: event.error }));
-            });
++            // Include the endpoint and handshake failure: the raw ErrorEvent
++            // stringifies to "[object ErrorEvent]" wherever it surfaces.
++            ws.addEventListener('error', event => {
++                reject(new Error(`WebSocket connection to '${ws.url}' failed: ${event.message}`, { cause: event.error }));
++            });
          });
      }
      #ws;
