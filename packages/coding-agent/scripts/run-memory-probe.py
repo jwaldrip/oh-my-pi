@@ -327,7 +327,7 @@ def main() -> int:
                 if kill_owned_group(child.pid, initial.start, expected_group):
                     outcome = "deadline_killed"
                 return_code = child.wait(timeout=5)
-
+        rows, dropped = probe_trace(stdout_path)
         report = {
             "schemaVersion": 1,
             "outcome": outcome,
@@ -345,8 +345,10 @@ def main() -> int:
                 "resident": peak_resident,
             },
             "samples": [asdict(sample) for sample in samples],
-            "stdout": bounded_text(stdout_path),
-            "stderr": bounded_text(stderr_path),
+            "probeRows": rows,
+            "probeRowsDropped": dropped,
+            "probeStdoutBytes": stdout_path.stat().st_size,
+            "probeStderrBytes": stderr_path.stat().st_size,
         }
         args.report.write_text(json.dumps(report, separators=(",", ":")) + "\n")
 
