@@ -11,6 +11,7 @@ const identityFiles = [
 	"packages/ai/src/providers/openai-responses.ts",
 	"packages/ai/src/utils/openai-http.ts",
 	"packages/ai/src/utils/event-stream.ts",
+	"packages/agent/src/agent-loop.ts",
 	"packages/coding-agent/src/modes/controllers/event-controller.ts",
 	"packages/coding-agent/src/modes/controllers/tool-args-reveal.ts",
 	"packages/coding-agent/src/modes/interactive-mode.ts",

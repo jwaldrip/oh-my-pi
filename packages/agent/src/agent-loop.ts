@@ -116,6 +116,59 @@ export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
 
+export type ProviderPreparationPhase =
+	| "after-transform-context"
+	| "after-convert-to-llm"
+	| "after-normalize-messages"
+	| "after-append-log-sync"
+	| "after-context-build"
+	| "after-transform-provider-context"
+	| "context-ready";
+
+export type ProviderPreparationObserver = (
+	phase: ProviderPreparationPhase,
+	sourceMessageCount: number,
+	convertedMessageCount: number,
+	providerMessageCount: number,
+	toolCount: number,
+) => void;
+
+let activeProviderPreparationObserver: ProviderPreparationObserver | undefined;
+
+/**
+ * Installs scalar-only preparation accounting for one controlled process. The
+ * observer receives counts only, never messages, prompts, tools, or payloads.
+ */
+export function beginProviderPreparationProbe(observer: ProviderPreparationObserver): () => void {
+	if (activeProviderPreparationObserver !== undefined) {
+		throw new Error("a provider preparation probe is already active");
+	}
+	activeProviderPreparationObserver = observer;
+	return () => {
+		if (activeProviderPreparationObserver === observer) activeProviderPreparationObserver = undefined;
+	};
+}
+
+function markProviderPreparation(
+	phase: ProviderPreparationPhase,
+	sourceMessageCount: number,
+	convertedMessageCount: number,
+	providerMessageCount: number,
+	toolCount: number,
+): void {
+	try {
+		activeProviderPreparationObserver?.(
+			phase,
+			sourceMessageCount,
+			convertedMessageCount,
+			providerMessageCount,
+			toolCount,
+		);
+	} catch {
+		// A diagnostic observer must not alter provider delivery.
+	}
+}
+
 /**
  * Cap on consecutive re-samples triggered by a non-terminal stop
  * (`stopDetails.type === "pause_turn"`) without an intervening tool call. Each
@@ -1941,15 +1994,31 @@ async function prepareProviderCall(
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
+	markProviderPreparation("after-transform-context", messages.length, 0, 0, context.tools?.length ?? 0);
 
 	const llmMessages = await config.convertToLlm(messages);
+	markProviderPreparation("after-convert-to-llm", messages.length, llmMessages.length, 0, context.tools?.length ?? 0);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
+	markProviderPreparation(
+		"after-normalize-messages",
+		messages.length,
+		llmMessages.length,
+		normalizedMessages.length,
+		context.tools?.length ?? 0,
+	);
 	const ownedDialect: Dialect | undefined =
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
+		markProviderPreparation(
+			"after-append-log-sync",
+			messages.length,
+			llmMessages.length,
+			normalizedMessages.length,
+			context.tools?.length ?? 0,
+		);
 		llmContext = config.appendOnlyContext.build(context, {
 			intentTracing: !!config.intentTracing,
 			pruneToolDescriptions,
@@ -1964,9 +2033,23 @@ async function prepareProviderCall(
 			}),
 		};
 	}
+	markProviderPreparation(
+		"after-context-build",
+		messages.length,
+		llmMessages.length,
+		llmContext.messages.length,
+		llmContext.tools?.length ?? 0,
+	);
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
+	markProviderPreparation(
+		"after-transform-provider-context",
+		messages.length,
+		llmMessages.length,
+		llmContext.messages.length,
+		llmContext.tools?.length ?? 0,
+	);
 
 	let promptToolWireTools: Context["tools"];
 	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
@@ -1984,6 +2067,13 @@ async function prepareProviderCall(
 		const inactiveTools = config.sentToolDefinitions.inactiveFor(llmContext.messages, llmContext.tools);
 		if (inactiveTools) llmContext = { ...llmContext, inactiveTools };
 	}
+	markProviderPreparation(
+		"context-ready",
+		messages.length,
+		llmMessages.length,
+		llmContext.messages.length,
+		llmContext.tools?.length ?? 0,
+	);
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
 

@@ -4,7 +4,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	beginProviderPreparationProbe,
+	type AgentMessage,
+	type ProviderPreparationPhase,
+} from "@oh-my-pi/pi-agent-core";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { beginEventStreamProbe, eventStreamProbeMetrics } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
@@ -41,7 +45,7 @@ const ARGUMENT_DELTA_BYTES = 8 * 1024;
 const PROBE_REPLACEMENT_COUNT = 8;
 const PROBE_RESULT_TEXT_BYTES = 256 * 1024;
 const PROBE_DETAILS_BYTES = MIB;
-const MAX_REQUEST_PREPARATION_SNAPSHOTS = 4;
+const MAX_REQUEST_PREPARATION_SNAPSHOTS = 12;
 const FINAL_SENTINEL = "incident-memory:complete";
 const FINAL_COMPLETION = `${FINAL_SENTINEL} synthetic loopback final completion`;
 const incidentReplacementParameters = type({ turn: "number" });
@@ -58,10 +62,14 @@ type DiagnosticHeap = {
 
 type RequestPreparationSnapshot = {
 	readonly phase: string;
-	readonly inputItemCount: number;
+	readonly sourceMessageCount: number;
+	readonly convertedMessageCount: number;
+	readonly providerMessageCount: number;
 	readonly toolCount: number;
 	readonly serializedCodeUnits: number;
 };
+
+type RequestPreparationPhase = OpenAIRequestPreparationPhase | ProviderPreparationPhase;
 
 interface ProbeOptions {
 	readonly arm: Arm;
@@ -91,7 +99,9 @@ interface IncidentProbeRow {
 	readonly contextFileCount: number;
 	readonly promptBytes: number;
 	readonly requestPreparationPhase: string;
-	readonly requestPreparationInputItems: number;
+	readonly requestPreparationSourceMessages: number;
+	readonly requestPreparationConvertedMessages: number;
+	readonly requestPreparationProviderMessages: number;
 	readonly requestPreparationToolCount: number;
 	readonly requestPreparationSerializedCodeUnits: number;
 	readonly requestCount: number;
@@ -668,7 +678,9 @@ class AttributionState {
 			contextFileCount: this.contextFileCount,
 			promptBytes: this.promptBytes,
 			requestPreparationPhase: preparation?.phase ?? "",
-			requestPreparationInputItems: preparation?.inputItemCount ?? 0,
+			requestPreparationSourceMessages: preparation?.sourceMessageCount ?? 0,
+			requestPreparationConvertedMessages: preparation?.convertedMessageCount ?? 0,
+			requestPreparationProviderMessages: preparation?.providerMessageCount ?? 0,
 			requestPreparationToolCount: preparation?.toolCount ?? 0,
 			requestPreparationSerializedCodeUnits: preparation?.serializedCodeUnits ?? 0,
 			requestCount: this.loopback?.requestCount ?? 0,
@@ -729,21 +741,14 @@ class AttributionState {
 	}
 
 	recordRequestPreparation(
-		phase: OpenAIRequestPreparationPhase,
-		inputItemCount: number,
-		toolCount: number,
-		serializedCodeUnits: number,
+		phase: RequestPreparationPhase,
+		preparation: Omit<RequestPreparationSnapshot, "phase">,
 	): void {
 		if (this.requestPreparationSnapshots >= MAX_REQUEST_PREPARATION_SNAPSHOTS) return;
 		this.requestPreparationSnapshots++;
 		try {
 			this.metrics.writeImmediately(
-				this.#row(`incident:request-preparation:${phase}`, "passive", undefined, {
-					phase,
-					inputItemCount,
-					toolCount,
-					serializedCodeUnits,
-				}),
+				this.#row(`incident:request-preparation:${phase}`, "passive", undefined, { phase, ...preparation }),
 			);
 		} catch (error) {
 			this.observerError ??= error instanceof Error ? error : new Error(String(error));
@@ -988,9 +993,26 @@ async function run(): Promise<void> {
 	const stopEventProbe = beginEventStreamProbe(streamedEventBytes);
 	const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "omp-incident-memory-attribution-"));
 	const state = new AttributionState(options, fixture, metrics);
+	const stopProviderPreparationProbe = beginProviderPreparationProbe(
+		(phase, sourceMessageCount, convertedMessageCount, providerMessageCount, toolCount) => {
+			state.recordRequestPreparation(phase, {
+				sourceMessageCount,
+				convertedMessageCount,
+				providerMessageCount,
+				toolCount,
+				serializedCodeUnits: 0,
+			});
+		},
+	);
 	const stopRequestPreparationProbe = beginOpenAIRequestPreparationProbe(
-		(phase, inputItemCount, toolCount, serializedCodeUnits) => {
-			state.recordRequestPreparation(phase, inputItemCount, toolCount, serializedCodeUnits);
+		(phase, providerMessageCount, toolCount, serializedCodeUnits) => {
+			state.recordRequestPreparation(phase, {
+				sourceMessageCount: 0,
+				convertedMessageCount: 0,
+				providerMessageCount,
+				toolCount,
+				serializedCodeUnits,
+			});
 		},
 	);
 	state.workspace = workspace;
@@ -1065,7 +1087,9 @@ async function run(): Promise<void> {
 			providerContextObserved = true;
 			await state.emit("incident:provider-context-prepared", "passive", undefined, {
 				phase: "agent-provider-context-prepared",
-				inputItemCount: context.messages.length,
+				sourceMessageCount: 0,
+				convertedMessageCount: 0,
+				providerMessageCount: context.messages.length,
 				toolCount: context.tools?.length ?? 0,
 				serializedCodeUnits: 0,
 			});
@@ -1162,6 +1186,7 @@ async function run(): Promise<void> {
 		unsubscribe = undefined;
 	} finally {
 		removeProviderContextProbe?.();
+		stopProviderPreparationProbe();
 		stopRequestPreparationProbe();
 		unsubscribe?.();
 		if (state.mode) state.mode.stop();
