@@ -10,6 +10,10 @@ import * as commitTools from "@oh-my-pi/pi-coding-agent/commit/agentic/tools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
+import * as natives from "@oh-my-pi/pi-natives";
 import {
 	type CreateAgentSessionOptions,
 	createAgentSession,
@@ -328,6 +332,123 @@ describe("restricted sessions sharing extension providers", () => {
 				role: "assistant",
 				content: [{ type: "text", text: "Commit proposal complete." }],
 			});
+		} finally {
+			await parent.dispose();
+		}
+	});
+
+	test("rebinds an inherited isolation gate to an isolated restricted child", async () => {
+		const isolatedDir = path.join(tempDir, "isolated-child");
+		const artifactsDir = path.join(tempDir, "artifacts");
+		fs.mkdirSync(isolatedDir, { recursive: true });
+		fs.mkdirSync(artifactsDir, { recursive: true });
+		const gateCwds: string[] = [];
+		const inheritedGate: ExtensionFactory = pi => {
+			pi.registerIsolationOperationGate(async (_operation, ctx) => {
+				gateCwds.push(ctx.cwd);
+				return async () => {};
+			});
+		};
+		const { session: parent } = await createAgentSession({
+			...createOptions(),
+			extensions: [inheritedGate],
+		});
+
+		try {
+			const prepared = parent.preparedExtensions;
+			expect(prepared?.length).toBeGreaterThan(0);
+			vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+				mergedDir: isolatedDir,
+				backend: natives.IsoBackendKind.Rcopy,
+				fellBack: false,
+				fallbackReason: null,
+				excludedPaths: [],
+			});
+			vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue({
+				root: {
+					repoRoot: tempDir,
+					headCommit: "base",
+					staged: "",
+					unstaged: "",
+					untracked: [],
+					untrackedPatch: "",
+				},
+				nested: [],
+			});
+			vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: "", nestedPatches: [] });
+			vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				expect(options.worktree).toBe(isolatedDir);
+				expect(options.restrictToolNames).toBe(true);
+				expect(options.preloadedPreparedExtensions).toBe(prepared);
+				const { session: child } = await createAgentSession({
+					...createOptions(),
+					cwd: isolatedDir,
+					restrictToolNames: true,
+					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
+					toolNames: ["read"],
+				});
+				try {
+					const runner = child.extensionRunner;
+					if (!runner) throw new Error("Expected an isolated child extension runner");
+					await runner.runIsolationOperation(
+						{ kind: "capture", repoRoot: tempDir, agentId: "isolated-restricted-child" },
+						async () => {},
+					);
+				} finally {
+					await child.dispose();
+				}
+				return {
+					index: options.index,
+					id: options.id,
+					agent: options.agent.name,
+					agentSource: options.agent.source,
+					task: options.task,
+					assignment: options.assignment,
+					exitCode: 0,
+					output: "",
+					stderr: "",
+					truncated: false,
+					durationMs: 0,
+					tokens: 0,
+					requests: 0,
+				};
+			});
+
+			await runIsolatedSubprocess({
+				baseOptions: {
+					cwd: tempDir,
+					agent: { name: "worker", description: "worker", systemPrompt: "worker", source: "bundled" },
+					task: "run isolated child",
+					index: 0,
+					id: "isolated-restricted-child",
+					keepAlive: false,
+					restrictToolNames: true,
+					preloadedPreparedExtensions: prepared,
+				},
+				context: { repoRoot: tempDir },
+				preferredBackend: undefined,
+				agentId: "isolated-restricted-child",
+				mergeMode: "patch",
+				artifactsDir,
+				buildFailureResult: error => ({
+					index: 0,
+					id: "isolated-restricted-child",
+					agent: "worker",
+					agentSource: "bundled",
+					task: "run isolated child",
+					exitCode: 1,
+					output: "",
+					stderr: String(error),
+					truncated: false,
+					durationMs: 0,
+					tokens: 0,
+					requests: 0,
+					error: String(error),
+				}),
+			});
+			expect(gateCwds).toEqual([isolatedDir]);
+			expect(gateCwds).not.toContain(tempDir);
 		} finally {
 			await parent.dispose();
 		}

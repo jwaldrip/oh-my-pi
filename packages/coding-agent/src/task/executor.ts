@@ -47,7 +47,7 @@ import { type OverlayLayers, Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { IsolationOperationInfo, PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -404,6 +404,16 @@ export interface ExecutorOptions {
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
 	worktree?: string;
+	/**
+	 * Session-local extension admission runner used only for allocation-bearing
+	 * isolation lifecycle work. It is never forwarded into the child session:
+	 * SDK construction binds descendants to their own runner.
+	 */
+	runIsolationOperation?<T>(
+		operation: Omit<IsolationOperationInfo, "operationId">,
+		body: () => Promise<T>,
+		signal?: AbortSignal,
+	): Promise<T>;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
