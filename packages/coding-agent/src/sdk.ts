@@ -8,6 +8,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
+	markProviderPreparation,
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
@@ -4359,7 +4360,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const transformContext = async (messages: AgentMessage[], signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages, signal);
-			return wrapSteeringForModel(withContext);
+			markProviderPreparation("after-extension-context", messages.length, 0, withContext.length, 0);
+			const wrapped = wrapSteeringForModel(withContext);
+			markProviderPreparation("after-steering-wrap", messages.length, 0, wrapped.length, 0);
+			return wrapped;
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames. Clamp

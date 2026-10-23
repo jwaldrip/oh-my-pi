@@ -14,6 +14,7 @@ const identityFiles = [
 	"packages/agent/src/agent-loop.ts",
 	"packages/coding-agent/src/modes/controllers/event-controller.ts",
 	"packages/coding-agent/src/modes/controllers/tool-args-reveal.ts",
+	"packages/coding-agent/src/sdk.ts",
 	"packages/coding-agent/src/modes/interactive-mode.ts",
 	"packages/coding-agent/src/session/session-loader.ts",
 	"packages/coding-agent/test/helpers/incident-memory-fixture.ts",

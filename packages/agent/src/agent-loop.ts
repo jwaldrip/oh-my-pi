@@ -117,6 +117,9 @@ export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
 
 export type ProviderPreparationPhase =
+	| "before-transform-context"
+	| "after-extension-context"
+	| "after-steering-wrap"
 	| "after-transform-context"
 	| "after-convert-to-llm"
 	| "after-normalize-messages"
@@ -149,7 +152,7 @@ export function beginProviderPreparationProbe(observer: ProviderPreparationObser
 	};
 }
 
-function markProviderPreparation(
+export function markProviderPreparation(
 	phase: ProviderPreparationPhase,
 	sourceMessageCount: number,
 	convertedMessageCount: number,
@@ -1991,6 +1994,7 @@ async function prepareProviderCall(
 ): Promise<PreparedProviderCall> {
 	const model = config.getModel?.() ?? config.model;
 	let messages = context.messages;
+	markProviderPreparation("before-transform-context", messages.length, 0, 0, context.tools?.length ?? 0);
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
