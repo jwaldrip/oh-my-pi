@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Run a synthetic task-launch probe under an external Darwin footprint cap."""
-
+"""Run a synthetic memory probe under an external Darwin footprint cap."""
 from __future__ import annotations
 
 import argparse
@@ -17,9 +16,9 @@ import time
 from dataclasses import asdict, dataclass
 
 DEFAULT_LIMIT_BYTES = 2_000_000_000
+COOPERATIVE_LIMIT_BYTES = 1_200_000_000
 DEFAULT_INTERVAL_SECONDS = 0.05
 DEFAULT_DEADLINE_SECONDS = 60.0
-MAX_SYNTHETIC_PARENT_BYTES = 32 * 1024 * 1024
 MAX_TRACE_BYTES = 512 * 1024
 MAX_TRACE_LINE_BYTES = 4 * 1024
 MAX_TRACE_ROWS = 4_096
@@ -131,32 +130,131 @@ def kill_owned_group(pid: int, expected_start: int, expected_group: int) -> bool
     return True
 
 
+TASK_TRACE_FIELDS = {
+    "timestamp",
+    "pid",
+    "phase",
+    "invocationId",
+    "nativeTag",
+    "heapUsed",
+    "heapTotal",
+    "external",
+    "arrayBuffers",
+    "bytesConsumed",
+    "recordsVisited",
+    "resultCount",
+}
+TASK_INTEGER_FIELDS = {
+    "timestamp",
+    "pid",
+    "heapUsed",
+    "heapTotal",
+    "external",
+    "arrayBuffers",
+    "bytesConsumed",
+    "recordsVisited",
+    "resultCount",
+}
+SESSION_TRACE_FIELDS = {
+    "timestamp",
+    "pid",
+    "cycle",
+    "stage",
+    "payloadPlacement",
+    "gcMode",
+    "fixtureBytes",
+    "sourceBytes",
+    "transcriptEntries",
+    "branchEntries",
+    "retainedEntries",
+    "contextMessages",
+    "mountedComponents",
+    "pendingTools",
+    "wireBytes",
+    "largestWriteBytes",
+    "pendingOutputBytes",
+    "frames",
+    "acknowledgements",
+    "stagedDisposals",
+    "jscHeapSize",
+    "jscExtraMemorySize",
+    "jscObjectCount",
+    "jscProtectedObjectCount",
+    "bunVersion",
+    "bunRevision",
+    "nativeAddonPath",
+    "nativeAddonVersion",
+    "nativeAddonChecksum",
+}
+SESSION_INTEGER_FIELDS = {
+    "timestamp",
+    "pid",
+    "cycle",
+    "fixtureBytes",
+    "sourceBytes",
+    "transcriptEntries",
+    "branchEntries",
+    "retainedEntries",
+    "contextMessages",
+    "mountedComponents",
+    "pendingTools",
+    "wireBytes",
+    "largestWriteBytes",
+    "pendingOutputBytes",
+    "frames",
+    "acknowledgements",
+    "stagedDisposals",
+    "jscHeapSize",
+    "jscExtraMemorySize",
+    "jscObjectCount",
+    "jscProtectedObjectCount",
+}
+
+
+def is_nonnegative_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def is_bounded_string(value: object, limit: int) -> bool:
+    return isinstance(value, str) and len(value) <= limit
+
+
+def valid_task_row(row: dict[str, object]) -> bool:
+    if set(row) != TASK_TRACE_FIELDS:
+        return False
+    if any(not is_nonnegative_integer(row[field]) for field in TASK_INTEGER_FIELDS):
+        return False
+    if not is_bounded_string(row["phase"], 128) or not is_bounded_string(row["invocationId"], 128):
+        return False
+    return row["nativeTag"] is None or is_bounded_string(row["nativeTag"], 128)
+
+
+def valid_session_row(row: dict[str, object]) -> bool:
+    if set(row) != SESSION_TRACE_FIELDS:
+        return False
+    if any(not is_nonnegative_integer(row[field]) for field in SESSION_INTEGER_FIELDS):
+        return False
+    if not is_bounded_string(row["stage"], 128):
+        return False
+    if row["payloadPlacement"] not in {"message", "custom", "tool-result"}:
+        return False
+    if row["gcMode"] not in {"natural", "diagnostic"}:
+        return False
+    for field, limit in (
+        ("bunVersion", 128),
+        ("bunRevision", 128),
+        ("nativeAddonPath", 1024),
+        ("nativeAddonVersion", 128),
+        ("nativeAddonChecksum", 64),
+    ):
+        value = row[field]
+        if value is not None and not is_bounded_string(value, limit):
+            return False
+    checksum = row["nativeAddonChecksum"]
+    return checksum is None or all(char in "0123456789abcdef" for char in checksum)
+
+
 def probe_trace(path: Path) -> tuple[list[dict[str, object]], int]:
-    allowed = {
-        "timestamp",
-        "pid",
-        "phase",
-        "invocationId",
-        "nativeTag",
-        "heapUsed",
-        "heapTotal",
-        "external",
-        "arrayBuffers",
-        "bytesConsumed",
-        "recordsVisited",
-        "resultCount",
-    }
-    integer_fields = {
-        "timestamp",
-        "pid",
-        "heapUsed",
-        "heapTotal",
-        "external",
-        "arrayBuffers",
-        "bytesConsumed",
-        "recordsVisited",
-        "resultCount",
-    }
     rows: list[dict[str, object]] = []
     dropped = 0
     seen_bytes = 0
@@ -171,26 +269,14 @@ def probe_trace(path: Path) -> tuple[list[dict[str, object]], int]:
             except (TypeError, ValueError):
                 dropped += 1
                 continue
-            if not isinstance(row, dict) or set(row) != allowed:
-                dropped += 1
-                continue
-            if any(not isinstance(row[field], int) or isinstance(row[field], bool) or row[field] < 0 for field in integer_fields):
-                dropped += 1
-                continue
-            if not isinstance(row["phase"], str) or len(row["phase"]) > 128:
-                dropped += 1
-                continue
-            if not isinstance(row["invocationId"], str) or len(row["invocationId"]) > 128:
-                dropped += 1
-                continue
-            if row["nativeTag"] is not None and (not isinstance(row["nativeTag"], str) or len(row["nativeTag"]) > 128):
+            if not isinstance(row, dict) or not (valid_task_row(row) or valid_session_row(row)):
                 dropped += 1
                 continue
             rows.append(row)
     return rows, dropped
 
 
-def clean_environment(home: Path) -> dict[str, str]:
+def clean_environment(home: Path, metrics_path: Path, stop_file: Path) -> dict[str, str]:
     required = ("PATH", "LANG", "LC_CTYPE", "TMPDIR", "SYSTEMROOT", "ComSpec")
     env = {key: value for key in required if (value := os.environ.get(key))}
     env["HOME"] = str(home)
@@ -198,6 +284,9 @@ def clean_environment(home: Path) -> dict[str, str]:
     env["CI"] = "1"
     env["NO_COLOR"] = "1"
     env["OMP_TASK_LAUNCH_MEMORY_PROBE"] = "1"
+    env["OMP_SESSION_RETENTION_MEMORY_PROBE"] = "1"
+    env["OMP_MEMORY_PROBE_METRICS_PATH"] = str(metrics_path)
+    env["OMP_MEMORY_PROBE_STOP_FILE"] = str(stop_file)
     return env
 
 
@@ -205,6 +294,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--limit-bytes", type=int, default=DEFAULT_LIMIT_BYTES)
+    parser.add_argument("--cooperative-limit-bytes", type=int, default=COOPERATIVE_LIMIT_BYTES)
     parser.add_argument("--interval-ms", type=int, default=int(DEFAULT_INTERVAL_SECONDS * 1000))
     parser.add_argument("--deadline-seconds", type=float, default=DEFAULT_DEADLINE_SECONDS)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[3])
@@ -216,6 +306,8 @@ def parse_args() -> argparse.Namespace:
         args.probe_args = args.probe_args[1:]
     if args.limit_bytes <= 0 or args.limit_bytes > DEFAULT_LIMIT_BYTES:
         parser.error(f"--limit-bytes must be between 1 and {DEFAULT_LIMIT_BYTES}")
+    if args.cooperative_limit_bytes <= 0 or args.cooperative_limit_bytes >= args.limit_bytes:
+        parser.error("--cooperative-limit-bytes must be positive and below --limit-bytes")
     if args.interval_ms != 50 and args.limit_bytes == DEFAULT_LIMIT_BYTES:
         parser.error("the production-cap probe requires --interval-ms 50")
     if args.deadline_seconds != DEFAULT_DEADLINE_SECONDS and args.limit_bytes == DEFAULT_LIMIT_BYTES:
@@ -246,12 +338,14 @@ def main() -> int:
         output = Path(output_text)
         stdout_path = output / "stdout.txt"
         stderr_path = output / "stderr.txt"
+        metrics_path = output / "metrics.jsonl"
+        stop_file = home / "cooperative-stop"
         command = [str(bun), str(probe), *args.probe_args]
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
             child = subprocess.Popen(
                 command,
                 cwd=repo_root,
-                env=clean_environment(home),
+                env=clean_environment(home, metrics_path, stop_file),
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
@@ -268,16 +362,20 @@ def main() -> int:
                 time.sleep(0.01)
             if initial is None:
                 child.wait(timeout=5)
-                rows, dropped = probe_trace(stdout_path)
+                trace_path = metrics_path if metrics_path.exists() and metrics_path.stat().st_size > 0 else stdout_path
+                rows, dropped = probe_trace(trace_path)
                 report = {
                     "schemaVersion": 1,
                     "outcome": "startup_unreadable",
                     "pid": child.pid,
                     "limitBytes": args.limit_bytes,
+                    "cooperativeLimitBytes": args.cooperative_limit_bytes,
+                    "cooperativeStopRequested": stop_file.exists(),
                     "intervalMs": args.interval_ms,
                     "deadlineSeconds": args.deadline_seconds,
                     "probeRows": rows,
                     "probeRowsDropped": dropped,
+                    "probeMetricsBytes": metrics_path.stat().st_size if metrics_path.exists() else 0,
                     "probeStdoutBytes": stdout_path.stat().st_size,
                     "probeStderrBytes": stderr_path.stat().st_size,
                 }
@@ -290,6 +388,7 @@ def main() -> int:
             samples: list[Sample] = []
             outcome = "exited"
             killed = False
+            cooperative_stop_requested = False
             while True:
                 now = time.time()
                 current = read_usage(child.pid)
@@ -309,6 +408,9 @@ def main() -> int:
                     if current.start != initial.start:
                         outcome = "identity_changed"
                         break
+                    if current.physical_footprint >= args.cooperative_limit_bytes and not cooperative_stop_requested:
+                        stop_file.write_text("stop\n")
+                        cooperative_stop_requested = True
                     if current.physical_footprint >= args.limit_bytes:
                         killed = kill_owned_group(child.pid, initial.start, expected_group)
                         outcome = "limit_killed" if killed else "ownership_lost"
@@ -327,7 +429,8 @@ def main() -> int:
                 if kill_owned_group(child.pid, initial.start, expected_group):
                     outcome = "deadline_killed"
                 return_code = child.wait(timeout=5)
-        rows, dropped = probe_trace(stdout_path)
+        trace_path = metrics_path if metrics_path.exists() and metrics_path.stat().st_size > 0 else stdout_path
+        rows, dropped = probe_trace(trace_path)
         report = {
             "schemaVersion": 1,
             "outcome": outcome,
@@ -335,6 +438,8 @@ def main() -> int:
             "start": initial.start,
             "processGroup": expected_group,
             "limitBytes": args.limit_bytes,
+            "cooperativeLimitBytes": args.cooperative_limit_bytes,
+            "cooperativeStopRequested": cooperative_stop_requested,
             "intervalMs": args.interval_ms,
             "deadlineSeconds": args.deadline_seconds,
             "killed": killed,
@@ -347,6 +452,7 @@ def main() -> int:
             "samples": [asdict(sample) for sample in samples],
             "probeRows": rows,
             "probeRowsDropped": dropped,
+            "probeMetricsBytes": metrics_path.stat().st_size if metrics_path.exists() else 0,
             "probeStdoutBytes": stdout_path.stat().st_size,
             "probeStderrBytes": stderr_path.stat().st_size,
         }
