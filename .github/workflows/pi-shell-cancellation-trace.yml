@@ -888,22 +888,16 @@ jobs:
               summaries = []
               results = []
 
-              def visit(value):
-                  if isinstance(value, dict):
-                      summary = value.get("testSummary")
-                      if isinstance(summary, dict):
-                          summaries.append(summary)
-                      result = value.get("testResult")
-                      if isinstance(result, dict):
-                          results.append(result)
-                      for nested in value.values():
-                          visit(nested)
-                  elif isinstance(value, list):
-                      for nested in value:
-                          visit(nested)
-
               for event in events:
-                  visit(event)
+                  if not isinstance(event, dict):
+                      errors.append("BEP event was not an object")
+                      continue
+                  summary = event.get("testSummary")
+                  if isinstance(summary, dict):
+                      summaries.append(summary)
+                  result = event.get("testResult")
+                  if isinstance(result, dict):
+                      results.append(result)
 
               if not summaries:
                   errors.append("candidate BEP did not contain any test summaries")
