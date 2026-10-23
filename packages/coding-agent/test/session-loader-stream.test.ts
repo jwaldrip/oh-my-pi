@@ -292,6 +292,22 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(malformedRecords).toBe(1);
 	});
 
+	it("parses an unterminated final record when the byte limit reaches EOF", async () => {
+		const content = `${JSON.stringify(HEADER)}\n${JSON.stringify(msg("tail", "s1", "complete at EOF"))}`;
+		const file = await writeTemp(content);
+		const visited: FileEntry[] = [];
+		let malformedRecords = 0;
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), {
+			maxBytes: Buffer.byteLength(content),
+			onMalformedRecord: () => {
+				malformedRecords++;
+			},
+		});
+
+		expect(entryIds(visited)).toEqual(["s1", "tail"]);
+		expect(malformedRecords).toBe(0);
+	});
+
 	it("stops after the first chunk of a delimiter-free file when the record cap is zero", async () => {
 		// No newline until EOF: the streaming loop's delimiter-free fast path skips
 		// the parser, so the record cap has to be enforced before buffering or the
