@@ -792,25 +792,49 @@ impl Process {
 	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
-		let descendants = self.signalable_descendants(protected);
 		let mut signaled = 0u32;
-		// If self leads its own process group, also signal the group — this
-		// catches grandchildren reparented to init when their immediate parent
-		// died inside the descendant walk.
+		self.visit_signal_tree(
+			protected,
+			&mut |pgid| {
+				let _ = kill_process_group(pgid, signal);
+			},
+			&mut |process| {
+				if process.signal(signal) {
+					signaled += 1;
+				}
+			},
+		);
+		signaled
+	}
+
+	/// Visit this process tree's signal targets without delivering a signal.
+	///
+	/// Group leaders are visited before their children, whose existing
+	/// children-first order is retained. Callers can snapshot every target
+	/// before delivery, which avoids one target's signal changing the later
+	/// tree walk. Protected nodes and every descendant reached through them
+	/// remain excluded.
+	fn visit_signal_tree(
+		&self,
+		protected: &HashSet<i32>,
+		on_leader_group: &mut impl FnMut(i32),
+		on_process: &mut impl FnMut(&Process),
+	) {
+		let descendants = self.signalable_descendants(protected);
+		// If self leads its own process group, also visit the group. This catches
+		// grandchildren reparented to init when their immediate parent died
+		// inside the descendant walk.
 		if let Some(pgid) = self.group_id()
 			&& pgid == self.inner.pid()
 		{
-			let _ = kill_process_group(pgid, signal);
+			on_leader_group(pgid);
 		}
 		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
+			on_process(child);
 		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
+		if !protected.contains(&self.pid()) {
+			on_process(self);
 		}
-		signaled
 	}
 
 	/// Live descendants with every protected subtree pruned, not just the exact
@@ -1059,6 +1083,26 @@ pub const TERM_SIGNAL: i32 = 15;
 /// POSIX `SIGKILL` / Windows hard-termination sentinel.
 pub const KILL_SIGNAL: i32 = 9;
 
+/// Test-only record of an actual cancellation dispatch.
+///
+/// The sender is attached to one [`SpawnRegistry`] at a time so concurrent
+/// shell tests cannot observe each other's cancellation waves.
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TerminationDispatchEvent {
+	GroupDispatched {
+		pgid:      i32,
+		signal:    i32,
+		succeeded: bool,
+	},
+	ProcessDispatched {
+		pid:       i32,
+		signal:    i32,
+		succeeded: bool,
+	},
+	FirstTermDispatchComplete,
+}
+
 /// A collection of process groups and process trees scheduled for
 /// termination together.
 ///
@@ -1071,6 +1115,8 @@ pub struct TerminationTargets {
 	pgids:     Vec<i32>,
 	processes: Vec<Process>,
 	seen_pids: HashSet<i32>,
+	#[cfg(test)]
+	event_sender: Option<flume::Sender<TerminationDispatchEvent>>,
 }
 
 impl TerminationTargets {
@@ -1124,11 +1170,61 @@ impl TerminationTargets {
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
+		self.signal_with(
+			|pgid| {
+				let succeeded = kill_process_group(pgid, signal);
+				#[cfg(test)]
+				self.emit_test_event(TerminationDispatchEvent::GroupDispatched {
+					pgid,
+					signal,
+					succeeded,
+				});
+				succeeded
+			},
+			|process| {
+				let succeeded = process.signal(signal);
+				#[cfg(test)]
+				self.emit_test_event(TerminationDispatchEvent::ProcessDispatched {
+					pid: process.pid(),
+					signal,
+					succeeded,
+				});
+				succeeded
+			},
+		);
+	}
+
+	/// Dispatch through the current recorded groups and tree walks.
+	///
+	/// Kept private so the public target storage remains unchanged while tests
+	/// can record the same callback sequence as production delivery.
+	fn signal_with(
+		&self,
+		mut signal_group: impl FnMut(i32) -> bool,
+		mut signal_process: impl FnMut(&Process) -> bool,
+	) {
 		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
+			let _ = signal_group(pgid);
 		}
+
+		let protected = host_protected_pids();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			process.visit_signal_tree(
+				&protected,
+				&mut |pgid| {
+					let _ = signal_group(pgid);
+				},
+				&mut |candidate| {
+					let _ = signal_process(candidate);
+				},
+			);
+		}
+	}
+
+	#[cfg(test)]
+	fn emit_test_event(&self, event: TerminationDispatchEvent) {
+		if let Some(sender) = &self.event_sender {
+			let _ = sender.send(event);
 		}
 	}
 }
@@ -1175,6 +1271,8 @@ struct RegistryState {
 #[derive(Default)]
 pub struct SpawnRegistry {
 	state: Mutex<RegistryState>,
+	#[cfg(test)]
+	event_sender: Mutex<Option<flume::Sender<TerminationDispatchEvent>>>,
 }
 
 impl SpawnRegistry {
@@ -1198,6 +1296,22 @@ impl SpawnRegistry {
 	#[must_use]
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Install the test-only event stream for this registry's cancellation
+	/// waves. The channel is unbounded, so production-shaped dispatch never
+	/// waits for test observation.
+	#[cfg(test)]
+	pub(crate) fn set_test_event_sender(&self, sender: flume::Sender<TerminationDispatchEvent>) {
+		*self.event_sender.lock() = Some(sender);
+	}
+
+	/// Record completion of the first nonempty TERM dispatch for this registry.
+	#[cfg(test)]
+	pub(crate) fn emit_first_term_dispatch_complete(&self) {
+		if let Some(sender) = self.event_sender.lock().as_ref() {
+			let _ = sender.send(TerminationDispatchEvent::FirstTermDispatchComplete);
+		}
 	}
 
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
@@ -1258,6 +1372,8 @@ impl SpawnRegistry {
 	/// set even when the record-time threshold hasn't fired yet.
 	#[must_use]
 	pub fn build_targets(&self) -> TerminationTargets {
+		#[cfg(test)]
+		let event_sender = self.event_sender.lock().clone();
 		let mut targets = TerminationTargets::new();
 		let spawned = {
 			let mut state = self.state.lock();
@@ -1284,6 +1400,10 @@ impl SpawnRegistry {
 			{
 				targets.add_pgid(pgid);
 			}
+		}
+		#[cfg(test)]
+		{
+			targets.event_sender = event_sender;
 		}
 		targets
 	}

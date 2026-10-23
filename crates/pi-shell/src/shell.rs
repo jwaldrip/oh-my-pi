@@ -1760,6 +1760,10 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 				process::KILL_SIGNAL
 			};
 			targets.signal(signal);
+			#[cfg(test)]
+			if wave == 0 {
+				registry.emit_first_term_dispatch_complete();
+			}
 		}
 		if wave + 1 < WAVES {
 			if wave == 0 {
@@ -7039,54 +7043,195 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	}
 
 	#[cfg(unix)]
+	fn append_output_records(output: &mut String, pending: &mut String, chunk: &str) -> Vec<String> {
+		output.push_str(chunk);
+		pending.push_str(chunk);
+
+		let mut records = Vec::new();
+		while let Some(newline) = pending.find('\n') {
+			records.push(pending[..newline].to_owned());
+			pending.drain(..=newline);
+		}
+		records
+	}
+
+	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
+		use std::{
+			io::Write as _,
+			os::unix::{ffi::OsStrExt as _, fs::OpenOptionsExt as _},
+		};
+
 		let _guard = shell_test_lock().lock().await;
 		let root = tempfile::tempdir().expect("cleanup directory");
-		// The trap writes once the readers' old 500 ms cancel would have closed
-		// them, and finishes well inside the 1 s TERM grace even when a loaded
-		// runner is slow to start `sleep`.
+		let release = root.path().join("release.fifo");
+		let release_name = std::ffi::CString::new(release.as_os_str().as_bytes())
+			.expect("release FIFO path has no NUL");
+		// SAFETY: `release_name` remains NUL-terminated and alive for this call.
+		assert_eq!(
+			unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) },
+			0,
+			"create release FIFO: {}",
+			io::Error::last_os_error(),
+		);
+		// Keep a reader open before opening the writer. This makes the script's
+		// later `exec 4<release.fifo` deterministic without relying on O_RDWR.
+		let _release_reader = fs::OpenOptions::new()
+			.read(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&release)
+			.expect("open release FIFO reader");
+		let mut release_writer = fs::OpenOptions::new()
+			.write(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&release)
+			.expect("open release FIFO writer");
+
 		fs::write(
 			root.path().join("cleanup.sh"),
-			"trap 'sleep 0.55; echo flushing; printf cleaned > cleaned; exit 0' TERM\n: > \
-			 ready\nwhile :; do :; done\n",
+			"exec 4<release.fifo\n\
+			 term_count=0\n\
+			 on_term() {\n\
+			     term_count=$((term_count + 1))\n\
+			     printf '%s\\n' \"$term_count\" > term.count\n\
+			     printf 'trap-entered:%s\\n' \"$term_count\"\n\
+			     while :; do\n\
+			         IFS= read -r permit <&4 || continue\n\
+			         [ \"$permit\" = release ] && break\n\
+			     done\n\
+			     printf 'flushing\\n'\n\
+			     printf cleaned > cleaned\n\
+			     exit 0\n\
+			 }\n\
+			 trap on_term TERM\n\
+			 printf 'ready:%s\\n' \"$$\"\n\
+			 while :; do :; done\n",
 		)
 		.expect("cleanup script");
-		let shell = Shell::new(None);
+
+		let shell = Arc::new(Shell::new(None));
+		let (output_tx, output_rx) = flume::unbounded::<String>();
 		let mut cancel = CancelToken::default();
 		let abort = cancel.emplace_abort_token();
 		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+		let task_shell = Arc::clone(&shell);
 		let task = tokio::spawn(async move {
-			shell
+			task_shell
 				.run(
 					ShellRunOptions {
 						command: "sh cleanup.sh".into(),
 						cwd: Some(cwd),
 						..Default::default()
 					},
-					None,
+					Some(output_tx),
 					cancel,
 				)
 				.await
 		});
-		time::timeout(Duration::from_secs(5), async {
-			while !root.path().join("ready").exists() {
-				time::sleep(Duration::from_millis(10)).await;
+
+		let mut output = String::new();
+		let mut pending = String::new();
+		let child_pid = time::timeout(Duration::from_secs(5), async {
+			loop {
+				let chunk = output_rx
+					.recv_async()
+					.await
+					.expect("run ended before printing readiness");
+				for record in append_output_records(&mut output, &mut pending, &chunk) {
+					if let Some(pid) = record.strip_prefix("ready:") {
+						return pid.parse::<i32>().expect("ready pid");
+					}
+				}
 			}
 		})
 		.await
-		.expect("child ready");
+		.expect("timed out waiting for child readiness");
+
+		let registry = time::timeout(Duration::from_secs(5), async {
+			loop {
+				if shell.pids().contains(&child_pid)
+					&& let Some(registry) = shell.active_spawns.lock().clone()
+				{
+					return registry;
+				}
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("timed out waiting for child registration");
+		let (event_tx, event_rx) = flume::unbounded();
+		registry.set_test_event_sender(event_tx);
+
 		abort.abort(AbortReason::Signal);
+
+		let mut first_term_dispatches = Vec::new();
+		let mut trap_entered = false;
+		let mut dispatch_complete = false;
+		time::timeout(Duration::from_secs(5), async {
+			loop {
+				if trap_entered && dispatch_complete {
+					return;
+				}
+				tokio::select! {
+					event = event_rx.recv_async(), if !dispatch_complete => {
+						match event.expect("test event sender closed before dispatch completed") {
+							process::TerminationDispatchEvent::FirstTermDispatchComplete => {
+								dispatch_complete = true;
+							}
+							dispatch => first_term_dispatches.push(dispatch),
+						}
+					}
+					chunk = output_rx.recv_async(), if !trap_entered => {
+						let chunk = chunk.expect("run ended before entering TERM trap");
+						for record in append_output_records(&mut output, &mut pending, &chunk) {
+							if record == "trap-entered:1" {
+								trap_entered = true;
+							}
+						}
+					}
+				}
+			}
+		})
+		.await
+		.expect("timed out waiting for TERM dispatch and trap entry");
+
+		release_writer.write_all(b"release\n").expect("release TERM trap");
+		release_writer.flush().expect("flush TERM trap release");
+
 		let result = time::timeout(Duration::from_secs(5), task)
 			.await
 			.expect("cancel finished")
 			.expect("run task")
 			.expect("shell result");
-		assert!(result.cancelled);
+		while let Ok(chunk) = output_rx.recv_async().await {
+			let _ = append_output_records(&mut output, &mut pending, &chunk);
+		}
+
 		assert_eq!(
-			fs::read_to_string(root.path().join("cleaned"))
-				.expect("TERM cleanup after writing output"),
+			first_term_dispatches,
+			vec![process::TerminationDispatchEvent::GroupDispatched {
+				pgid: child_pid,
+				signal: process::TERM_SIGNAL,
+				succeeded: true,
+			}],
+			"duplicate TERM dispatch: {first_term_dispatches:?}",
+		);
+		assert!(result.cancelled, "signal abort must report cancellation");
+		assert!(!result.timed_out, "signal abort must not report a timeout");
+		assert!(output.contains("flushing\n"), "trap output was truncated: {output:?}");
+		assert_eq!(
+			fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup marker"),
 			"cleaned"
+		);
+		assert_eq!(
+			fs::read_to_string(root.path().join("term.count"))
+				.expect("TERM count")
+				.trim()
+				.parse::<u32>()
+				.expect("numeric TERM count"),
+			1,
+			"the trap must run once",
 		);
 	}
 
