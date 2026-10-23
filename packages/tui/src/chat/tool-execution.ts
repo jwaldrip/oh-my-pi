@@ -226,6 +226,31 @@ export interface ToolResultFrame {
 	isError?: boolean;
 }
 
+export interface ToolExecutionProbeMetrics {
+	readonly argumentBytes: number;
+	readonly resultTextBytes: number;
+	readonly detailsBytes: number;
+	readonly imageBytes: number;
+}
+
+function probeLogicalValueBytes(value: unknown, seen = new Set<object>()): number {
+	if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+	if (value === null || typeof value !== "object") return 0;
+	if (seen.has(value)) return 0;
+	seen.add(value);
+	if (Array.isArray(value)) {
+		let bytes = 0;
+		for (const item of value) bytes += probeLogicalValueBytes(item, seen);
+		return bytes;
+	}
+	const image = isRecord(value) && value.type === "image";
+	let bytes = 0;
+	for (const [key, item] of Object.entries(value)) {
+		if (image && key === "data") continue;
+		bytes += probeLogicalValueBytes(item, seen);
+	}
+	return bytes;
+}
 export interface ToolExecutionHandle extends Component {
 	updateArgs(args: unknown, toolCallId?: string): void;
 	updateStreamPreview?(update: unknown): void;
@@ -672,6 +697,24 @@ export class ToolExecutionComponent extends Container {
 	/** The one current result description this card owns during live replacement. */
 	getProbeRetainedDescriptionCount(): number {
 		return this.#result === undefined ? 0 : 1;
+	}
+
+	/** Scalar ownership facts for the arguments and one current result this card owns. */
+	getProbePayloadMetrics(): ToolExecutionProbeMetrics {
+		let resultTextBytes = 0;
+		for (const block of this.#result?.content ?? []) {
+			if (typeof block.text === "string") resultTextBytes += Buffer.byteLength(block.text, "utf8");
+		}
+		let imageBytes = 0;
+		for (const image of this.#getAllImageBlocks()) {
+			if (typeof image.data === "string") imageBytes += Buffer.byteLength(image.data, "utf8");
+		}
+		return {
+			argumentBytes: probeLogicalValueBytes(this.#args),
+			resultTextBytes,
+			detailsBytes: probeLogicalValueBytes(this.#rawDetails),
+			imageBytes,
+		};
 	}
 
 	/**

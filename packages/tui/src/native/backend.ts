@@ -114,6 +114,8 @@ export interface NativeBackendProbeMetrics {
 	readonly framesSent: number;
 	readonly framesAcknowledged: number;
 	readonly unackedFrames: number;
+	readonly pendingBlobCount: number;
+	readonly pendingBlobBytes: number;
 }
 
 /** Real clock and timers that never keep the process alive on their own. */
@@ -620,7 +622,22 @@ export class NativeBackend {
 			framesAcknowledged += surface.acked;
 			unackedFrames += surface.unacked.length;
 		}
-		return { componentStates, idStates, framesSent, framesAcknowledged, unackedFrames };
+		let pendingBlobCount = 0;
+		let pendingBlobBytes = 0;
+		for (const blob of this.#blobs.values()) {
+			if (blob === "sent") continue;
+			pendingBlobCount++;
+			pendingBlobBytes += blob.bytes.byteLength;
+		}
+		return {
+			componentStates,
+			idStates,
+			framesSent,
+			framesAcknowledged,
+			unackedFrames,
+			pendingBlobCount,
+			pendingBlobBytes,
+		};
 	}
 
 	#applyHello(hello: TspHello): void {

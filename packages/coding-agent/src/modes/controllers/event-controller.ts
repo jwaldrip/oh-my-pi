@@ -69,7 +69,11 @@ import {
 import { isWarpCliAgentProtocolActive } from "../warp-events";
 import { ComposerPredictionController } from "./composer-prediction-controller";
 import { StreamingRevealController } from "./streaming-reveal";
-import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
+import {
+	streamingStringKeysForTool,
+	ToolArgsRevealController,
+	type ToolArgsRevealProbeMetrics,
+} from "./tool-args-reveal";
 
 import {
 	cfgCompletionNotify,
@@ -447,6 +451,11 @@ export class EventController {
 			// call site to hook, so there is nothing additional to do here.
 			queue_update: async () => {},
 		} satisfies AgentSessionEventHandlers;
+	}
+
+	/** Scalar ownership facts for pending streamed tool arguments. */
+	getToolArgsRevealProbeMetrics(): ToolArgsRevealProbeMetrics {
+		return this.#toolArgsReveal.probeMetrics();
 	}
 
 	/** Rearm idle compaction after a live idle setting changes. */

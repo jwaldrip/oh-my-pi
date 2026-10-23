@@ -1713,6 +1713,8 @@ export class TUI extends Container {
 				framesSent: 0,
 				framesAcknowledged: 0,
 				unackedFrames: 0,
+				pendingBlobCount: 0,
+				pendingBlobBytes: 0,
 			}
 		);
 	}

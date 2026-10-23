@@ -360,6 +360,52 @@ type RevealEntry = {
 	stringExtractor: StreamingJsonStringExtractor | undefined;
 };
 
+export interface ToolArgsRevealProbeMetrics {
+	readonly entryCount: number;
+	readonly targetBytes: number;
+	readonly revealedPrefixBytes: number;
+	readonly parsedArgumentBytes: number;
+	readonly displayArgumentBytes: number;
+}
+
+function utf8PrefixBytes(text: string, end: number): number {
+	let bytes = 0;
+	for (let index = 0; index < end; index++) {
+		const code = text.charCodeAt(index);
+		if (code < 0x80) {
+			bytes++;
+		} else if (code < 0x800) {
+			bytes += 2;
+		} else if (code >= 0xd800 && code <= 0xdbff && index + 1 < end) {
+			const next = text.charCodeAt(index + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				bytes += 4;
+				index++;
+			} else {
+				bytes += 3;
+			}
+		} else {
+			bytes += 3;
+		}
+	}
+	return bytes;
+}
+
+function logicalValueBytes(value: unknown, seen = new Set<object>()): number {
+	if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+	if (value === null || typeof value !== "object") return 0;
+	if (seen.has(value)) return 0;
+	seen.add(value);
+	if (Array.isArray(value)) {
+		let bytes = 0;
+		for (const item of value) bytes += logicalValueBytes(item, seen);
+		return bytes;
+	}
+	let bytes = 0;
+	for (const item of Object.values(value)) bytes += logicalValueBytes(item, seen);
+	return bytes;
+}
+
 /** Clamp a slice end into `text`, never splitting a surrogate pair: a prefix
  *  ending on a high surrogate would feed a lone surrogate into the parsed
  *  preview args (providers decode UTF-8 incrementally, so the raw stream
@@ -497,6 +543,27 @@ export class ToolArgsRevealController {
 	constructor(options: ToolArgsRevealControllerOptions) {
 		this.#getSmoothStreaming = options.getSmoothStreaming;
 		this.#requestRender = options.requestRender;
+	}
+
+	/** Bounded scalar ownership facts for the currently revealed argument buffers. */
+	probeMetrics(): ToolArgsRevealProbeMetrics {
+		let targetBytes = 0;
+		let revealedPrefixBytes = 0;
+		let parsedArgumentBytes = 0;
+		let displayArgumentBytes = 0;
+		for (const entry of this.#entries.values()) {
+			targetBytes += Buffer.byteLength(entry.target, "utf8");
+			revealedPrefixBytes += utf8PrefixBytes(entry.target, entry.revealed);
+			parsedArgumentBytes += logicalValueBytes(entry.parsedArgs);
+			displayArgumentBytes += logicalValueBytes(entry.displayArgs);
+		}
+		return {
+			entryCount: this.#entries.size,
+			targetBytes,
+			revealedPrefixBytes,
+			parsedArgumentBytes,
+			displayArgumentBytes,
+		};
 	}
 
 	/**

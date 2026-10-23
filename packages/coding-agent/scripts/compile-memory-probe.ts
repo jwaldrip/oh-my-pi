@@ -8,10 +8,18 @@ import { compileCodingAgent } from "./compile-binary";
 const packageDir = path.join(import.meta.dir, "..");
 const repoRoot = path.join(packageDir, "..", "..");
 const identityFiles = [
+	"packages/ai/src/utils/event-stream.ts",
+	"packages/coding-agent/src/modes/controllers/event-controller.ts",
+	"packages/coding-agent/src/modes/controllers/tool-args-reveal.ts",
 	"packages/coding-agent/src/modes/interactive-mode.ts",
-	"packages/coding-agent/src/registry/persisted-agents.ts",
 	"packages/coding-agent/src/session/session-loader.ts",
+	"packages/coding-agent/test/helpers/incident-memory-fixture.ts",
+	"packages/coding-agent/test/incident-memory-attribution-probe.ts",
 	"packages/coding-agent/test/session-retention-memory-probe.ts",
+	"packages/tui/src/chat/tool-execution.ts",
+	"packages/tui/src/native/backend.ts",
+	"packages/tui/src/terminal.ts",
+	"packages/tui/src/tui.ts",
 ] as const;
 
 function valueFor(flag: string): string | undefined {

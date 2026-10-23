@@ -15,6 +15,63 @@ export interface LocalWorkSource {
 /** Consumed head slots tolerated before the backlog is compacted (see {@link EventStream.queue}). */
 const QUEUE_COMPACT_MIN_HEAD = 64;
 
+export interface EventStreamProbeMetrics {
+	readonly queuedEvents: number;
+	readonly queuedPayloadBytes: number;
+	readonly queueHighWaterEvents: number;
+	readonly queueHighWaterPayloadBytes: number;
+	readonly enqueuedEvents: number;
+	readonly dequeuedEvents: number;
+}
+
+type EventStreamProbeState = {
+	estimatePayloadBytes: (event: unknown) => number;
+	queuedEvents: number;
+	queuedPayloadBytes: number;
+	queueHighWaterEvents: number;
+	queueHighWaterPayloadBytes: number;
+	enqueuedEvents: number;
+	dequeuedEvents: number;
+};
+
+let activeEventStreamProbe: EventStreamProbeState | undefined;
+
+/**
+ * Installs payload-free queue accounting for one controlled process. Callers
+ * supply a scalar estimator and receive a disposer so ordinary streams retain
+ * no probe state or payload snapshots.
+ */
+export function beginEventStreamProbe(estimatePayloadBytes: (event: unknown) => number): () => void {
+	if (activeEventStreamProbe !== undefined) throw new Error("an event stream probe is already active");
+	const state: EventStreamProbeState = {
+		estimatePayloadBytes,
+		queuedEvents: 0,
+		queuedPayloadBytes: 0,
+		queueHighWaterEvents: 0,
+		queueHighWaterPayloadBytes: 0,
+		enqueuedEvents: 0,
+		dequeuedEvents: 0,
+	};
+	activeEventStreamProbe = state;
+	return () => {
+		if (activeEventStreamProbe === state) activeEventStreamProbe = undefined;
+	};
+}
+
+/** Returns scalar queue ownership facts for the active probe, if any. */
+export function eventStreamProbeMetrics(): EventStreamProbeMetrics | undefined {
+	const state = activeEventStreamProbe;
+	if (state === undefined) return undefined;
+	return {
+		queuedEvents: state.queuedEvents,
+		queuedPayloadBytes: state.queuedPayloadBytes,
+		queueHighWaterEvents: state.queueHighWaterEvents,
+		queueHighWaterPayloadBytes: state.queueHighWaterPayloadBytes,
+		enqueuedEvents: state.enqueuedEvents,
+		dequeuedEvents: state.dequeuedEvents,
+	};
+}
+
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	/**
@@ -27,6 +84,8 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	queue: T[] = [];
 	/** Index of the next undelivered event in {@link queue}; 0 whenever the queue is empty. */
 	#queueHead = 0;
+	/** Scalar payload sizes aligned with {@link queue} while an attribution probe is active. */
+	#queueProbeBytes: number[] | undefined;
 	waiting: Array<{ resolve: (value: IteratorResult<T>) => void; reject: (err: unknown) => void }> = [];
 	done = false;
 	/** True once finalResultPromise has been resolved or rejected. */
@@ -81,7 +140,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		if (waiter) {
 			waiter.resolve({ value: event, done: false });
 		} else {
-			this.queue.push(event);
+			this.#enqueue(event);
 		}
 	}
 
@@ -90,7 +149,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		if (waiter) {
 			waiter.resolve({ value: event, done: false });
 		} else {
-			this.queue.push(event);
+			this.#enqueue(event);
 		}
 	}
 
@@ -134,6 +193,34 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		}
 	}
 
+	#enqueue(event: T): void {
+		this.queue.push(event);
+		const probe = activeEventStreamProbe;
+		if (probe === undefined) return;
+		let payloadBytes = 0;
+		try {
+			const estimated = probe.estimatePayloadBytes(event);
+			if (Number.isSafeInteger(estimated) && estimated > 0) payloadBytes = estimated;
+		} catch {
+			// Probe accounting must never alter a stream's delivery semantics.
+		}
+		const sizes = (this.#queueProbeBytes ??= []);
+		sizes.push(payloadBytes);
+		probe.queuedEvents++;
+		probe.queuedPayloadBytes += payloadBytes;
+		probe.enqueuedEvents++;
+		probe.queueHighWaterEvents = Math.max(probe.queueHighWaterEvents, probe.queuedEvents);
+		probe.queueHighWaterPayloadBytes = Math.max(probe.queueHighWaterPayloadBytes, probe.queuedPayloadBytes);
+	}
+
+	#dequeueProbePayload(bytes: number): void {
+		const probe = activeEventStreamProbe;
+		if (probe === undefined) return;
+		probe.queuedEvents = Math.max(0, probe.queuedEvents - 1);
+		probe.queuedPayloadBytes = Math.max(0, probe.queuedPayloadBytes - bytes);
+		probe.dequeuedEvents++;
+	}
+
 	/**
 	 * Take the event at the queue head. Clears the consumed slot so it stops
 	 * retaining the event, resets the queue once drained, and compacts it once
@@ -143,16 +230,22 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		const queue = this.queue;
 		const head = this.#queueHead;
 		const event = queue[head];
+		const probeBytes = this.#queueProbeBytes?.[head] ?? 0;
 		if (head + 1 === queue.length) {
 			queue.length = 0;
+			this.#queueProbeBytes = undefined;
 			this.#queueHead = 0;
+			this.#dequeueProbePayload(probeBytes);
 			return event;
 		}
 		// The slot is dead once the head moves past it; `undefined` only drops the reference.
 		queue[head] = undefined as T;
+		if (this.#queueProbeBytes !== undefined) this.#queueProbeBytes[head] = 0;
 		this.#queueHead = head + 1;
+		this.#dequeueProbePayload(probeBytes);
 		if (this.#queueHead >= QUEUE_COMPACT_MIN_HEAD && this.#queueHead * 2 >= queue.length) {
 			queue.splice(0, this.#queueHead);
+			this.#queueProbeBytes?.splice(0, this.#queueHead);
 			this.#queueHead = 0;
 		}
 		return event;

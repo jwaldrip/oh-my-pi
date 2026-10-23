@@ -254,6 +254,105 @@ SESSION_INTEGER_FIELDS = {
     "jscProtectedObjectCount",
 }
 
+INCIDENT_TRACE_FIELDS = {
+    "kind",
+    "timestamp",
+    "pid",
+    "arm",
+    "stage",
+    "collection",
+    "fixtureChecksum",
+    "fixtureBytes",
+    "fixtureEntries",
+    "fixtureLinkedTailId",
+    "restoredEntries",
+    "agentMessageCount",
+    "managerMessagePayloadBytes",
+    "agentMessagePayloadBytes",
+    "sharedManagerAgentMessageCount",
+    "builtinToolCount",
+    "enabledToolCount",
+    "ruleCount",
+    "contextFileCount",
+    "promptBytes",
+    "requestCount",
+    "requestBytes",
+    "providerDeltaBytes",
+    "cumulativeArgumentBytes",
+    "serializedTurns",
+    "verifiedWriteCount",
+    "finalResultCount",
+    "replacementResultsObserved",
+    "queueOutstandingEvents",
+    "queueOutstandingPayloadBytes",
+    "queueHighWaterEvents",
+    "queueHighWaterPayloadBytes",
+    "queueEnqueuedEvents",
+    "queueDequeuedEvents",
+    "revealEntryCount",
+    "revealTargetBytes",
+    "revealPrefixBytes",
+    "revealParsedArgumentBytes",
+    "revealDisplayArgumentBytes",
+    "toolArgumentBytes",
+    "toolResultTextBytes",
+    "toolDetailsBytes",
+    "toolImageBytes",
+    "modeConstructs",
+    "modeStops",
+    "tuiStops",
+    "nativeComponentStates",
+    "nativeIdStates",
+    "nativeFramesSent",
+    "nativeFramesAcknowledged",
+    "nativeUnackedFrames",
+    "nativePendingBlobCount",
+    "nativePendingBlobBytes",
+    "nativePendingOutputBytes",
+    "terminalWireBytes",
+    "terminalLargestWriteBytes",
+    "heapUsed",
+    "heapTotal",
+    "external",
+    "arrayBuffers",
+    "rss",
+    "diagnosticHeapSize",
+    "diagnosticExtraMemorySize",
+    "diagnosticObjectCount",
+    "diagnosticProtectedObjectCount",
+}
+INCIDENT_INTEGER_FIELDS = INCIDENT_TRACE_FIELDS - {
+    "kind",
+    "arm",
+    "stage",
+    "collection",
+    "fixtureChecksum",
+    "fixtureLinkedTailId",
+}
+
+
+def valid_incident_row(row: dict[str, object]) -> bool:
+    if set(row) != INCIDENT_TRACE_FIELDS:
+        return False
+    if row["kind"] != "incident-memory-attribution":
+        return False
+    if row["arm"] not in {"engine-only", "native"}:
+        return False
+    if row["collection"] not in {"passive", "heapStats", "gc"}:
+        return False
+    if any(not is_nonnegative_integer(row[field]) for field in INCIDENT_INTEGER_FIELDS):
+        return False
+    if not is_bounded_string(row["stage"], 128):
+        return False
+    if not is_bounded_string(row["fixtureLinkedTailId"], 128):
+        return False
+    checksum = row["fixtureChecksum"]
+    return (
+        isinstance(checksum, str)
+        and len(checksum) == 64
+        and all(char in "0123456789abcdef" for char in checksum)
+    )
+
 
 def is_nonnegative_integer(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
@@ -319,7 +418,7 @@ def probe_trace(path: Path) -> tuple[list[dict[str, object]], int]:
             except (TypeError, ValueError):
                 dropped += 1
                 continue
-            if not isinstance(row, dict) or not (valid_task_row(row) or valid_session_row(row)):
+            if not isinstance(row, dict) or not (valid_task_row(row) or valid_session_row(row) or valid_incident_row(row)):
                 dropped += 1
                 continue
             rows.append(row)
@@ -334,18 +433,31 @@ def probe_option(probe_args: list[str], name: str, default: int) -> int:
     return default
 
 
-def expected_live_sentinel(probe_args: list[str]) -> str | None:
-    if "--scenario" not in probe_args and "--scenario=live-tool-result" not in probe_args:
-        return None
-    scenario = None
+def probe_scenario(probe_args: list[str]) -> str | None:
     for index, value in enumerate(probe_args):
         if value == "--scenario" and index + 1 < len(probe_args):
-            scenario = probe_args[index + 1]
-        elif value.startswith("--scenario="):
-            scenario = value.split("=", 1)[1]
-    if scenario != "live-tool-result":
+            return probe_args[index + 1]
+        if value.startswith("--scenario="):
+            return value.split("=", 1)[1]
+    return None
+
+def probe_string_option(probe_args: list[str], name: str) -> str | None:
+    for index, value in enumerate(probe_args):
+        if value == name and index + 1 < len(probe_args):
+            return probe_args[index + 1]
+        if value.startswith(f"{name}="):
+            return value.split("=", 1)[1]
+    return None
+
+
+def expected_live_sentinel(probe_args: list[str]) -> str | None:
+    if probe_scenario(probe_args) != "live-tool-result":
         return None
     return f"live-tool-result:{probe_option(probe_args, '--cycles', 8)}:{probe_option(probe_args, '--updates-per-cycle', 32)}"
+
+
+def expected_incident_sentinel(probe_args: list[str]) -> str | None:
+    return "incident-memory:complete" if probe_scenario(probe_args) == "incident-memory-attribution" else None
 
 
 class PtyTspTransport:
@@ -598,6 +710,7 @@ def clean_environment(home: Path, metrics_path: Path, stop_file: Path) -> dict[s
     env["PI_NO_GLYPH_PROTOCOL"] = "1"
     env["OMP_TASK_LAUNCH_MEMORY_PROBE"] = "1"
     env["OMP_SESSION_RETENTION_MEMORY_PROBE"] = "1"
+    env["OMP_INCIDENT_MEMORY_ATTRIBUTION_PROBE"] = "1"
     env["OMP_MEMORY_PROBE_METRICS_PATH"] = str(metrics_path)
     env["OMP_MEMORY_PROBE_STOP_FILE"] = str(stop_file)
     return env
@@ -687,7 +800,12 @@ def main() -> int:
 
     args.report.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    expected_sentinel = args.expect_sentinel or expected_live_sentinel(args.probe_args)
+    scenario = probe_scenario(args.probe_args)
+    expected_sentinel = (
+        args.expect_sentinel
+        or expected_incident_sentinel(args.probe_args)
+        or expected_live_sentinel(args.probe_args)
+    )
     with tempfile.TemporaryDirectory(prefix="omp-memory-probe-home-") as home_text, tempfile.TemporaryDirectory(
         prefix="omp-memory-probe-output-"
     ) as output_text:
@@ -855,7 +973,7 @@ def main() -> int:
             )
             if not pty_complete:
                 outcome = "pty_protocol_incomplete"
-        if outcome == "exited" and expected_sentinel is not None:
+        if outcome == "exited" and scenario == "live-tool-result":
             completed_rows = [
                 row
                 for row in rows
@@ -880,6 +998,60 @@ def main() -> int:
                     or final["ttyWriterConstructed"] is not True
                 ):
                     outcome = "live_probe_incomplete"
+        if outcome == "exited" and scenario == "incident-memory-attribution":
+            incident_rows = [row for row in rows if row.get("kind") == "incident-memory-attribution"]
+            if len(incident_rows) != len(rows):
+                outcome = "incident_trace_mixed"
+            else:
+                expected_arm = probe_string_option(args.probe_args, "--arm")
+                completion_rows = [row for row in incident_rows if row.get("stage") == "incident:complete"]
+                heap_stats_rows = [row for row in incident_rows if row.get("stage") == "incident:post-heap-stats"]
+                gc_rows = [row for row in incident_rows if row.get("stage") == "incident:post-gc"]
+                if len(completion_rows) != 1 or len(heap_stats_rows) != 1 or len(gc_rows) != 1:
+                    outcome = "incident_probe_incomplete"
+                else:
+                    final = completion_rows[0]
+                    common_complete = (
+                        expected_arm in {"engine-only", "native"}
+                        and final["arm"] == expected_arm
+                        and final["collection"] == "passive"
+                        and final["fixtureBytes"] == 167_772_160
+                        and final["fixtureEntries"] == 26_800
+                        and final["restoredEntries"] == 26_800
+                        and final["agentMessageCount"] == 26_800
+                        and final["serializedTurns"] == 4
+                        and final["verifiedWriteCount"] == 4
+                        and final["finalResultCount"] == 4
+                        and final["replacementResultsObserved"] == 8
+                        and final["queueOutstandingEvents"] == 0
+                        and final["queueOutstandingPayloadBytes"] == 0
+                    )
+                    post_complete = (
+                        heap_stats_rows[0]["collection"] == "heapStats"
+                        and gc_rows[0]["collection"] == "gc"
+                    )
+                    native_complete = (
+                        final["modeConstructs"] == 1
+                        and final["modeStops"] == 0
+                        and final["tuiStops"] == 0
+                        and final["nativeUnackedFrames"] == 0
+                        and final["nativePendingBlobBytes"] == 0
+                        and final["nativePendingOutputBytes"] == 0
+                    )
+                    engine_complete = (
+                        final["modeConstructs"] == 0
+                        and final["modeStops"] == 0
+                        and final["tuiStops"] == 0
+                        and final["nativeComponentStates"] == 0
+                        and final["nativeIdStates"] == 0
+                        and final["nativeUnackedFrames"] == 0
+                        and final["nativePendingBlobBytes"] == 0
+                        and final["nativePendingOutputBytes"] == 0
+                    )
+                    if not common_complete or not post_complete or (
+                        expected_arm == "native" and not native_complete
+                    ) or (expected_arm == "engine-only" and not engine_complete):
+                        outcome = "incident_probe_incomplete"
         report = {
             "schemaVersion": 2,
             "outcome": outcome,
