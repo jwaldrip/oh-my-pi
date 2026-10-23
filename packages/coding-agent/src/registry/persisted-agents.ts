@@ -28,6 +28,24 @@ const MAX_METADATA_LINES = 64;
  */
 const MAX_ADVISOR_HISTORY_LINES = 200_000;
 
+/** Bounded counters emitted only by the synthetic task-launch attribution probe. */
+export interface PersistedRosterDiagnostic {
+	phase: "root_stream" | "metadata_prefix" | "history_hydration" | "latch_created" | "latch_joined" | "latch_reused";
+	bytesConsumed: number;
+	recordsVisited: number;
+	resultCount: number;
+}
+
+export type PersistedRosterDiagnosticSink = (event: PersistedRosterDiagnostic) => void;
+
+function emitDiagnostic(sink: PersistedRosterDiagnosticSink | undefined, event: PersistedRosterDiagnostic): void {
+	try {
+		sink?.(event);
+	} catch {
+		// Diagnostic collection never changes roster restoration.
+	}
+}
+
 interface PersistedAgentMetadata {
 	activity?: string;
 	createdAt?: number;
@@ -318,6 +336,7 @@ function nestedPatchFilesFor(dir: string, transcriptName: string, entries: reado
 async function readPersistedAgentMetadata(
 	sessionFile: string,
 	nestedPatchPaths: readonly string[] = [],
+	onDiagnostic?: PersistedRosterDiagnosticSink,
 ): Promise<PersistedAgentMetadata> {
 	// Settle immediately instead of leaving a rejecting promise pending while
 	// the transcript stream runs: a stat fault (EACCES/EMFILE/EIO) must not
@@ -339,10 +358,13 @@ async function readPersistedAgentMetadata(
 	let history: AgentHistorySummary = {};
 	let hasSessionInit = false;
 	let hasConversation = false;
+	let bytesConsumed = 0;
+	let recordsVisited = 0;
 	try {
 		await visitEntriesFromFileStream(
 			sessionFile,
 			entry => {
+				recordsVisited++;
 				const record = recordOf(entry);
 				if (!record) return;
 				if (record.type === "session") {
@@ -382,7 +404,12 @@ async function readPersistedAgentMetadata(
 				};
 				return false;
 			},
-			{ maxRecords: MAX_METADATA_LINES },
+			{
+				maxRecords: MAX_METADATA_LINES,
+				onBytesConsumed: bytes => {
+					bytesConsumed += bytes;
+				},
+			},
 		);
 	} catch (error) {
 		// Malformed and truncated records are skipped in-band by the stream
@@ -398,7 +425,7 @@ async function readPersistedAgentMetadata(
 	// already degraded to an undefined file above.
 	if (statResult.error !== undefined) throw statResult.error;
 	const file = statResult.file;
-	return {
+	const metadata: PersistedAgentMetadata = {
 		activity,
 		createdAt: createdAt ?? file?.birthtimeMs,
 		lastActivity: file?.mtimeMs,
@@ -410,21 +437,52 @@ async function readPersistedAgentMetadata(
 			...(nestedPatchPaths.length > 0 ? { nestedPatchPaths: [...nestedPatchPaths] } : {}),
 		},
 	};
+	emitDiagnostic(onDiagnostic, {
+		phase: "metadata_prefix",
+		bytesConsumed,
+		recordsVisited,
+		resultCount: Number(hasSessionInit || hasConversation),
+	});
+	return metadata;
 }
 
-async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: () => boolean): Promise<Set<string>> {
+async function readPersistedVibeChildIds(
+	sessionFile: string,
+	shouldContinue: () => boolean,
+	onDiagnostic?: PersistedRosterDiagnosticSink,
+): Promise<Set<string>> {
 	const ids = new Set<string>();
+	let bytesConsumed = 0;
+	let recordsVisited = 0;
 	try {
 		await visitEntriesFromFileStream(
 			sessionFile,
 			entry => {
+				recordsVisited++;
 				for (const id of persistedVibeChildIds([entry])) ids.add(id);
 			},
-			{ shouldContinue },
+			{
+				shouldContinue,
+				onBytesConsumed: bytes => {
+					bytesConsumed += bytes;
+				},
+			},
 		);
+		emitDiagnostic(onDiagnostic, {
+			phase: "root_stream",
+			bytesConsumed,
+			recordsVisited,
+			resultCount: ids.size,
+		});
 		return ids;
 	} catch (error) {
 		if (isFilesystemError(error)) throw error;
+		emitDiagnostic(onDiagnostic, {
+			phase: "root_stream",
+			bytesConsumed,
+			recordsVisited,
+			resultCount: 0,
+		});
 		return new Set();
 	}
 }
@@ -548,6 +606,7 @@ export function isCurrentSessionRosterRef(
 export async function ensurePersistedRoster(
 	registry: AgentRegistry,
 	sessionFileHint?: string | null,
+	options: { onDiagnostic?: PersistedRosterDiagnosticSink } = {},
 ): Promise<string | undefined> {
 	let root: string | undefined;
 	try {
@@ -560,6 +619,7 @@ export async function ensurePersistedRoster(
 	}
 	if (!root) return undefined;
 
+	const onDiagnostic = options.onDiagnostic;
 	const taggedRegistry = registry as RegistryWithPersistedRosterLatches;
 	let latches = taggedRegistry[kPersistedRosterLatches];
 	if (!latches) {
@@ -568,6 +628,12 @@ export async function ensurePersistedRoster(
 	}
 	const existing = latches.get(root);
 	if (existing) {
+		emitDiagnostic(onDiagnostic, {
+			phase: existing.settled ? "latch_reused" : "latch_joined",
+			bytesConsumed: 0,
+			recordsVisited: 0,
+			resultCount: 0,
+		});
 		await existing.pending;
 		if (existing.settled) {
 			// A settled latch is reusable only while every parked ref its scan
@@ -606,9 +672,19 @@ export async function ensurePersistedRoster(
 	// stores a settled wrapper, so a failed scan settles it and the next root
 	// still proceeds.
 	const latch: PersistedRosterLatch = { pending: undefined!, settled: false, owned: new Map() };
+	emitDiagnostic(onDiagnostic, {
+		phase: "latch_created",
+		bytesConsumed: 0,
+		recordsVisited: 0,
+		resultCount: 0,
+	});
 	const tail = taggedRegistry[kPersistedRosterScanTail] ?? Promise.resolve();
 	const scan = tail.then(() =>
-		registerPersistedSubagents(registry, root, { hydrateHistory: false, owned: latch.owned }),
+		registerPersistedSubagents(registry, root, {
+			hydrateHistory: false,
+			owned: latch.owned,
+			onDiagnostic,
+		}),
 	);
 	taggedRegistry[kPersistedRosterScanTail] = scan.then(
 		() => {},
@@ -653,13 +729,15 @@ export async function registerPersistedSubagents(
 		 * against, bounded by this root's own transcript tree.
 		 */
 		owned?: Map<string, string>;
+		onDiagnostic?: PersistedRosterDiagnosticSink;
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
+	const onDiagnostic = options.onDiagnostic;
 	if (!shouldContinue()) return;
-	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
+	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue, onDiagnostic);
 	if (!shouldContinue()) return;
 	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
@@ -672,6 +750,7 @@ export async function registerPersistedSubagents(
 		shouldContinue,
 		sessionFile,
 		options.owned,
+		onDiagnostic,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -681,6 +760,12 @@ export async function registerPersistedSubagents(
 			const index = nextTranscript++;
 			const transcript = transcripts[index];
 			if (!transcript) return;
+			emitDiagnostic(onDiagnostic, {
+				phase: "history_hydration",
+				bytesConsumed: 0,
+				recordsVisited: 0,
+				resultCount: 1,
+			});
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
 			registry.setHistory(transcript.id, history, transcript.sessionFile);
@@ -698,6 +783,7 @@ async function registerPersistedSubagentsFromDir(
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
 	owned?: Map<string, string>,
+	onDiagnostic?: PersistedRosterDiagnosticSink,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -739,7 +825,7 @@ async function registerPersistedSubagentsFromDir(
 			// user task literally named `<owner>/advisor`): leave it, skip the advisor.
 			if (existing && existing.kind !== "advisor") continue;
 			if (existing?.sessionFile !== sessionFile) {
-				const metadata = await readPersistedAgentMetadata(sessionFile);
+				const metadata = await readPersistedAgentMetadata(sessionFile, [], onDiagnostic);
 				if (!shouldContinue()) return;
 				// The id is reused across `/new`; refresh it to the current session's file.
 				if (existing) registry.unregister(advisorId);
@@ -807,7 +893,11 @@ async function registerPersistedSubagentsFromDir(
 			}
 		} else {
 			const expected = existing ?? null;
-			const metadata = await readPersistedAgentMetadata(sessionFile, nestedPatchFilesFor(dir, entry.name, entries));
+			const metadata = await readPersistedAgentMetadata(
+				sessionFile,
+				nestedPatchFilesFor(dir, entry.name, entries),
+				onDiagnostic,
+			);
 			if (!shouldContinue()) return;
 			// Metadata reads yield. A spawn may claim the id while this scan is
 			// inspecting the file; never replace that live generation with a
@@ -858,6 +948,7 @@ async function registerPersistedSubagentsFromDir(
 				shouldContinue,
 				rootSessionFile,
 				owned,
+				onDiagnostic,
 			);
 		}
 	}
