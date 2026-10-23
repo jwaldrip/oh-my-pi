@@ -117,6 +117,12 @@ export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
 
 export type ProviderPreparationPhase =
+	| "agent-loop-context-created"
+	| "run-loop-body-start"
+	| "after-initial-steering-poll"
+	| "before-sync-context"
+	| "after-sync-context"
+	| "before-provider-preparation"
 	| "before-transform-context"
 	| "after-extension-context"
 	| "after-steering-wrap"
@@ -695,6 +701,13 @@ export function agentLoop(
 				...context,
 				messages: [...context.messages, ...prompts],
 			};
+			markProviderPreparation(
+				"agent-loop-context-created",
+				currentContext.messages.length,
+				0,
+				0,
+				currentContext.tools?.length ?? 0,
+			);
 			for (const prompt of prompts) {
 				(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 			}
@@ -1289,6 +1302,13 @@ async function runLoopBody(
 	let liveAccepted: AgentMessage[] = [];
 	let liveDeferred: AgentMessage[] = [];
 	try {
+		markProviderPreparation(
+			"run-loop-body-start",
+			currentContext.messages.length,
+			0,
+			0,
+			currentContext.tools?.length ?? 0,
+		);
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
 			emitInputMessages(stream, messagesToEmit);
@@ -1305,6 +1325,13 @@ async function runLoopBody(
 			emitInputMessages(stream, messagesToEmit);
 			throw error;
 		}
+		markProviderPreparation(
+			"after-initial-steering-poll",
+			currentContext.messages.length,
+			0,
+			0,
+			currentContext.tools?.length ?? 0,
+		);
 		let harmonyRetryAttempt = 0;
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
@@ -1403,9 +1430,23 @@ async function runLoopBody(
 				let preparedProviderCall: PreparedProviderCall;
 				let gateResult: AgentPreModelCallResult;
 				try {
+					markProviderPreparation(
+						"before-sync-context",
+						currentContext.messages.length,
+						0,
+						0,
+						currentContext.tools?.length ?? 0,
+					);
 					if (config.syncContextBeforeModelCall) {
 						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
+					markProviderPreparation(
+						"after-sync-context",
+						currentContext.messages.length,
+						0,
+						0,
+						currentContext.tools?.length ?? 0,
+					);
 
 					if (!directiveResolvedForTurn) {
 						const directive = signal?.aborted ? undefined : config.getToolChoice?.();
@@ -1433,6 +1474,13 @@ async function runLoopBody(
 						directiveResolvedForTurn = true;
 					}
 
+					markProviderPreparation(
+						"before-provider-preparation",
+						currentContext.messages.length,
+						0,
+						0,
+						currentContext.tools?.length ?? 0,
+					);
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
