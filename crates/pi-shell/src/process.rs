@@ -1653,6 +1653,10 @@ mod tests {
 		{
 			let stdout = std::io::stdout();
 			let mut stdout = stdout.lock();
+			// libtest writes its in-progress test label without a trailing
+			// newline. Start the fixture protocol on its own record so the
+			// parent does not discard readiness with that label.
+			writeln!(stdout).expect("separate fixture protocol from libtest");
 			write!(stdout, "fixture-ready:{}", std::process::id()).expect("write fixture readiness");
 			for child in &children {
 				write!(stdout, ":{}", child.id()).expect("write fixture child pid");
