@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can register isolation-operation admission gates that veto work, release permits after settlement, and observe cancellation without losing late permits.
+
+### Changed
+
+- Isolation admission scopes materialization, capture, merge, salvage, and teardown; agent execution, deferred waits, keep-alive lifetime, and AI commit-message generation remain outside the allocation gate.
+
 ### Fixed
 
 - Fixed task isolation copying ignored nested checkouts of the same source repository into new sandboxes; verified unrelated nested repositories and ordinary ignored runtime input remain available.
+- Native-addon startup retains older cache versions instead of deleting files that other running versions may still have mapped.
+- Process-tree cancellation avoids delivering the same signal twice through overlapping process groups, captured descendants, and direct process targets.
 
 ## [18.12.6] - 2026-10-21
 
