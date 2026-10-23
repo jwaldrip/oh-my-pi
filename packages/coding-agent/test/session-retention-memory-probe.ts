@@ -65,6 +65,7 @@ interface RuntimeIdentity {
 	readonly nativeAddonPath: string | null;
 	readonly nativeAddonVersion: string | null;
 	readonly nativeAddonChecksum: string | null;
+	readonly nativeAddonBytes: number | null;
 }
 
 interface ProbeRow {
@@ -111,6 +112,7 @@ interface ProbeRow {
 	readonly nativeAddonPath: string | null;
 	readonly nativeAddonVersion: string | null;
 	readonly nativeAddonChecksum: string | null;
+	readonly nativeAddonBytes: number | null;
 }
 
 interface CycleState {
@@ -419,6 +421,7 @@ async function runtimeIdentity(): Promise<RuntimeIdentity> {
 		nativeAddonPath: addon?.path ?? null,
 		nativeAddonVersion: addon?.version ?? null,
 		nativeAddonChecksum: addon ? await checksum(addon.path) : null,
+		nativeAddonBytes: addon ? Bun.file(addon.path).size : null,
 	};
 }
 
@@ -480,6 +483,7 @@ async function emit(
 		nativeAddonPath: runtime?.nativeAddonPath ?? null,
 		nativeAddonVersion: runtime?.nativeAddonVersion ?? null,
 		nativeAddonChecksum: runtime?.nativeAddonChecksum ?? null,
+		nativeAddonBytes: runtime?.nativeAddonBytes ?? null,
 	});
 }
 
@@ -848,6 +852,7 @@ async function emitLive(
 		nativeAddonPath: runtime?.nativeAddonPath ?? null,
 		nativeAddonVersion: runtime?.nativeAddonVersion ?? null,
 		nativeAddonChecksum: runtime?.nativeAddonChecksum ?? null,
+		nativeAddonBytes: runtime?.nativeAddonBytes ?? null,
 	});
 }
 

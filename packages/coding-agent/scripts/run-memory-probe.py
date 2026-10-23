@@ -216,6 +216,7 @@ SESSION_TRACE_FIELDS = {
     "nativeAddonPath",
     "nativeAddonVersion",
     "nativeAddonChecksum",
+    "nativeAddonBytes",
 }
 SESSION_INTEGER_FIELDS = {
     "timestamp",
@@ -286,6 +287,8 @@ def valid_session_row(row: dict[str, object]) -> bool:
     if row["scenario"] not in {"teardown", "live-tool-result"}:
         return False
     if not isinstance(row["ttyWriterConstructed"], bool):
+        return False
+    if row["nativeAddonBytes"] is not None and not is_nonnegative_integer(row["nativeAddonBytes"]):
         return False
     for field, limit in (
         ("bunVersion", 128),
@@ -649,9 +652,11 @@ def stderr_summary(path: Path) -> str | None:
     if not path.exists() or path.stat().st_size == 0:
         return None
     with path.open("rb") as stream:
-        stream.seek(max(0, path.stat().st_size - 4096))
-        text = stream.read().decode("utf-8", "replace")
-    return " ".join(text.split())[-512:]
+        text = stream.read(8192).decode("utf-8", "replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    meaningful = [line for line in lines if "error" in line.lower() or "failed" in line.lower()]
+    summary = meaningful[0] if meaningful else lines[0]
+    return " ".join([summary, *lines[1:]])[:1024]
 
 
 
