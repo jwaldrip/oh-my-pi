@@ -129,7 +129,7 @@ describe("isolation allocation operation boundaries", () => {
 	};
 	const agent = { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" };
 
-	it("serializes materialization while isolated agent bodies run in parallel", async () => {
+	it("serializes shared task/eval materialization while isolated agent bodies run in parallel", async () => {
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-admission-"));
 		tempRoots.push(artifactsDir);
 		const firstSetupEntered = Promise.withResolvers<void>();
