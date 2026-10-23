@@ -862,13 +862,15 @@ jobs:
            shell: bash
            run: |
               set -euo pipefail
-              python3 - "$EVIDENCE_DIR/candidate/rust-tests.bep.json" "$EVIDENCE_DIR/candidate/rust-tests.validation.json" <<'PY'
+              python3 - "$EVIDENCE_DIR/candidate/rust-tests.bep.json" "$EVIDENCE_DIR/candidate/rust-tests.validation.json" "$EVIDENCE_DIR/candidate/pi-shell-test.full-suite.log" <<'PY'
               import json
+              import re
               import sys
               from pathlib import Path
 
               bep_path = Path(sys.argv[1])
               output_path = Path(sys.argv[2])
+              canonical_log_path = Path(sys.argv[3])
               errors = []
               events = []
               if not bep_path.is_file() or bep_path.stat().st_size == 0:
@@ -887,7 +889,6 @@ jobs:
 
               summaries = []
               results = []
-
               for event in events:
                   if not isinstance(event, dict):
                       errors.append("BEP event was not an object")
@@ -903,6 +904,7 @@ jobs:
                   errors.append("candidate BEP did not contain any test summaries")
 
               summary_statuses = []
+              bazel_test_attempt_counts = []
               for summary in summaries:
                   status = str(summary.get("overallStatus", "")).upper()
                   summary_statuses.append(status)
@@ -912,8 +914,11 @@ jobs:
                       run_count = int(summary.get("totalRunCount", 0))
                   except (TypeError, ValueError):
                       run_count = 0
+                  bazel_test_attempt_counts.append(run_count)
                   if run_count < 1:
-                      errors.append("test summary did not report an executed test run")
+                      errors.append(
+                          "BEP test summary did not report an executed Bazel test attempt"
+                      )
 
               def has_cached_result(value):
                   if isinstance(value, dict):
@@ -928,16 +933,86 @@ jobs:
 
               for result in results:
                   status = str(result.get("status", "")).upper()
-                  if status and status != "PASSED":
+                  if not status:
+                      errors.append("test result was missing a status")
+                  elif status != "PASSED":
                       errors.append(f"test result had non-passing status {status!r}")
                   if has_cached_result(result):
                       errors.append("candidate BEP reported a cached test result")
+
+              canonical_text = ""
+              if (
+                  not canonical_log_path.is_file()
+                  or canonical_log_path.stat().st_size == 0
+              ):
+                  errors.append("candidate pi-shell canonical test log is missing or empty")
+              else:
+                  canonical_text = canonical_log_path.read_text(
+                      encoding="utf-8", errors="replace"
+                  )
+
+              libtest_summaries = [
+                  {
+                      "passed": int(match.group(1)),
+                      "failed": int(match.group(2)),
+                      "ignored": int(match.group(3)),
+                  }
+                  for match in re.finditer(
+                      r"test result:\s*ok\.\s*(\d+)\s+passed;\s*(\d+)\s+failed;\s*(\d+)\s+ignored;",
+                      canonical_text,
+                  )
+              ]
+              if not libtest_summaries:
+                  errors.append(
+                      "candidate pi-shell canonical log did not contain a libtest success summary"
+                  )
+              elif not any(
+                  summary["passed"] > 0 and summary["failed"] == 0
+                  for summary in libtest_summaries
+              ):
+                  errors.append(
+                      "candidate pi-shell libtest summary must report a nonzero pass count and zero failures"
+                  )
+              if any(summary["failed"] != 0 for summary in libtest_summaries):
+                  errors.append(
+                      "candidate pi-shell canonical log reported a failing libtest summary"
+                  )
+              if re.search(r"test result:\s*FAILED", canonical_text):
+                  errors.append("candidate pi-shell canonical log reported a failed test result")
+
+              required_regressions = [
+                  "shell::tests::cancellation_keeps_output_open_for_a_term_trap_that_writes",
+                  "process::tests::termination_targets_dedupe_an_explicit_group_and_its_leader",
+                  "process::tests::termination_targets_snapshot_later_leader_before_delivering_to_earlier_root",
+                  "process::tests::termination_targets_fall_back_to_pinned_processes_when_a_group_signal_fails",
+                  "process::tests::termination_targets_keep_an_escaped_descendant_after_group_coverage",
+                  "process::tests::termination_targets_deliver_an_overlapping_direct_pid_once",
+                  "process::tests::termination_targets_reenumerate_each_call_and_registry_rebuilds_new_spawns",
+              ]
+              passed_regressions = {}
+              for test_name in required_regressions:
+                  passed_count = len(
+                      re.findall(
+                          r"(?m)^[ \t]*test "
+                          + re.escape(test_name)
+                          + r" \.\.\. ok[ \t]*$",
+                          canonical_text,
+                      )
+                  )
+                  passed_regressions[test_name] = passed_count
+                  if passed_count != 1:
+                      errors.append(
+                          f"candidate canonical log must contain one passing result for {test_name}, found {passed_count}"
+                      )
 
               validation = {
                   "classification": "green" if not errors else "failure",
                   "test_summary_count": len(summaries),
                   "test_result_count": len(results),
                   "test_summary_statuses": summary_statuses,
+                  "bazel_test_attempt_counts": bazel_test_attempt_counts,
+                  "pi_shell_libtest_summaries": libtest_summaries,
+                  "required_regression_pass_lines": passed_regressions,
                   "errors": errors,
               }
               with output_path.open("w", encoding="utf-8") as handle:
