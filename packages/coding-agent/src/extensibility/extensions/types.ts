@@ -1609,6 +1609,47 @@ export interface RegisteredCommand {
 /** Handler function type for events */
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
+/**
+ * A host allocation operation that can create, clone, capture, merge, or clean
+ * isolation resources.
+ */
+export type IsolationOperationKind =
+	| "prepare"
+	| "materialize"
+	| "baseline"
+	| "capture"
+	| "merge"
+	| "salvage"
+	| "cleanup";
+
+/** Immutable metadata provided to isolation-operation admission gates. */
+export interface IsolationOperationInfo {
+	operationId: string;
+	kind: IsolationOperationKind;
+	repoRoot: string;
+	isolationDir?: string;
+	agentId?: string;
+}
+
+/** How the admitted operation ended before its permits are released. */
+export type IsolationOperationSettlement =
+	| { status: "completed" }
+	| { status: "not-started" }
+	| { status: "failed"; error: unknown };
+
+/** Releases an admission permit after its operation has settled. */
+export type IsolationOperationRelease = (settlement: IsolationOperationSettlement) => Promise<void>;
+
+/**
+ * Admits an isolation operation and optionally returns its release callback.
+ * Throwing rejects admission and prevents the operation body from starting.
+ */
+export type IsolationOperationGate = (
+	operation: Readonly<IsolationOperationInfo>,
+	ctx: ExtensionContext,
+	signal?: AbortSignal,
+) => Promise<IsolationOperationRelease | undefined>;
+
 /** Service tiers accepted by each provider family. */
 export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
 	? "priority"
@@ -1716,6 +1757,19 @@ export interface ExtensionAPI {
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
+
+	// =========================================================================
+	// Isolation Operation Admission
+	// =========================================================================
+
+	/**
+	 * Register an admission gate for host isolation-resource operations.
+	 *
+	 * Gates run in registration order before the operation body. Returning a
+	 * release callback holds admission until the body and its nested operations
+	 * settle; throwing vetoes the body.
+	 */
+	registerIsolationOperationGate(handler: IsolationOperationGate): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -2205,6 +2259,7 @@ export interface Extension {
 	resolvedPath: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
+	isolationOperationGates: IsolationOperationGate[];
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];

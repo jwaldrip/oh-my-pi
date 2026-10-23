@@ -5,11 +5,12 @@
  * Only a previous load can tell whether an extension's factory registers state
  * that must exist before the first frame: model providers (startup model
  * resolution), keyboard shortcuts (bound once at editor setup), composer shapes
- * (installed at UI init), or file-mutation fallbacks (installed at runner
- * init). Each load records that verdict in agent.db, keyed by the module's
- * resolved path and fingerprinted by its size and mtime. A source with no
- * verdict for its current fingerprint loads eagerly and records one, so a
- * changed module is never deferred on stale knowledge.
+ * (installed at UI init), file-mutation fallbacks (installed at runner init), or
+ * isolation-operation gates (which must cover the first allocation). Each load
+ * records that verdict in agent.db, keyed by the module's resolved path and
+ * fingerprinted by its size and mtime. A source with no verdict for its current
+ * fingerprint loads eagerly and records one, so a changed module is never
+ * deferred on stale knowledge.
  */
 import * as fs from "node:fs/promises";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
@@ -61,7 +62,8 @@ export function canBindAfterStartup(extension: Extension): boolean {
 		extension.shortcuts.size === 0 &&
 		extension.composerShapes.size === 0 &&
 		extension.fileWriteFallbackHandlers.length === 0 &&
-		extension.fileDeleteFallbackHandlers.length === 0
+		extension.fileDeleteFallbackHandlers.length === 0 &&
+		extension.isolationOperationGates.length === 0
 	);
 }
 

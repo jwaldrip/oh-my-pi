@@ -128,6 +128,7 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `registerIsolationOperationGate`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -739,6 +740,46 @@ Additional `ToolDefinition` fields include:
 - `shellEnv`: environment values for the interactive user-shell surface.
 - `renderCall`, `renderResult`: TUI components.
 - `describeCall`, `describeResult`: semantic tool views for TSP terminals.
+
+### Isolation operation admission (`registerIsolationOperationGate`)
+
+Hosts that allocate isolation resources can call
+`ExtensionRunner.runIsolationOperation(operation, body, signal)` to expose one
+bounded operation to extensions. Register a gate during extension loading:
+
+```ts
+import type {
+  IsolationOperationGate,
+  IsolationOperationRelease,
+} from "@oh-my-pi/pi-coding-agent";
+
+const admit: IsolationOperationGate = async (operation, _ctx, signal) => {
+  const permit = await acquireSharedCapacity(operation.kind, signal);
+
+  const release: IsolationOperationRelease = async settlement => {
+    await permit.release(settlement.status);
+  };
+  return release;
+};
+
+pi.registerIsolationOperationGate(admit);
+```
+
+`operation` contains a runner-generated `operationId`, its `kind`, `repoRoot`,
+and optional `isolationDir` and `agentId`. Gates run in registration order
+before the body. Throw to veto the operation. A returned release callback runs
+once after the body settles, in reverse admission order. It receives
+`{ status: "completed" }`, `{ status: "not-started" }`, or
+`{ status: "failed", error }`.
+
+Cancellation during admission prevents the body from starting. If a gate returns
+a permit after cancellation, its release still runs with `not-started`. After
+the body starts, the runner waits for it and any nested
+`runIsolationOperation` calls in the same async chain before releasing permits.
+Independent sibling calls acquire separately. Gate handlers are not subject to
+the ordinary extension event timeout, so they must honor the supplied signal.
+Release failures are surfaced to the caller after every acquired release has
+been attempted.
 
 ### File write fallback (`registerFileWriteFallback`)
 

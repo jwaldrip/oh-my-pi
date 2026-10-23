@@ -78,6 +78,9 @@ import type {
 	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
+	IsolationOperationInfo,
+	IsolationOperationRelease,
+	IsolationOperationSettlement,
 	CacheWarmingAction,
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
@@ -494,6 +497,15 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
+/**
+ * Admission inherited through one runner's async call chain. A nested operation
+ * reuses the outer permits, while its promise stays tracked until it settles.
+ */
+interface IsolationOperationScope {
+	pendingNestedOperations: Set<Promise<unknown>>;
+	acceptingNestedOperations: boolean;
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -526,6 +538,7 @@ export class ExtensionRunner {
 	#getSystemPromptFn: () => string[] = () => [];
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
+	#isolationOperationScope = new AsyncLocalStorage<IsolationOperationScope>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
@@ -686,6 +699,146 @@ export class ExtensionRunner {
 
 	cancelToolCallPreflight(toolCallId: string): void {
 		this.#toolCallPreflight?.cancel?.(toolCallId);
+	}
+
+	/**
+	 * Run an isolation-resource operation through extension admission gates.
+	 *
+	 * Nested calls in this runner's current async chain share the outer
+	 * operation's permits. Independent calls acquire their own permits.
+	 */
+	async runIsolationOperation<T>(
+		operation: Omit<IsolationOperationInfo, "operationId">,
+		body: () => Promise<T>,
+		signal?: AbortSignal,
+	): Promise<T> {
+		const activeScope = this.#isolationOperationScope.getStore();
+		if (activeScope?.acceptingNestedOperations) {
+			return await this.#runNestedIsolationOperation(activeScope, body);
+		}
+		return await this.#runOutermostIsolationOperation(operation, body, signal);
+	}
+
+	async #runNestedIsolationOperation<T>(scope: IsolationOperationScope, body: () => Promise<T>): Promise<T> {
+		const nested = Promise.resolve().then(body);
+		scope.pendingNestedOperations.add(nested);
+		// An outer operation observes failures when it settles tracked work. Keep a
+		// fire-and-forget nested call from becoming an unhandled rejection first.
+		void nested.catch(() => {});
+		try {
+			return await nested;
+		} finally {
+			scope.pendingNestedOperations.delete(nested);
+		}
+	}
+
+	async #settleNestedIsolationOperations(scope: IsolationOperationScope): Promise<unknown[]> {
+		const failures: unknown[] = [];
+		while (scope.pendingNestedOperations.size > 0) {
+			const pending = [...scope.pendingNestedOperations];
+			const settled = await Promise.allSettled(pending);
+			for (const result of settled) {
+				if (result.status === "rejected") failures.push(result.reason);
+			}
+		}
+		return failures;
+	}
+
+	async #runOutermostIsolationOperation<T>(
+		operation: Omit<IsolationOperationInfo, "operationId">,
+		body: () => Promise<T>,
+		signal?: AbortSignal,
+	): Promise<T> {
+		const operationInfo: Readonly<IsolationOperationInfo> = Object.freeze({
+			...operation,
+			operationId: crypto.randomUUID(),
+		});
+		const scope: IsolationOperationScope = {
+			pendingNestedOperations: new Set(),
+			acceptingNestedOperations: true,
+		};
+		const releases: IsolationOperationRelease[] = [];
+		let bodyStarted = false;
+		let hasOperationError = false;
+		let operationError: unknown;
+		let value!: T;
+
+		try {
+			signal?.throwIfAborted();
+			const context = this.createContext();
+			for (const extension of this.extensions) {
+				for (const gate of extension.isolationOperationGates) {
+					signal?.throwIfAborted();
+					const release = await withActiveSettings(this.settings, () => gate(operationInfo, context, signal));
+					if (release !== undefined) releases.push(release);
+					// A gate can resolve with a permit after cancellation. Keep that
+					// permit for the not-started release below rather than racing it away.
+					signal?.throwIfAborted();
+				}
+			}
+
+			signal?.throwIfAborted();
+			bodyStarted = true;
+			try {
+				value = await this.#isolationOperationScope.run(scope, body);
+			} catch (error) {
+				hasOperationError = true;
+				operationError = error;
+			}
+
+			const nestedFailures = await this.#settleNestedIsolationOperations(scope);
+			if (nestedFailures.length > 0) {
+				const nestedError =
+					nestedFailures.length === 1
+						? nestedFailures[0]
+						: new AggregateError(nestedFailures, "Multiple nested isolation operations failed");
+				operationError = hasOperationError
+					? new AggregateError(
+							[operationError, nestedError],
+							"Isolation operation body and nested operation both failed",
+						)
+					: nestedError;
+				hasOperationError = true;
+			}
+		} catch (error) {
+			hasOperationError = true;
+			operationError = error;
+		} finally {
+			// Async resources created after the outer body has settled must acquire
+			// independently instead of inheriting a permit that is being released.
+			scope.acceptingNestedOperations = false;
+		}
+
+		const settlement: IsolationOperationSettlement = bodyStarted
+			? hasOperationError
+				? { status: "failed", error: operationError }
+				: { status: "completed" }
+			: { status: "not-started" };
+		const releaseFailures: unknown[] = [];
+		for (let index = releases.length - 1; index >= 0; index -= 1) {
+			const release = releases[index];
+			if (!release) continue;
+			try {
+				await withActiveSettings(this.settings, () => release(settlement));
+			} catch (error) {
+				releaseFailures.push(error);
+			}
+		}
+
+		if (hasOperationError) {
+			if (releaseFailures.length > 0) {
+				throw new AggregateError(
+					[operationError, ...releaseFailures],
+					"Isolation operation failed and one or more releases failed",
+				);
+			}
+			throw operationError;
+		}
+		if (releaseFailures.length === 1) throw releaseFailures[0];
+		if (releaseFailures.length > 1) {
+			throw new AggregateError(releaseFailures, "Multiple isolation-operation releases failed");
+		}
+		return value;
 	}
 
 	/** Whether a native built-in of `name` is available to delegate to. */

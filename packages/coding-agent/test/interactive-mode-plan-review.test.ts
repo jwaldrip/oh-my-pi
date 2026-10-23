@@ -105,6 +105,7 @@ function planReviewExtension(
 		path: extensionPath,
 		resolvedPath: extensionPath,
 		handlers,
+		isolationOperationGates: [],
 		tools: new Map(),
 		assistantThinkingRenderers: [],
 		fileWriteFallbackHandlers: [],

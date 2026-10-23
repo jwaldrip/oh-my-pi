@@ -46,6 +46,7 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
+	IsolationOperationGate,
 	LoadExtensionsResult,
 	MessageRenderer,
 	PreparedExtension,
@@ -213,6 +214,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.handlers.set(event, list);
 	}
 
+	registerIsolationOperationGate(handler: IsolationOperationGate): void {
+		this.extension.isolationOperationGates.push(handler);
+	}
+
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
 		const registered = {
 			definition: tool,
@@ -377,6 +382,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		path: extensionPath,
 		resolvedPath,
 		handlers: new Map(),
+		isolationOperationGates: [],
 		tools: new Map(),
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],

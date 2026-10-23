@@ -453,6 +453,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 						],
 					],
 				]),
+				isolationOperationGates: [],
 				tools: new Map(),
 				assistantThinkingRenderers: [],
 				fileWriteFallbackHandlers: [],

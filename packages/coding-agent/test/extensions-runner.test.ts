@@ -29,6 +29,9 @@ import type {
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
+	IsolationOperationGate,
+	IsolationOperationRelease,
+	IsolationOperationSettlement,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -4478,6 +4481,320 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("isolation operation gates", () => {
+		const operation = (kind: "prepare" | "materialize" | "baseline" = "materialize") => ({
+			kind,
+			repoRoot: tempDir.path(),
+		});
+
+		const isolationRunner = (gates: IsolationOperationGate[]): ExtensionRunner => {
+			const extension: Extension = {
+				path: "test://isolation-operation-gates",
+				resolvedPath: "test://isolation-operation-gates",
+				handlers: new Map(),
+				isolationOperationGates: gates,
+				tools: new Map(),
+				assistantThinkingRenderers: [],
+				fileWriteFallbackHandlers: [],
+				fileDeleteFallbackHandlers: [],
+				messageRenderers: new Map(),
+				composerShapes: new Map(),
+				commands: new Map(),
+				flags: new Map(),
+				shortcuts: new Map(),
+			};
+			return new ExtensionRunner([extension], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		it("registers isolation-operation gates through ExtensionAPI", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "isolation-operation-gate.ts"),
+				`export default function(pi) {
+					pi.registerIsolationOperationGate(async () => async () => {});
+				}`,
+			);
+
+			const result = await loadTestExtensions();
+			expect(result.errors).toEqual([]);
+			expect(result.extensions).toHaveLength(1);
+			expect(result.extensions[0]?.isolationOperationGates).toHaveLength(1);
+		});
+
+		it("does not apply the ordinary extension handler timeout to admission gates", async () => {
+			vi.useFakeTimers();
+			const gateStarted = Promise.withResolvers<void>();
+			const gateMaySettle = Promise.withResolvers<void>();
+			try {
+				testSetExtensionHandlerTimeoutMs(1);
+				let callerSettled = false;
+				const runner = isolationRunner([
+					async () => {
+						gateStarted.resolve();
+						await gateMaySettle.promise;
+						return undefined;
+					},
+				]);
+
+				const call = runner.runIsolationOperation(operation(), async () => "body");
+				void call.then(
+					() => {
+						callerSettled = true;
+					},
+					() => {
+						callerSettled = true;
+					},
+				);
+				await gateStarted.promise;
+				vi.advanceTimersByTime(2);
+				await Promise.resolve();
+				expect(callerSettled).toBe(false);
+
+				gateMaySettle.resolve();
+				await expect(call).resolves.toBe("body");
+			} finally {
+				gateMaySettle.resolve();
+				vi.useRealTimers();
+			}
+		});
+
+		it("waits for the body and release before settling the caller", async () => {
+			const events: string[] = [];
+			const bodyStarted = Promise.withResolvers<void>();
+			const bodyMaySettle = Promise.withResolvers<void>();
+			const releaseStarted = Promise.withResolvers<void>();
+			const releaseMaySettle = Promise.withResolvers<void>();
+			const runner = isolationRunner([
+				async () => {
+					events.push("admitted");
+					return async settlement => {
+						expect(settlement).toEqual({ status: "completed" });
+						releaseStarted.resolve();
+						await releaseMaySettle.promise;
+						events.push("release settled");
+					};
+				},
+			]);
+
+			const call = runner.runIsolationOperation(operation(), async () => {
+				events.push("body started");
+				bodyStarted.resolve();
+				await bodyMaySettle.promise;
+				events.push("body settled");
+			});
+			const caller = call.then(() => events.push("caller settled"));
+
+			await bodyStarted.promise;
+			expect(events).toEqual(["admitted", "body started"]);
+			bodyMaySettle.resolve();
+			await releaseStarted.promise;
+			expect(events).toEqual(["admitted", "body started", "body settled"]);
+			releaseMaySettle.resolve();
+			await caller;
+			expect(events).toEqual(["admitted", "body started", "body settled", "release settled", "caller settled"]);
+		});
+
+		it("releases a late permit as not-started when cancellation arrives during admission", async () => {
+			const admissionStarted = Promise.withResolvers<void>();
+			const latePermit = Promise.withResolvers<IsolationOperationRelease>();
+			const aborted = new Error("queued cancellation");
+			const controller = new AbortController();
+			let receivedSignal: AbortSignal | undefined;
+			let bodyStarts = 0;
+			let releaseSettlement: IsolationOperationSettlement | undefined;
+			const runner = isolationRunner([
+				async (_operation, _context, signal) => {
+					receivedSignal = signal;
+					admissionStarted.resolve();
+					return await latePermit.promise;
+				},
+			]);
+
+			const call = runner.runIsolationOperation(
+				operation(),
+				async () => {
+					bodyStarts += 1;
+				},
+				controller.signal,
+			);
+			await admissionStarted.promise;
+			controller.abort(aborted);
+			latePermit.resolve(async settlement => {
+				releaseSettlement = settlement;
+			});
+
+			await expect(call).rejects.toBe(aborted);
+			expect(receivedSignal).toBe(controller.signal);
+			expect(bodyStarts).toBe(0);
+			expect(releaseSettlement).toEqual({ status: "not-started" });
+		});
+
+		it("does not release an active operation when its signal aborts", async () => {
+			const bodyStarted = Promise.withResolvers<void>();
+			const bodyMaySettle = Promise.withResolvers<void>();
+			const controller = new AbortController();
+			const events: string[] = [];
+			let releaseSettlement: IsolationOperationSettlement | undefined;
+			const runner = isolationRunner([
+				async () => async settlement => {
+					releaseSettlement = settlement;
+					events.push("released");
+				},
+			]);
+
+			const call = runner.runIsolationOperation(
+				operation(),
+				async () => {
+					events.push("body started");
+					bodyStarted.resolve();
+					await bodyMaySettle.promise;
+					events.push("body settled");
+					return "finished";
+				},
+				controller.signal,
+			);
+			await bodyStarted.promise;
+			controller.abort(new Error("active cancellation"));
+			await Promise.resolve();
+			expect(events).toEqual(["body started"]);
+			expect(releaseSettlement).toBeUndefined();
+
+			bodyMaySettle.resolve();
+			await expect(call).resolves.toBe("finished");
+			expect(events).toEqual(["body started", "body settled", "released"]);
+			expect(releaseSettlement).toEqual({ status: "completed" });
+		});
+
+		it("shares one admission with nested operations and waits for unawaited nested work", async () => {
+			const events: string[] = [];
+			const nestedStarted = Promise.withResolvers<void>();
+			const nestedMaySettle = Promise.withResolvers<void>();
+			const outerBodySettled = Promise.withResolvers<void>();
+			const operationIds: string[] = [];
+			const runner = isolationRunner([
+				async operationInfo => {
+					operationIds.push(operationInfo.operationId);
+					events.push("admitted");
+					return async () => {
+						events.push("released");
+					};
+				},
+			]);
+
+			const outer = runner.runIsolationOperation(operation(), async () => {
+				events.push("outer started");
+				void runner.runIsolationOperation(operation("baseline"), async () => {
+					events.push("nested started");
+					nestedStarted.resolve();
+					await nestedMaySettle.promise;
+					events.push("nested settled");
+				});
+				await nestedStarted.promise;
+				events.push("outer settled");
+				outerBodySettled.resolve();
+			});
+
+			await outerBodySettled.promise;
+			await Promise.resolve();
+			expect(operationIds).toHaveLength(1);
+			expect(events).toEqual(["admitted", "outer started", "nested started", "outer settled"]);
+
+			nestedMaySettle.resolve();
+			await outer;
+			expect(events).toEqual(["admitted", "outer started", "nested started", "outer settled", "nested settled", "released"]);
+		});
+
+		it("admits independent sibling operations separately", async () => {
+			const operationIds: string[] = [];
+			const runner = isolationRunner([
+				async operationInfo => {
+					operationIds.push(operationInfo.operationId);
+					return undefined;
+				},
+			]);
+
+			await Promise.all([
+				runner.runIsolationOperation(operation("prepare"), async () => {}),
+				runner.runIsolationOperation(operation("baseline"), async () => {}),
+			]);
+
+			expect(operationIds).toHaveLength(2);
+			expect(new Set(operationIds).size).toBe(2);
+		});
+
+		it("vetoes before the body and releases earlier permits as not-started", async () => {
+			const veto = new Error("host slot unavailable");
+			const releases: IsolationOperationSettlement[] = [];
+			let bodyStarted = false;
+			const runner = isolationRunner([
+				async () => async settlement => {
+					releases.push(settlement);
+				},
+				async () => {
+					throw veto;
+				},
+			]);
+
+			await expect(
+				runner.runIsolationOperation(operation(), async () => {
+					bodyStarted = true;
+				}),
+			).rejects.toBe(veto);
+			expect(bodyStarted).toBe(false);
+			expect(releases).toEqual([{ status: "not-started" }]);
+		});
+
+		it("releases in reverse order, attempts every release, and aggregates failures with the body failure", async () => {
+			const bodyFailure = new Error("body failed");
+			const firstReleaseFailure = new Error("first release failed");
+			const secondReleaseFailure = new Error("second release failed");
+			const releaseOrder: string[] = [];
+			const settlements: IsolationOperationSettlement[] = [];
+			const runner = isolationRunner([
+				async () => async settlement => {
+					releaseOrder.push("first");
+					settlements.push(settlement);
+					throw firstReleaseFailure;
+				},
+				async () => async settlement => {
+					releaseOrder.push("second");
+					settlements.push(settlement);
+					throw secondReleaseFailure;
+				},
+			]);
+
+			const failure = await runner.runIsolationOperation(operation(), async () => {
+				throw bodyFailure;
+			}).then(
+				() => {
+					throw new Error("expected isolation operation to fail");
+				},
+				error => error,
+			);
+
+			expect(failure).toBeInstanceOf(AggregateError);
+			expect((failure as AggregateError).errors).toEqual([bodyFailure, secondReleaseFailure, firstReleaseFailure]);
+			expect(releaseOrder).toEqual(["second", "first"]);
+			expect(settlements).toEqual([
+				{ status: "failed", error: bodyFailure },
+				{ status: "failed", error: bodyFailure },
+			]);
+		});
+
+		it("fails a completed operation when a release fails", async () => {
+			const releaseFailure = new Error("release failed");
+			let settlement: IsolationOperationSettlement | undefined;
+			const runner = isolationRunner([
+				async () => async received => {
+					settlement = received;
+					throw releaseFailure;
+				},
+			]);
+
+			await expect(runner.runIsolationOperation(operation(), async () => "body completed")).rejects.toBe(releaseFailure);
+			expect(settlement).toEqual({ status: "completed" });
+		});
+	});
+
 	describe("invokeTool same-tool delegation", () => {
 		// Records what the native tool actually received, so the inherited abort/progress channels and
 		// the caller context are observable.
@@ -4572,6 +4889,7 @@ describe("ExtensionRunner", () => {
 				path: extensionPath,
 				resolvedPath: extensionPath,
 				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
+				isolationOperationGates: [],
 				tools: new Map(),
 				assistantThinkingRenderers: [],
 				fileWriteFallbackHandlers: [],
