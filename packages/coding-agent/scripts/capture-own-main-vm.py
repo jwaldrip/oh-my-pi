@@ -35,6 +35,7 @@ MAX_FILTERED_EVENT_ROWS = 4_096
 MAX_NATIVE_FRAMES_PER_EVENT = 64
 MAX_NUMERIC_ARGS_PER_EVENT = 16
 MAX_ERROR_EXCERPT_BYTES = 4_096
+MAX_RESOLVED_XML_NODES_PER_ROW = 512
 PROC_PIDREGIONINFO = 7
 
 
@@ -499,6 +500,8 @@ def walk_regions(pid: int, deadline: float) -> dict[str, object]:
     cursor = 0
     output_bytes = 0
     incomplete: str | None = None
+    end_errno = 0
+    end_reason = "unknown"
     started_ns = time.monotonic_ns()
     while len(regions) < MAX_REGION_COUNT:
         if time.monotonic() >= deadline:
@@ -509,8 +512,15 @@ def walk_regions(pid: int, deadline: float) -> dict[str, object]:
         result = _LIBPROC.proc_pidinfo(pid, PROC_PIDREGIONINFO, cursor, ctypes.byref(info), ctypes.sizeof(info))
         error = ctypes.get_errno()
         if result == 0:
-            if error != 0:
-                incomplete = f"proc_pidinfo errno {error}"
+            end_errno = error
+            # macOS returns EINVAL after a successfully advancing walk reaches
+            # the end of this task's address space. It is not accepted before
+            # a first region or after a non-progressing cursor.
+            if error == errno.EINVAL and regions and cursor > 0:
+                end_reason = "end-of-address-space"
+                break
+            incomplete = f"proc_pidinfo errno {error}"
+            end_reason = "error"
             break
         if result != ctypes.sizeof(info):
             incomplete = f"proc_pidinfo returned {result} bytes"
@@ -536,6 +546,8 @@ def walk_regions(pid: int, deadline: float) -> dict[str, object]:
         "startedMonotonicNs": started_ns,
         "endedMonotonicNs": ended_ns,
         "regionCount": len(regions),
+        "endErrno": end_errno,
+        "endReason": end_reason,
         "outputBytes": output_bytes,
         "incomplete": incomplete,
         "regions": regions,
@@ -599,8 +611,10 @@ def dereference(element: ET.Element, by_id: dict[str, ET.Element]) -> ET.Element
     current = element
     while "ref" in current.attrib:
         reference = current.attrib["ref"]
-        if reference in seen or reference not in by_id:
-            break
+        if reference in seen:
+            raise CaptureIncomplete("event export has a cyclic XML reference")
+        if reference not in by_id:
+            raise CaptureIncomplete("event export has an unresolved XML reference")
         seen.add(reference)
         current = by_id[reference]
     return current
@@ -608,10 +622,17 @@ def dereference(element: ET.Element, by_id: dict[str, ET.Element]) -> ET.Element
 
 def descendants(element: ET.Element, by_id: dict[str, ET.Element]) -> list[ET.Element]:
     result: list[ET.Element] = []
+    seen_nodes: set[int] = set()
     stack = [element]
     while stack:
         current = dereference(stack.pop(), by_id)
+        marker = id(current)
+        if marker in seen_nodes:
+            continue
+        seen_nodes.add(marker)
         result.append(current)
+        if len(result) > MAX_RESOLVED_XML_NODES_PER_ROW:
+            raise CaptureIncomplete("event export exceeded the per-row XML traversal bound")
         stack.extend(reversed(list(current)))
     return result
 
