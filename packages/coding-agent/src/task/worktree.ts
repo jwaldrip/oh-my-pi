@@ -920,12 +920,11 @@ export async function ensureIsolation(
 			};
 		} catch (error) {
 			const message = errorMessage(error);
-			if (natives.isoIsUnavailableError(message)) {
-				await fs.rm(baseDir, { recursive: true, force: true });
-				fallbackReason ??= message;
-				continue;
-			}
+			const unavailable = natives.isoIsUnavailableError(message);
 			try {
+				// `isoStart` may fail after a backend has created its mount,
+				// clone, or copy destination. Stop positively before touching
+				// the ownership directory, including an unavailable candidate.
 				await natives.isoStop(candidate, mergedDir);
 			} catch (teardownError) {
 				await retainUnresolvedIsolation(baseDir, candidate, "isolation setup teardown failed", [error, teardownError]);
@@ -936,6 +935,10 @@ export async function ensureIsolation(
 				throw new Error(`isolation setup stopped its backend but could not remove ${baseDir}`, {
 					cause: aggregateError("isolation setup cleanup failed", [error, removeError]),
 				});
+			}
+			if (unavailable) {
+				fallbackReason ??= message;
+				continue;
 			}
 			throw error;
 		}

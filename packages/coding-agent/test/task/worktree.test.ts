@@ -241,6 +241,7 @@ describe("worktree isolation helpers", () => {
 			vi.spyOn(natives, "isoIsUnavailableError").mockImplementation(message =>
 				message.startsWith("ISO_UNAVAILABLE:"),
 			);
+			const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
 
 			const handle = await ensureIsolation(repo, "retry-path-unavailable");
 
@@ -249,6 +250,7 @@ describe("worktree isolation helpers", () => {
 				natives.IsoBackendKind.Btrfs,
 				natives.IsoBackendKind.Rcopy,
 			]);
+			expect(isoStop).toHaveBeenCalledTimes(1);
 			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
 			expect(handle.fellBack).toBe(true);
 			expect(handle.fallbackReason).toBe(unavailable.message);
