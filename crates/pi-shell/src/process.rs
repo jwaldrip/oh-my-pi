@@ -792,25 +792,49 @@ impl Process {
 	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
-		let descendants = self.signalable_descendants(protected);
 		let mut signaled = 0u32;
-		// If self leads its own process group, also signal the group — this
-		// catches grandchildren reparented to init when their immediate parent
-		// died inside the descendant walk.
+		self.visit_signal_tree(
+			protected,
+			&mut |pgid| {
+				let _ = kill_process_group(pgid, signal);
+			},
+			&mut |process| {
+				if process.signal(signal) {
+					signaled += 1;
+				}
+			},
+		);
+		signaled
+	}
+
+	/// Visit this process tree's signal targets without delivering a signal.
+	///
+	/// Group leaders are visited before their children, whose existing
+	/// children-first order is retained. Callers can snapshot every target
+	/// before delivery, which avoids one target's signal changing the later
+	/// tree walk. Protected nodes and every descendant reached through them
+	/// remain excluded.
+	fn visit_signal_tree(
+		&self,
+		protected: &HashSet<i32>,
+		on_leader_group: &mut impl FnMut(i32),
+		on_process: &mut impl FnMut(&Process),
+	) {
+		let descendants = self.signalable_descendants(protected);
+		// If self leads its own process group, also visit the group. This catches
+		// grandchildren reparented to init when their immediate parent died
+		// inside the descendant walk.
 		if let Some(pgid) = self.group_id()
 			&& pgid == self.inner.pid()
 		{
-			let _ = kill_process_group(pgid, signal);
+			on_leader_group(pgid);
 		}
 		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
+			on_process(child);
 		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
+		if !protected.contains(&self.pid()) {
+			on_process(self);
 		}
-		signaled
 	}
 
 	/// Live descendants with every protected subtree pruned, not just the exact
@@ -1059,18 +1083,40 @@ pub const TERM_SIGNAL: i32 = 15;
 /// POSIX `SIGKILL` / Windows hard-termination sentinel.
 pub const KILL_SIGNAL: i32 = 9;
 
+/// Test-only record of an actual cancellation dispatch.
+///
+/// The sender is attached to one [`SpawnRegistry`] at a time so concurrent
+/// shell tests cannot observe each other's cancellation waves.
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TerminationDispatchEvent {
+	GroupDispatched {
+		pgid:      i32,
+		signal:    i32,
+		succeeded: bool,
+	},
+	ProcessDispatched {
+		pid:       i32,
+		signal:    i32,
+		succeeded: bool,
+	},
+	FirstTermDispatchComplete,
+}
+
 /// A collection of process groups and process trees scheduled for
 /// termination together.
 ///
-/// Built incrementally from job records or PTY metadata, then signalled
-/// in escalating waves (typically `TERM_SIGNAL` followed by
-/// `KILL_SIGNAL` after a grace period). Process-group calls are no-ops
-/// on platforms that do not expose process groups.
+/// Built incrementally from job records or PTY metadata. Every signal call
+/// freshly snapshots effective group and process coverage, then sends each
+/// group before any uncovered pinned process. Waves may therefore discover
+/// descendants created after an earlier signal.
 #[derive(Default)]
 pub struct TerminationTargets {
 	pgids:     Vec<i32>,
 	processes: Vec<Process>,
 	seen_pids: HashSet<i32>,
+	#[cfg(test)]
+	event_sender: Option<flume::Sender<TerminationDispatchEvent>>,
 }
 
 impl TerminationTargets {
@@ -1124,11 +1170,91 @@ impl TerminationTargets {
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
+		self.signal_with(
+			|pgid| {
+				let succeeded = kill_process_group(pgid, signal);
+				#[cfg(test)]
+				self.emit_test_event(TerminationDispatchEvent::GroupDispatched {
+					pgid,
+					signal,
+					succeeded,
+				});
+				succeeded
+			},
+			|process| {
+				let succeeded = process.signal(signal);
+				#[cfg(test)]
+				self.emit_test_event(TerminationDispatchEvent::ProcessDispatched {
+					pid: process.pid(),
+					signal,
+					succeeded,
+				});
+				succeeded
+			},
+		);
+	}
+
+	/// Snapshot all effective coverage before dispatching any callback.
+	///
+	/// A successful process-group delivery covers only candidates whose group
+	/// was observed in this call. Failed group and direct sends remain eligible
+	/// for the next fallback candidate, while a successful direct PID is sent
+	/// only once per call.
+	fn signal_with(
+		&self,
+		mut signal_group: impl FnMut(i32) -> bool,
+		mut signal_process: impl FnMut(&Process) -> bool,
+	) {
+		let mut group_ids = Vec::with_capacity(self.pgids.len());
+		let mut known_groups = HashSet::new();
 		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
+			if known_groups.insert(pgid) {
+				group_ids.push(pgid);
+			}
 		}
+
+		let protected = host_protected_pids();
+		let mut candidates = Vec::new();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			process.visit_signal_tree(
+				&protected,
+				&mut |pgid| {
+					if known_groups.insert(pgid) {
+						group_ids.push(pgid);
+					}
+				},
+				&mut |candidate| {
+					candidates.push((candidate.clone(), candidate.group_id()));
+				},
+			);
+		}
+
+		let mut covered_groups = HashSet::new();
+		for pgid in group_ids {
+			if signal_group(pgid) {
+				covered_groups.insert(pgid);
+			}
+		}
+
+		let mut directly_signaled = HashSet::new();
+		for (candidate, group_id) in candidates {
+			if group_id.is_some_and(|pgid| covered_groups.contains(&pgid)) {
+				continue;
+			}
+			let pid = candidate.pid();
+			if directly_signaled.contains(&pid) {
+				continue;
+			}
+			if signal_process(&candidate) {
+				directly_signaled.insert(pid);
+			}
+		}
+	}
+
+	#[cfg(test)]
+	fn emit_test_event(&self, event: TerminationDispatchEvent) {
+		if let Some(sender) = &self.event_sender {
+			let _ = sender.send(event);
 		}
 	}
 }
@@ -1175,6 +1301,8 @@ struct RegistryState {
 #[derive(Default)]
 pub struct SpawnRegistry {
 	state: Mutex<RegistryState>,
+	#[cfg(test)]
+	event_sender: Mutex<Option<flume::Sender<TerminationDispatchEvent>>>,
 }
 
 impl SpawnRegistry {
@@ -1198,6 +1326,22 @@ impl SpawnRegistry {
 	#[must_use]
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Install the test-only event stream for this registry's cancellation
+	/// waves. The channel is unbounded, so production-shaped dispatch never
+	/// waits for test observation.
+	#[cfg(test)]
+	pub(crate) fn set_test_event_sender(&self, sender: flume::Sender<TerminationDispatchEvent>) {
+		*self.event_sender.lock() = Some(sender);
+	}
+
+	/// Record completion of the first nonempty TERM dispatch for this registry.
+	#[cfg(test)]
+	pub(crate) fn emit_first_term_dispatch_complete(&self) {
+		if let Some(sender) = self.event_sender.lock().as_ref() {
+			let _ = sender.send(TerminationDispatchEvent::FirstTermDispatchComplete);
+		}
 	}
 
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
@@ -1258,6 +1402,8 @@ impl SpawnRegistry {
 	/// set even when the record-time threshold hasn't fired yet.
 	#[must_use]
 	pub fn build_targets(&self) -> TerminationTargets {
+		#[cfg(test)]
+		let event_sender = self.event_sender.lock().clone();
 		let mut targets = TerminationTargets::new();
 		let spawned = {
 			let mut state = self.state.lock();
@@ -1284,6 +1430,10 @@ impl SpawnRegistry {
 			{
 				targets.add_pgid(pgid);
 			}
+		}
+		#[cfg(test)]
+		{
+			targets.event_sender = event_sender;
 		}
 		targets
 	}
@@ -1357,6 +1507,365 @@ const fn platform_process_group_alive(_pgid: i32) -> bool {
 mod tests {
 	use super::*;
 
+	#[cfg(unix)]
+	use std::{
+		cell::RefCell,
+		io::{BufRead as _, BufReader, Write as _},
+		os::unix::process::CommandExt as _,
+		process::{Child, ChildStdin, ChildStdout, Command as StdCommand, Stdio},
+	};
+
+	#[cfg(unix)]
+	const SIGNAL_TREE_FIXTURE_ENV: &str = "PI_SHELL_SIGNAL_TREE_FIXTURE";
+
+	#[cfg(unix)]
+	struct SignalTreeFixture {
+		child:    Child,
+		control:  ChildStdin,
+		output:   BufReader<ChildStdout>,
+		pid:      i32,
+		children: Vec<i32>,
+	}
+
+	#[cfg(unix)]
+	impl SignalTreeFixture {
+		fn start(mode: &str) -> Self {
+			let mut command = StdCommand::new(std::env::current_exe().expect("current test executable"));
+			command
+				.args(["--exact", "process::tests::signal_tree_fixture", "--nocapture"])
+				.env(SIGNAL_TREE_FIXTURE_ENV, mode)
+				.stdin(Stdio::piped())
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null());
+			command.process_group(0);
+
+			let mut child = command.spawn().expect("spawn signal-tree fixture");
+			let pid = i32::try_from(child.id()).expect("fixture pid fits i32");
+			let control = child.stdin.take().expect("fixture stdin");
+			let output = BufReader::new(child.stdout.take().expect("fixture stdout"));
+			let mut fixture = Self {
+				child,
+				control,
+				output,
+				pid,
+				children: Vec::new(),
+			};
+
+			let ready = fixture.read_record("fixture-ready:");
+			let mut pids = ready
+				.strip_prefix("fixture-ready:")
+				.expect("fixture readiness prefix")
+				.split(':')
+				.map(|pid| pid.parse::<i32>().expect("fixture pid"))
+				.collect::<Vec<_>>()
+				.into_iter();
+			assert_eq!(pids.next(), Some(pid), "fixture reported a different root pid");
+			fixture.children.extend(pids);
+			fixture
+		}
+
+		fn read_record(&mut self, prefix: &str) -> String {
+			loop {
+				let mut record = String::new();
+				assert_ne!(
+					self.output.read_line(&mut record).expect("read fixture output"),
+					0,
+					"fixture exited before emitting {prefix:?}",
+				);
+				let record = record.trim_end().to_owned();
+				if record.starts_with(prefix) {
+					return record;
+				}
+			}
+		}
+
+		fn send(&mut self, command: &str) {
+			writeln!(self.control, "{command}").expect("write fixture control");
+			self.control.flush().expect("flush fixture control");
+		}
+
+		fn spawn_descendant(&mut self) -> i32 {
+			self.send("spawn");
+			let child = self
+				.read_record("fixture-child:")
+				.strip_prefix("fixture-child:")
+				.expect("fixture child prefix")
+				.parse::<i32>()
+				.expect("fixture child pid");
+			self.children.push(child);
+			child
+		}
+
+		fn stop(&mut self) {
+			if self.child.try_wait().expect("check fixture status").is_none() {
+				self.send("stop");
+				let _ = self.child.wait();
+			}
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for SignalTreeFixture {
+		fn drop(&mut self) {
+			if self.child.try_wait().ok().flatten().is_some() {
+				return;
+			}
+			for &pid in &self.children {
+				// SAFETY: each pid came from this fixture's owned child process.
+				let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+			}
+			// SAFETY: `pid` is this fixture's dedicated process-group leader.
+			let _ = unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+			let _ = self.child.kill();
+			let _ = self.child.wait();
+		}
+	}
+
+	#[cfg(unix)]
+	fn spawn_fixture_child(own_process_group: bool) -> Child {
+		let mut command = StdCommand::new("sh");
+		command
+			.args(["-c", "while :; do :; done"])
+			.stdin(Stdio::null())
+			.stdout(Stdio::null())
+			.stderr(Stdio::null());
+		if own_process_group {
+			command.process_group(0);
+		}
+		command.spawn().expect("spawn fixture descendant")
+	}
+
+	/// Child process for deterministic tree-topology tests. It is launched by
+	/// this test binary with a dedicated process group, then accepts `spawn`
+	/// and `stop` commands through stdin.
+	#[cfg(unix)]
+	#[test]
+	fn signal_tree_fixture() {
+		let Ok(mode) = std::env::var(SIGNAL_TREE_FIXTURE_ENV) else {
+			return;
+		};
+
+		let mut children = Vec::new();
+		if mode == "escaped" {
+			children.push(spawn_fixture_child(true));
+		}
+
+		{
+			let stdout = std::io::stdout();
+			let mut stdout = stdout.lock();
+			write!(stdout, "fixture-ready:{}", std::process::id()).expect("write fixture readiness");
+			for child in &children {
+				write!(stdout, ":{}", child.id()).expect("write fixture child pid");
+			}
+			writeln!(stdout).expect("finish fixture readiness");
+			stdout.flush().expect("flush fixture readiness");
+		}
+
+		let stdin = std::io::stdin();
+		let mut input = BufReader::new(stdin.lock());
+		loop {
+			let mut command = String::new();
+			if input.read_line(&mut command).expect("read fixture control") == 0 {
+				break;
+			}
+			match command.trim() {
+				"spawn" => {
+					let child = spawn_fixture_child(false);
+					let pid = child.id();
+					children.push(child);
+					let stdout = std::io::stdout();
+					let mut stdout = stdout.lock();
+					writeln!(stdout, "fixture-child:{pid}").expect("write fixture child");
+					stdout.flush().expect("flush fixture child");
+				}
+				"stop" => break,
+				other => panic!("unexpected fixture command: {other:?}"),
+			}
+		}
+
+		for mut child in children {
+			let _ = child.kill();
+			let _ = child.wait();
+		}
+	}
+
+	#[cfg(unix)]
+	#[derive(Debug, Eq, PartialEq)]
+	enum RecordedDispatch {
+		Group(i32),
+		Process(i32),
+	}
+
+	#[cfg(unix)]
+	fn record_target_dispatches(
+		targets: &TerminationTargets,
+		group_succeeds: bool,
+	) -> Vec<RecordedDispatch> {
+		let recorded = RefCell::new(Vec::new());
+		targets.signal_with(
+			|pgid| {
+				recorded.borrow_mut().push(RecordedDispatch::Group(pgid));
+				group_succeeds
+			},
+			|process| {
+				recorded.borrow_mut().push(RecordedDispatch::Process(process.pid()));
+				true
+			},
+		);
+		recorded.into_inner()
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_dedupe_an_explicit_group_and_its_leader() {
+		let mut fixture = SignalTreeFixture::start("dynamic");
+		let root = Process::from_pid(fixture.pid).expect("pin fixture root");
+		let mut targets = TerminationTargets::new();
+		targets.add_pgid(fixture.pid);
+		targets.add_process(root);
+
+		let recorded = record_target_dispatches(&targets, true);
+		fixture.stop();
+
+		assert_eq!(recorded, vec![RecordedDispatch::Group(fixture.pid)]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_snapshot_later_leader_before_delivering_to_earlier_root() {
+		let mut fixture = SignalTreeFixture::start("dynamic");
+		let child_pid = fixture.spawn_descendant();
+		let child = Process::from_pid(child_pid).expect("pin fixture child");
+		let root = Process::from_pid(fixture.pid).expect("pin fixture root");
+		let mut targets = TerminationTargets::new();
+		// C is visited first and shares G's group, but G is discovered only by
+		// visiting the later root. No callback may run until both visits finish.
+		targets.add_process(child);
+		targets.add_process(root);
+
+		let recorded = record_target_dispatches(&targets, true);
+		fixture.stop();
+
+		assert_eq!(recorded, vec![RecordedDispatch::Group(fixture.pid)]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_fall_back_to_pinned_processes_when_a_group_signal_fails() {
+		let mut fixture = SignalTreeFixture::start("dynamic");
+		let root = Process::from_pid(fixture.pid).expect("pin fixture root");
+		let mut targets = TerminationTargets::new();
+		targets.add_process(root);
+
+		let recorded = record_target_dispatches(&targets, false);
+		fixture.stop();
+
+		assert_eq!(
+			recorded,
+			vec![
+				RecordedDispatch::Group(fixture.pid),
+				RecordedDispatch::Process(fixture.pid),
+			],
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_keep_an_escaped_descendant_after_group_coverage() {
+		let mut fixture = SignalTreeFixture::start("escaped");
+		let escaped_pid = *fixture.children.first().expect("escaped fixture child");
+		let root = Process::from_pid(fixture.pid).expect("pin fixture root");
+		let mut targets = TerminationTargets::new();
+		targets.add_process(root);
+
+		let recorded = record_target_dispatches(&targets, true);
+		fixture.stop();
+
+		assert_eq!(
+			recorded,
+			vec![
+				RecordedDispatch::Group(fixture.pid),
+				RecordedDispatch::Process(escaped_pid),
+			],
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_deliver_an_overlapping_direct_pid_once() {
+		let mut fixture = SignalTreeFixture::start("dynamic");
+		let child_pid = fixture.spawn_descendant();
+		let child = Process::from_pid(child_pid).expect("pin fixture child");
+		let root = Process::from_pid(fixture.pid).expect("pin fixture root");
+		let mut targets = TerminationTargets::new();
+		targets.add_process(child);
+		targets.add_process(root);
+
+		let recorded = record_target_dispatches(&targets, false);
+		fixture.stop();
+
+		assert_eq!(
+			recorded,
+			vec![
+				RecordedDispatch::Group(fixture.pid),
+				RecordedDispatch::Process(child_pid),
+				RecordedDispatch::Process(fixture.pid),
+			],
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_reenumerate_each_call_and_registry_rebuilds_new_spawns() {
+		let mut fixture = SignalTreeFixture::start("dynamic");
+		let root = Process::from_pid(fixture.pid).expect("pin fixture root");
+		let mut targets = TerminationTargets::new();
+		targets.add_process(root.clone());
+
+		let first_wave = record_target_dispatches(&targets, false);
+		let child_pid = fixture.spawn_descendant();
+		let second_wave = record_target_dispatches(&targets, false);
+
+		let registry = SpawnRegistry::new();
+		registry.record(Some(fixture.pid), Some(root));
+		let initial_registry_wave = record_target_dispatches(&registry.build_targets(), true);
+
+		let mut later = SignalTreeFixture::start("dynamic");
+		let later_root = Process::from_pid(later.pid).expect("pin later fixture root");
+		registry.record(Some(later.pid), Some(later_root));
+		let rebuilt_registry_wave = record_target_dispatches(&registry.build_targets(), true);
+
+		fixture.stop();
+		later.stop();
+
+		assert_eq!(
+			first_wave,
+			vec![
+				RecordedDispatch::Group(fixture.pid),
+				RecordedDispatch::Process(fixture.pid),
+			],
+		);
+		assert_eq!(
+			second_wave,
+			vec![
+				RecordedDispatch::Group(fixture.pid),
+				RecordedDispatch::Process(child_pid),
+				RecordedDispatch::Process(fixture.pid),
+			],
+		);
+		assert_eq!(
+			initial_registry_wave,
+			vec![RecordedDispatch::Group(fixture.pid)],
+		);
+		assert_eq!(
+			rebuilt_registry_wave,
+			vec![
+				RecordedDispatch::Group(fixture.pid),
+				RecordedDispatch::Group(later.pid),
+			],
+		);
+	}
+
 	/// The harness pid must be the only protected pid. Including its recorded
 	/// parent would be unsafe on Windows: that stale numeric pid can have been
 	/// recycled onto the timed-out command, causing cancellation to spare the
@@ -1404,10 +1913,10 @@ mod tests {
 			"a protected pid must survive a cancellation sweep",
 		);
 
-		// With no protection the same sweep reaps it — proves the skip is what
-		// spared it, not a dead target.
+		// With no protection the same sweep reaps it. The count covers the one
+		// successful direct delivery, not any process-group attempt.
 		let reaped = root.signal_tree_excluding(KILL_SIGNAL, &HashSet::new());
-		assert!(reaped >= 1, "an unprotected root must be signalled");
+		assert_eq!(reaped, 1, "an unprotected root receives one direct signal");
 		let _ = child.wait();
 	}
 
