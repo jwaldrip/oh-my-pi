@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 const EXPECTED_PREFIX_BYTES = 149_212_043;
 const EXPECTED_CUTOFF = "2026-10-23T03:25:20Z";
