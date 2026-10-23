@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed byte-capped session scans hanging when the limit split a multibyte JSON record
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
