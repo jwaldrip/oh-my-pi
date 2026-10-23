@@ -9,8 +9,10 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { BoundedMemoryTerminal, BoundedRenderScheduler } from "./helpers/bounded-memory-terminal";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
+import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { heapStats } from "bun:jsc";
@@ -20,11 +22,15 @@ const MIB = 1024 * 1024;
 const DEFAULT_FIXTURE_BYTES = 4 * MIB;
 const DEFAULT_ENTRIES = 512;
 const DEFAULT_CYCLES = 8;
+const DEFAULT_UPDATES_PER_CYCLE = 32;
+const DEFAULT_UPDATE_BYTES = 4096;
 const DEFAULT_FIXTURE_LIMIT = 32 * MIB;
 const ABSOLUTE_FIXTURE_LIMIT = 160 * MIB;
 const MAX_NORMAL_RECORD_BYTES = 128 * 1024;
 const SYNTHETIC_TIMESTAMP = "2026-10-22T00:00:00.000Z";
 
+const SCENARIOS = ["teardown", "live-tool-result"] as const;
+type Scenario = (typeof SCENARIOS)[number];
 const STOP_AFTER = ["load", "prompt", "construct", "init", "replay", "wire"] as const;
 type StopAfter = (typeof STOP_AFTER)[number];
 const PAYLOAD_PLACEMENTS = ["message", "custom", "tool-result"] as const;
@@ -33,10 +39,13 @@ const GC_MODES = ["natural", "diagnostic"] as const;
 type GcMode = (typeof GC_MODES)[number];
 
 interface ProbeOptions {
+	readonly scenario: Scenario;
 	readonly stopAfter: StopAfter;
 	readonly fixtureBytes: number;
 	readonly entries: number;
 	readonly cycles: number;
+	readonly updatesPerCycle: number;
+	readonly updateBytes: number;
 	readonly payloadPlacement: PayloadPlacement;
 	readonly gcMode: GcMode;
 	readonly replayRestart: boolean;
@@ -63,6 +72,7 @@ interface ProbeRow {
 	readonly pid: number;
 	readonly cycle: number;
 	readonly stage: string;
+	readonly scenario: Scenario;
 	readonly payloadPlacement: PayloadPlacement;
 	readonly gcMode: GcMode;
 	readonly fixtureBytes: number;
@@ -70,14 +80,27 @@ interface ProbeRow {
 	readonly transcriptEntries: number;
 	readonly branchEntries: number;
 	readonly retainedEntries: number;
+	readonly sessionEntries: number;
 	readonly contextMessages: number;
 	readonly mountedComponents: number;
 	readonly pendingTools: number;
+	readonly modeConstructs: number;
+	readonly modeStops: number;
+	readonly tuiStops: number;
+	readonly updatesApplied: number;
+	readonly latestSentinelObserved: number;
+	readonly reconcilerComponentStates: number;
+	readonly reconcilerIdStates: number;
+	readonly retainedDescriptions: number;
+	readonly ttyWriterConstructed: boolean;
 	readonly wireBytes: number;
 	readonly largestWriteBytes: number;
 	readonly pendingOutputBytes: number;
 	readonly frames: number;
 	readonly acknowledgements: number;
+	readonly framesSent: number;
+	readonly framesAcknowledged: number;
+	readonly unackedFrames: number;
 	readonly stagedDisposals: number;
 	readonly jscHeapSize: number;
 	readonly jscExtraMemorySize: number;
@@ -99,6 +122,24 @@ interface CycleState {
 	mode?: InteractiveMode;
 	terminal?: BoundedMemoryTerminal;
 	stagedDisposals?: number;
+}
+
+interface LiveToolResultState {
+	readonly fixture: FixtureStats;
+	readonly options: ProbeOptions;
+	readonly manager: SessionManager;
+	readonly authStorage: AuthStorage;
+	readonly session: AgentSession;
+	readonly mode: InteractiveMode;
+	readonly terminal: ProcessTerminal;
+	toolComponent?: ToolExecutionComponent;
+	contextMessages: number;
+	modeConstructs: number;
+	modeStops: number;
+	tuiStops: number;
+	updatesApplied: number;
+	latestSentinelObserved: number;
+	mountedComponents: number;
 }
 
 class MetricsWriter {
@@ -155,10 +196,14 @@ function enumValue<T extends readonly string[]>(flag: string, values: T, fallbac
 }
 
 function parseOptions(): ProbeOptions {
+	const scenario = enumValue("--scenario", SCENARIOS, "teardown");
 	const fixtureBytes = positiveInteger("--fixture-bytes", DEFAULT_FIXTURE_BYTES);
 	const entries = positiveInteger("--entries", DEFAULT_ENTRIES);
+	const cycles = positiveInteger("--cycles", DEFAULT_CYCLES);
+	const updatesPerCycle = positiveInteger("--updates-per-cycle", DEFAULT_UPDATES_PER_CYCLE);
+	const updateBytes = positiveInteger("--update-bytes", DEFAULT_UPDATE_BYTES);
 	const payloadPlacement = enumValue("--payload", PAYLOAD_PLACEMENTS, "tool-result");
-	const replayRestart = !process.argv.includes("--skip-replay-restart");
+	const replayRestart = scenario === "teardown" && !process.argv.includes("--skip-replay-restart");
 	const clearHistoryHooks = process.argv.includes("--clear-history-hooks");
 	const disposeTranscript = process.argv.includes("--dispose-transcript");
 	if (fixtureBytes > ABSOLUTE_FIXTURE_LIMIT) {
@@ -170,16 +215,25 @@ function parseOptions(): ProbeOptions {
 	if (payloadPlacement === "tool-result" && entries % 2 !== 0) {
 		throw new Error("--entries must be even for paired tool-result payloads");
 	}
+	if (scenario === "live-tool-result" && payloadPlacement !== "tool-result") {
+		throw new Error("live-tool-result requires paired tool-result fixture entries");
+	}
+	if (scenario === "live-tool-result" && valueFor("--stop-after") !== undefined) {
+		throw new Error("live-tool-result keeps the mode live and does not accept --stop-after");
+	}
 	const payloadSlots = payloadPlacement === "tool-result" ? entries / 2 : entries;
 	if (Math.ceil(fixtureBytes / payloadSlots) > MAX_NORMAL_RECORD_BYTES) {
 		throw new Error(`payload exceeds the ${MAX_NORMAL_RECORD_BYTES} byte normal-record cap`);
 	}
 	if (replayRestart && entries < 64) throw new Error("replay restart exercise needs at least 64 linked entries");
 	return {
+		scenario,
 		stopAfter: enumValue("--stop-after", STOP_AFTER, "wire"),
 		fixtureBytes,
 		entries,
-		cycles: positiveInteger("--cycles", DEFAULT_CYCLES),
+		cycles,
+		updatesPerCycle,
+		updateBytes,
 		payloadPlacement,
 		gcMode: enumValue("--gc", GC_MODES, "natural"),
 		replayRestart,
@@ -387,6 +441,7 @@ async function emit(
 		pid: process.pid,
 		cycle: state.cycle,
 		stage,
+		scenario: state.options.scenario,
 		payloadPlacement: state.options.payloadPlacement,
 		gcMode: state.options.gcMode,
 		fixtureBytes: state.fixture.payloadBytes,
@@ -394,14 +449,27 @@ async function emit(
 		transcriptEntries: retainedEntries,
 		branchEntries: retainedEntries,
 		retainedEntries,
+		sessionEntries: manager?.getEntries().length ?? 0,
 		contextMessages: state.contextMessages ?? 0,
 		mountedComponents: state.mode?.chatContainer.children.length ?? 0,
 		pendingTools: state.mode?.pendingTools.size ?? 0,
+		modeConstructs: 0,
+		modeStops: 0,
+		tuiStops: 0,
+		updatesApplied: 0,
+		latestSentinelObserved: 0,
+		reconcilerComponentStates: 0,
+		reconcilerIdStates: 0,
+		retainedDescriptions: 0,
+		ttyWriterConstructed: false,
 		wireBytes: terminal?.wireBytes ?? 0,
 		largestWriteBytes: terminal?.largestWriteBytes ?? 0,
 		pendingOutputBytes: terminal?.pendingOutputBytes ?? 0,
 		frames: terminal?.frames ?? 0,
 		acknowledgements: terminal?.acknowledgements ?? 0,
+		framesSent: terminal?.frames ?? 0,
+		framesAcknowledged: terminal?.acknowledgements ?? 0,
+		unackedFrames: Math.max(0, (terminal?.frames ?? 0) - (terminal?.acknowledgements ?? 0)),
 		stagedDisposals: state.stagedDisposals ?? 0,
 		jscHeapSize: heap.heapSize,
 		jscExtraMemorySize: heap.extraMemorySize,
@@ -671,13 +739,321 @@ async function verifyRestartPersistence(file: string, cwd: string, expectedEntri
 	}
 }
 
-async function main(): Promise<void> {
+const LIVE_TOOL_CALL_ID = "live-tool-result-call";
+const LIVE_TOOL_NAME = "memory_probe";
+const LIVE_TOOL_ARGS = { fixture: "live-tool-result", bytes: DEFAULT_UPDATE_BYTES };
+
+function liveSentinel(batch: number, update: number): string {
+	return `live-tool-result:${batch}:${update}`;
+}
+
+function liveResult(
+	sentinel: string,
+	bytes: number,
+): { content: { type: "text"; text: string }[]; details?: undefined } {
+	const prefix = `${sentinel}\n`;
+	const prefixBytes = Buffer.byteLength(prefix, "utf8");
+	if (prefixBytes > bytes) throw new Error(`live sentinel exceeds ${bytes} byte result budget`);
+	const text = `${prefix}${"x".repeat(bytes - prefixBytes)}`;
+	if (Buffer.byteLength(text, "utf8") !== bytes)
+		throw new Error("live tool result did not preserve its fixed payload size");
+	return { content: [{ type: "text", text }] };
+}
+
+function liveTerminalResult(
+	state: LiveToolResultState,
+	sentinel: string,
+): Parameters<SessionManager["appendMessage"]>[0] {
+	return {
+		role: "toolResult",
+		toolCallId: LIVE_TOOL_CALL_ID,
+		toolName: LIVE_TOOL_NAME,
+		content: liveResult(sentinel, state.options.updateBytes).content,
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
+function liveAssistantCall(): Parameters<SessionManager["appendMessage"]>[0] {
+	return {
+		role: "assistant",
+		content: [{ type: "toolCall", id: LIVE_TOOL_CALL_ID, name: LIVE_TOOL_NAME, arguments: LIVE_TOOL_ARGS }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "memory-probe",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+	};
+}
+
+async function emitLive(
+	metrics: MetricsWriter,
+	stage: string,
+	state: LiveToolResultState,
+	runtime?: RuntimeIdentity,
+): Promise<void> {
+	const heap = heapStats();
+	const native = state.mode.ui.getNativeProbeMetrics();
+	const terminal = state.terminal.getProbeMetrics();
+	const retainedEntries = state.manager.getBranchView().length;
+	await metrics.write({
+		timestamp: Date.now(),
+		pid: process.pid,
+		cycle: 1,
+		stage,
+		scenario: state.options.scenario,
+		payloadPlacement: state.options.payloadPlacement,
+		gcMode: state.options.gcMode,
+		fixtureBytes: state.fixture.payloadBytes,
+		sourceBytes: state.fixture.sourceBytes,
+		transcriptEntries: retainedEntries,
+		branchEntries: retainedEntries,
+		retainedEntries,
+		sessionEntries: state.manager.getEntries().length,
+		contextMessages: state.contextMessages,
+		mountedComponents: state.mode.chatContainer.children.length,
+		pendingTools: state.mode.pendingTools.size,
+		modeConstructs: state.modeConstructs,
+		modeStops: state.modeStops,
+		tuiStops: state.tuiStops,
+		updatesApplied: state.updatesApplied,
+		latestSentinelObserved: state.latestSentinelObserved,
+		reconcilerComponentStates: native.componentStates,
+		reconcilerIdStates: native.idStates,
+		retainedDescriptions: state.toolComponent?.getProbeRetainedDescriptionCount() ?? 0,
+		ttyWriterConstructed: terminal.ttyWriterConstructed,
+		wireBytes: terminal.wireBytes,
+		largestWriteBytes: terminal.largestWriteBytes,
+		pendingOutputBytes: terminal.pendingOutputBytes,
+		frames: native.framesSent,
+		acknowledgements: native.framesAcknowledged,
+		framesSent: native.framesSent,
+		framesAcknowledged: native.framesAcknowledged,
+		unackedFrames: native.unackedFrames,
+		stagedDisposals: 0,
+		jscHeapSize: heap.heapSize,
+		jscExtraMemorySize: heap.extraMemorySize,
+		jscObjectCount: heap.objectCount,
+		jscProtectedObjectCount: heap.protectedObjectCount,
+		bunVersion: runtime?.bunVersion ?? null,
+		bunRevision: runtime?.bunRevision ?? null,
+		nativeAddonPath: runtime?.nativeAddonPath ?? null,
+		nativeAddonVersion: runtime?.nativeAddonVersion ?? null,
+		nativeAddonChecksum: runtime?.nativeAddonChecksum ?? null,
+	});
+}
+
+async function liveStopRequested(metrics: MetricsWriter, state: LiveToolResultState): Promise<void> {
+	const stopFile = process.env.OMP_MEMORY_PROBE_STOP_FILE;
+	if (!stopFile || !(await Bun.file(stopFile).exists())) return;
+	await emitLive(metrics, "live:cooperative-stop", state);
+	throw new Error("live tool-result probe stopped at the external cooperative footprint boundary");
+}
+
+async function waitForNativeDelivery(
+	metrics: MetricsWriter,
+	state: LiveToolResultState,
+	framesBefore: number,
+	stage: string,
+): Promise<void> {
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		const native = state.mode.ui.getNativeProbeMetrics();
+		const terminal = state.terminal.getProbeMetrics();
+		if (
+			native.framesSent > framesBefore &&
+			native.framesAcknowledged >= native.framesSent &&
+			native.unackedFrames === 0 &&
+			terminal.pendingOutputBytes === 0
+		) {
+			if (state.modeStops !== 0 || state.tuiStops !== 0) {
+				throw new Error(`${stage} stopped a continuously live mode or TUI`);
+			}
+			return;
+		}
+		await liveStopRequested(metrics, state);
+		await Bun.sleep(1);
+	}
+	const native = state.mode.ui.getNativeProbeMetrics();
+	throw new Error(
+		`${stage} did not receive a native frame acknowledgement: sent=${native.framesSent} acked=${native.framesAcknowledged} unacked=${native.unackedFrames}`,
+	);
+}
+
+async function verifyLivePersistence(file: string, cwd: string, sentinel: string): Promise<void> {
+	const reopened = await SessionManager.open(file, cwd, undefined, {
+		initialCwd: cwd,
+		suppressBreadcrumb: true,
+		throwIfMissing: true,
+	});
+	try {
+		const entry = reopened.getBranchView().at(-1);
+		if (
+			entry?.type !== "message" ||
+			entry.message.role !== "toolResult" ||
+			entry.message.toolCallId !== LIVE_TOOL_CALL_ID ||
+			entry.message.content[0]?.type !== "text" ||
+			!entry.message.content[0].text.startsWith(sentinel)
+		) {
+			throw new Error("reopened manager did not retain the terminal live-tool-result");
+		}
+	} finally {
+		await releaseLoadedManager(reopened);
+	}
+}
+
+async function runLiveToolResult(
+	file: string,
+	cwd: string,
+	fixture: FixtureStats,
+	options: ProbeOptions,
+	metrics: MetricsWriter,
+	runtime: RuntimeIdentity,
+): Promise<void> {
+	const manager = await SessionManager.open(file, cwd, undefined, {
+		initialCwd: cwd,
+		suppressBreadcrumb: true,
+		throwIfMissing: true,
+	});
+	assertLinkedBranch(manager, fixture.branchEntries);
+	const { session, authStorage } = await createSession(manager);
+	const terminal = new ProcessTerminal();
+	const composer = new Composer({ terminal, preferences: { quiet: true } });
+	const mode = new InteractiveMode(
+		session,
+		"memory-probe",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		composer,
+	);
+	const state: LiveToolResultState = {
+		fixture,
+		options,
+		manager,
+		authStorage,
+		session,
+		mode,
+		terminal,
+		contextMessages: 0,
+		modeConstructs: 1,
+		modeStops: 0,
+		tuiStops: 0,
+		updatesApplied: 0,
+		latestSentinelObserved: 0,
+		mountedComponents: 0,
+	};
+	const originalModeStop = mode.stop.bind(mode);
+	mode.stop = () => {
+		state.modeStops++;
+		originalModeStop();
+	};
+	const originalTuiStop = mode.ui.stop.bind(mode.ui);
+	mode.ui.stop = () => {
+		state.tuiStops++;
+		originalTuiStop();
+	};
+
+	const context = session.buildDisplaySessionContext();
+	state.contextMessages = context.messages.length;
+	const converted = await session.convertMessagesToLlm(context.messages);
+	if (converted.length === 0) throw new Error("live paired tool-result fixture did not reach prompt conversion");
+	await mode.init({ suppressWelcomeIntro: true });
+	await waitForNativeDelivery(metrics, state, 0, "live:init");
+	if (!mode.ui.nativeRendering) throw new Error("live tool-result probe did not activate the native renderer");
+	if (!terminal.getProbeMetrics().ttyWriterConstructed) {
+		throw new Error("live tool-result probe did not construct ProcessTerminal's TtyWriter");
+	}
+
+	const replayFrames = mode.ui.getNativeProbeMetrics().framesSent;
+	await mode.renderInitialMessages({ clearTerminalHistory: true });
+	await waitForNativeDelivery(metrics, state, replayFrames, "live:replay");
+	if (mode.pendingTools.size !== 0) throw new Error("paired fixture replay left pending tools");
+	await emitLive(metrics, "live:ready", state, runtime);
+	await liveStopRequested(metrics, state);
+
+	const startFrames = mode.ui.getNativeProbeMetrics().framesSent;
+	await mode.eventController.dispatchSessionEvent({
+		type: "tool_execution_start",
+		toolCallId: LIVE_TOOL_CALL_ID,
+		toolName: LIVE_TOOL_NAME,
+		args: LIVE_TOOL_ARGS,
+	});
+	await waitForNativeDelivery(metrics, state, startFrames, "live:tool-start");
+	const component = mode.pendingTools.get(LIVE_TOOL_CALL_ID);
+	if (!(component instanceof ToolExecutionComponent))
+		throw new Error("live tool start did not create a tool component");
+	state.toolComponent = component;
+	state.mountedComponents = mode.chatContainer.children.length;
+	if (Array.from(mode.pendingTools.keys()).length !== 1) {
+		throw new Error("live tool start did not retain exactly one pending tool");
+	}
+	await emitLive(metrics, "live:tool-start", state);
+
+	let finalSentinel = "";
+	for (let batch = 1; batch <= options.cycles; batch++) {
+		for (let update = 1; update <= options.updatesPerCycle; update++) {
+			finalSentinel = liveSentinel(batch, update);
+			const framesBefore = mode.ui.getNativeProbeMetrics().framesSent;
+			await mode.eventController.dispatchSessionEvent({
+				type: "tool_execution_update",
+				toolCallId: LIVE_TOOL_CALL_ID,
+				toolName: LIVE_TOOL_NAME,
+				args: LIVE_TOOL_ARGS,
+				partialResult: liveResult(finalSentinel, options.updateBytes),
+			});
+			await waitForNativeDelivery(metrics, state, framesBefore, `live:update:${batch}:${update}`);
+			state.updatesApplied++;
+			state.latestSentinelObserved = state.updatesApplied;
+			if (Array.from(mode.pendingTools.keys()).length !== 1) {
+				throw new Error("partial result replacement lost its pending tool");
+			}
+			if (mode.chatContainer.children.length !== state.mountedComponents) {
+				throw new Error("partial result replacement changed the mounted transcript component count");
+			}
+			await emitLive(metrics, `live:update:${batch}:${update}:ack`, state);
+			await liveStopRequested(metrics, state);
+		}
+		await emitLive(metrics, `live:batch:${batch}`, state);
+	}
+
+	const finalFrames = mode.ui.getNativeProbeMetrics().framesSent;
+	await mode.eventController.dispatchSessionEvent({
+		type: "tool_execution_end",
+		toolCallId: LIVE_TOOL_CALL_ID,
+		toolName: LIVE_TOOL_NAME,
+		result: liveResult(finalSentinel, options.updateBytes),
+		isError: false,
+	});
+	await waitForNativeDelivery(metrics, state, finalFrames, "live:tool-end");
+	if (mode.pendingTools.size !== 0) throw new Error("terminal tool result did not clear the pending tool");
+	manager.appendMessage(liveAssistantCall());
+	manager.appendMessage(liveTerminalResult(state, finalSentinel));
+	await verifyLivePersistence(file, cwd, finalSentinel);
+	await emitLive(metrics, "live:complete", state);
+	if (state.modeConstructs !== 1 || state.modeStops !== 0 || state.tuiStops !== 0) {
+		throw new Error("live tool-result probe reconstructed or stopped its continuously live mode");
+	}
+}
+
+async function main(): Promise<boolean> {
 	if (process.env.OMP_SESSION_RETENTION_MEMORY_PROBE !== "1") {
 		throw new Error("session retention probe must run through run-memory-probe.py");
 	}
 	const options = parseOptions();
 	const metrics = await MetricsWriter.create();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-retention-memory-"));
+	let leaveLiveModeRunning = false;
 	try {
 		await Settings.init({ inMemory: true, cwd: dir });
 		await initTheme();
@@ -685,6 +1061,14 @@ async function main(): Promise<void> {
 		const fixture = await writeFixture(sourceFile, dir, options);
 		const runtime = await runtimeIdentity();
 		await emit(metrics, "runtime", emptyState(0, fixture, options), runtime);
+		if (options.scenario === "live-tool-result") {
+			if (options.gcMode !== "natural") throw new Error("live-tool-result requires --gc natural");
+			const liveFile = path.join(dir, "live-tool-result.jsonl");
+			await fs.copyFile(sourceFile, liveFile);
+			await runLiveToolResult(liveFile, dir, fixture, options, metrics, runtime);
+			leaveLiveModeRunning = true;
+			return true;
+		}
 		for (let cycle = 1; cycle <= options.cycles; cycle++) {
 			const state = emptyState(cycle, fixture, options);
 			const cycleFile = path.join(dir, `cycle-${cycle}.jsonl`);
@@ -692,7 +1076,7 @@ async function main(): Promise<void> {
 			await emit(metrics, "cycle:begin", state);
 			const stopped = await runCycle(cycleFile, dir, state, metrics);
 			await diagnosticCollect(metrics, state);
-			if (stopped || (await shouldStopAtBoundary(metrics, state))) return;
+			if (stopped || (await shouldStopAtBoundary(metrics, state))) return false;
 		}
 		if (options.replayRestart && (options.stopAfter === "replay" || options.stopAfter === "wire")) {
 			const state = emptyState(options.cycles + 1, fixture, options);
@@ -700,18 +1084,23 @@ async function main(): Promise<void> {
 			await fs.copyFile(sourceFile, restartFile);
 			const stopped = await runReplayRestart(restartFile, dir, state, metrics);
 			await diagnosticCollect(metrics, state);
-			if (stopped || (await shouldStopAtBoundary(metrics, state))) return;
+			if (stopped || (await shouldStopAtBoundary(metrics, state))) return false;
 			await verifyRestartPersistence(restartFile, dir, fixture.branchEntries + 2);
 		}
+		return false;
 	} finally {
 		await metrics.close();
-		await fs.rm(dir, { recursive: true, force: true });
+		if (!leaveLiveModeRunning) await fs.rm(dir, { recursive: true, force: true });
 	}
 }
 
-void main().catch(error => {
-	process.stderr.write(
-		`session retention memory probe failed: ${error instanceof Error ? error.message : String(error)}\n`,
-	);
-	process.exitCode = 1;
-});
+void main()
+	.then(leaveLiveModeRunning => {
+		if (leaveLiveModeRunning) process.exit(0);
+	})
+	.catch(error => {
+		process.stderr.write(
+			`session retention memory probe failed: ${error instanceof Error ? error.message : String(error)}\n`,
+		);
+		process.exitCode = 1;
+	});

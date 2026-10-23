@@ -107,6 +107,15 @@ export interface NativeBackendOptions {
 	readonly scheduler?: RenderScheduler;
 }
 
+/** Scalar native-render ownership and delivery counts for bounded live probes. */
+export interface NativeBackendProbeMetrics {
+	readonly componentStates: number;
+	readonly idStates: number;
+	readonly framesSent: number;
+	readonly framesAcknowledged: number;
+	readonly unackedFrames: number;
+}
+
 /** Real clock and timers that never keep the process alive on their own. */
 const DEFAULT_SCHEDULER: RenderScheduler = {
 	now: () => Date.now(),
@@ -593,6 +602,25 @@ export class NativeBackend {
 	/** Last sent frames, oldest first (mirror mode only). */
 	recentFrames(count = RECENT_FRAMES): readonly TspFrame[] {
 		return this.#recent.slice(-count);
+	}
+
+	/** Bounded scalar ownership counts without retaining rendered frame bodies. */
+	probeMetrics(): NativeBackendProbeMetrics {
+		const surfaces = this.#screen ? [this.#inline, this.#screen] : [this.#inline];
+		let componentStates = 0;
+		let idStates = 0;
+		let framesSent = 0;
+		let framesAcknowledged = 0;
+		let unackedFrames = 0;
+		for (const surface of surfaces) {
+			const counts = surface.reconciler.probeStateCounts;
+			componentStates += counts.componentStates;
+			idStates += counts.idStates;
+			framesSent += surface.seq;
+			framesAcknowledged += surface.acked;
+			unackedFrames += surface.unacked.length;
+		}
+		return { componentStates, idStates, framesSent, framesAcknowledged, unackedFrames };
 	}
 
 	#applyHello(hello: TspHello): void {

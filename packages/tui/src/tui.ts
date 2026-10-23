@@ -24,7 +24,7 @@ import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
-import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
+import { assumedTspHello, NativeBackend, type NativeBackendProbeMetrics, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
@@ -1702,6 +1702,19 @@ export class TUI extends Container {
 	/** Most recent TSP frames sent (debug mirror only). */
 	getNativeFrames(count?: number): readonly TspFrame[] {
 		return this.#native?.recentFrames(count) ?? [];
+	}
+
+	/** Scalar live-render ownership and delivery counts for bounded attribution probes. */
+	getNativeProbeMetrics(): NativeBackendProbeMetrics {
+		return (
+			this.#native?.probeMetrics() ?? {
+				componentStates: 0,
+				idStates: 0,
+				framesSent: 0,
+				framesAcknowledged: 0,
+				unackedFrames: 0,
+			}
+		);
 	}
 
 	/** `rows` fallback nodes in the last native frame. */

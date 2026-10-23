@@ -833,6 +833,16 @@ export interface ProcessTerminalOptions {
 	nativeWindowsConsole?: boolean;
 }
 
+/** Scalar output-pump facts captured only by the bounded memory probe. */
+export interface ProcessTerminalProbeMetrics {
+	readonly ttyWriterConstructed: boolean;
+	readonly wireBytes: number;
+	readonly largestWriteBytes: number;
+	readonly pendingOutputBytes: number;
+}
+
+const memoryProbeMetricsEnabled = Bun.env.OMP_SESSION_RETENTION_MEMORY_PROBE === "1";
+
 /**
  * Real terminal using process.stdin/stdout
  */
@@ -912,6 +922,8 @@ export class ProcessTerminal implements Terminal {
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
 	#pumpBacklogBound = 0;
+	#probeWireBytes = 0;
+	#probeLargestWriteBytes = 0;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -2563,6 +2575,11 @@ export class ProcessTerminal implements Terminal {
 		// Skip control sequences when stdout isn't a TTY (piped output, tests, log
 		// files). They serve no purpose there and would surface as visible noise.
 		if (!process.stdout.isTTY) return;
+		if (memoryProbeMetricsEnabled) {
+			const bytes = Buffer.byteLength(data, "utf8");
+			this.#probeWireBytes += bytes;
+			this.#probeLargestWriteBytes = Math.max(this.#probeLargestWriteBytes, bytes);
+		}
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
 		const pump = this.#outputPump;
@@ -2650,6 +2667,16 @@ export class ProcessTerminal implements Terminal {
 		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
+	}
+
+	/** Bounded scalar facts for a live TTY transport attribution probe. */
+	getProbeMetrics(): ProcessTerminalProbeMetrics {
+		return {
+			ttyWriterConstructed: this.#outputPump !== undefined,
+			wireBytes: this.#probeWireBytes,
+			largestWriteBytes: this.#probeLargestWriteBytes,
+			pendingOutputBytes: this.#outputPump?.pending() ?? (process.stdout.writableLength ?? 0),
+		};
 	}
 
 	get hostOwnsGridOnResize(): boolean {

@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
+import fcntl
 import json
+import hashlib
 import os
 from pathlib import Path
+import pty
+import re
+import select
+import selectors
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 from dataclasses import asdict, dataclass
 
@@ -22,6 +31,14 @@ DEFAULT_DEADLINE_SECONDS = 60.0
 MAX_TRACE_BYTES = 512 * 1024
 MAX_TRACE_LINE_BYTES = 4 * 1024
 MAX_TRACE_ROWS = 4_096
+
+PTY_COLUMNS = 120
+PTY_ROWS = 40
+MAX_TSP_FRAGMENT_BYTES = 128 * 1024
+MAX_TSP_PENDING_TAIL_BYTES = 256
+TSP_PREFIX = b"\x1b_tsp;"
+TSP_TERMINATOR = b"\x1b\\"
+TSP_PARAM = re.compile(rb"^[A-Za-z0-9_-]+=[\x21-\x3a\x3c-\x7e]*$")
 
 
 class RusageInfoV4(ctypes.Structure):
@@ -160,6 +177,7 @@ SESSION_TRACE_FIELDS = {
     "pid",
     "cycle",
     "stage",
+    "scenario",
     "payloadPlacement",
     "gcMode",
     "fixtureBytes",
@@ -167,14 +185,27 @@ SESSION_TRACE_FIELDS = {
     "transcriptEntries",
     "branchEntries",
     "retainedEntries",
+    "sessionEntries",
     "contextMessages",
     "mountedComponents",
     "pendingTools",
+    "modeConstructs",
+    "modeStops",
+    "tuiStops",
+    "updatesApplied",
+    "latestSentinelObserved",
+    "reconcilerComponentStates",
+    "reconcilerIdStates",
+    "retainedDescriptions",
+    "ttyWriterConstructed",
     "wireBytes",
     "largestWriteBytes",
     "pendingOutputBytes",
     "frames",
     "acknowledgements",
+    "framesSent",
+    "framesAcknowledged",
+    "unackedFrames",
     "stagedDisposals",
     "jscHeapSize",
     "jscExtraMemorySize",
@@ -195,14 +226,26 @@ SESSION_INTEGER_FIELDS = {
     "transcriptEntries",
     "branchEntries",
     "retainedEntries",
+    "sessionEntries",
     "contextMessages",
     "mountedComponents",
     "pendingTools",
+    "modeConstructs",
+    "modeStops",
+    "tuiStops",
+    "updatesApplied",
+    "latestSentinelObserved",
+    "reconcilerComponentStates",
+    "reconcilerIdStates",
+    "retainedDescriptions",
     "wireBytes",
     "largestWriteBytes",
     "pendingOutputBytes",
     "frames",
     "acknowledgements",
+    "framesSent",
+    "framesAcknowledged",
+    "unackedFrames",
     "stagedDisposals",
     "jscHeapSize",
     "jscExtraMemorySize",
@@ -240,6 +283,10 @@ def valid_session_row(row: dict[str, object]) -> bool:
         return False
     if row["gcMode"] not in {"natural", "diagnostic"}:
         return False
+    if row["scenario"] not in {"teardown", "live-tool-result"}:
+        return False
+    if not isinstance(row["ttyWriterConstructed"], bool):
+        return False
     for field, limit in (
         ("bunVersion", 128),
         ("bunRevision", 128),
@@ -275,6 +322,263 @@ def probe_trace(path: Path) -> tuple[list[dict[str, object]], int]:
             rows.append(row)
     return rows, dropped
 
+def probe_option(probe_args: list[str], name: str, default: int) -> int:
+    for index, value in enumerate(probe_args):
+        if value == name and index + 1 < len(probe_args):
+            return int(probe_args[index + 1])
+        if value.startswith(f"{name}="):
+            return int(value.split("=", 1)[1])
+    return default
+
+
+def expected_live_sentinel(probe_args: list[str]) -> str | None:
+    if "--scenario" not in probe_args and "--scenario=live-tool-result" not in probe_args:
+        return None
+    scenario = None
+    for index, value in enumerate(probe_args):
+        if value == "--scenario" and index + 1 < len(probe_args):
+            scenario = probe_args[index + 1]
+        elif value.startswith("--scenario="):
+            scenario = value.split("=", 1)[1]
+    if scenario != "live-tool-result":
+        return None
+    return f"live-tool-result:{probe_option(probe_args, '--cycles', 8)}:{probe_option(probe_args, '--updates-per-cycle', 32)}"
+
+
+class PtyTspTransport:
+    """Bounded TSP peer: acknowledges logical frames without retaining their bodies."""
+
+    def __init__(self, master: int, expected_sentinel: str | None):
+        self.master = master
+        self.expected_sentinel = expected_sentinel.encode() if expected_sentinel else None
+        self.buffer = bytearray()
+        self.pending_chunk: str | None = None
+        self.pending_frame: tuple[str, int] | None = None
+        self.sentinel_tail = b""
+        self.hello_seen = False
+        self.frames_sent = 0
+        self.frames_acknowledged = 0
+        self.tsp_fragments = 0
+        self.wire_bytes = 0
+        self.latest_sentinel_observed = False
+        self.protocol_error: str | None = None
+        self.last_acknowledged: dict[str, int] = {}
+
+    def _fail(self, message: str) -> None:
+        if self.protocol_error is None:
+            self.protocol_error = message
+
+    def _write(self, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(self.master, view)
+            except BlockingIOError:
+                select.select([], [self.master], [], 0.05)
+                continue
+            if written <= 0:
+                self._fail("PTY rejected a TSP reply")
+                return
+            view = view[written:]
+
+    def _reply_hello(self) -> None:
+        if self.hello_seen:
+            return
+        self.hello_seen = True
+        reply = {
+            "r": "hello",
+            "v": 1,
+            "term": "memory-probe",
+            "kinds": [
+                "col",
+                "row",
+                "card",
+                "section",
+                "rule",
+                "spacer",
+                "text",
+                "md",
+                "code",
+                "diff",
+                "ansi",
+                "math",
+                "image",
+                "media",
+                "kv",
+                "table",
+                "tree",
+                "badge",
+                "kbd",
+                "icon",
+                "spinner",
+                "shimmer",
+                "elapsed",
+                "progress",
+                "rate",
+                "list",
+                "item",
+                "tabs",
+                "editor",
+                "input",
+                "status",
+                "seg",
+                "overlay",
+                "toast",
+                "rows",
+                "picker",
+                "prefs",
+                "tool",
+                "checklist",
+                "agent",
+                "chart",
+                "meter",
+                "effort",
+            ],
+            "features": ["settle"],
+            "apc": 1024,
+            "credits": 1,
+            "cols": PTY_COLUMNS,
+            "dark": True,
+        }
+        body = json.dumps(reply, separators=(",", ":")).encode()
+        self._write(TSP_PREFIX + b"r;" + body + TSP_TERMINATOR)
+
+    def _acknowledge(self, frame: tuple[str, int] | None) -> None:
+        if frame is None:
+            self._fail("TSP frame completed without surface/sequence identifiers")
+            return
+        surface, sequence = frame
+        if sequence <= self.last_acknowledged.get(surface, 0):
+            return
+        body = json.dumps({"ev": "ack", "sf": surface, "s": sequence}, separators=(",", ":")).encode()
+        self._write(TSP_PREFIX + b"e;" + body + TSP_TERMINATOR)
+        self.last_acknowledged[surface] = sequence
+        self.frames_acknowledged += 1
+
+    @staticmethod
+    def _frame_identifier(body: bytes) -> tuple[str, int] | None:
+        match = re.search(rb'"sf":"([^"\\]+)","s":(\d+)', body[:MAX_TSP_PENDING_TAIL_BYTES])
+        if match is None:
+            return None
+        return match.group(1).decode("utf-8"), int(match.group(2))
+
+    def _scan_sentinel(self, body: bytes) -> None:
+        if self.expected_sentinel is None or self.latest_sentinel_observed:
+            return
+        candidate = self.sentinel_tail + body
+        if self.expected_sentinel in candidate:
+            self.latest_sentinel_observed = True
+        self.sentinel_tail = candidate[-MAX_TSP_PENDING_TAIL_BYTES:]
+
+    def _handle_message(self, raw: bytes) -> None:
+        inner = raw[len(TSP_PREFIX) : -len(TSP_TERMINATOR)]
+        separator = inner.find(b";")
+        if separator <= 0:
+            self._fail("malformed TSP message")
+            return
+        verb = inner[:separator]
+        parts = inner[separator + 1 :].split(b";")
+        params: dict[str, str] = {}
+        body = b""
+        for index, part in enumerate(parts):
+            if TSP_PARAM.fullmatch(part):
+                key, value = part.split(b"=", 1)
+                params[key.decode("ascii")] = value.decode("ascii")
+                continue
+            body = b";".join(parts[index:])
+            break
+        self.tsp_fragments += 1
+        if verb == b"q":
+            if b'"q":"hello"' in body:
+                self._reply_hello()
+            return
+        if verb != b"f":
+            return
+        self._scan_sentinel(body)
+        chunk_id = params.get("c")
+        more = params.get("m") == "1"
+        if chunk_id is None:
+            if more:
+                self._fail("TSP frame marked continued without a chunk identifier")
+                return
+            self.frames_sent += 1
+            self._acknowledge(self._frame_identifier(body))
+            return
+        if self.pending_chunk is None:
+            self.pending_chunk = chunk_id
+            self.pending_frame = self._frame_identifier(body)
+            if self.pending_frame is None:
+                self._fail("first TSP frame chunk lacked surface/sequence identifiers")
+                return
+        elif chunk_id != self.pending_chunk:
+            self._fail("interleaved TSP frame chunks")
+            return
+        if more:
+            return
+        self.frames_sent += 1
+        self._acknowledge(self.pending_frame)
+        self.pending_chunk = None
+        self.pending_frame = None
+
+    def _consume(self) -> None:
+        while True:
+            start = self.buffer.find(TSP_PREFIX)
+            if start < 0:
+                keep = min(len(self.buffer), len(TSP_PREFIX) - 1)
+                if keep:
+                    del self.buffer[:-keep]
+                else:
+                    self.buffer.clear()
+                return
+            if start:
+                del self.buffer[:start]
+            end = self.buffer.find(TSP_TERMINATOR, len(TSP_PREFIX))
+            if end < 0:
+                if len(self.buffer) > MAX_TSP_FRAGMENT_BYTES:
+                    self._fail("TSP fragment exceeded bounded parser capacity")
+                    self.buffer.clear()
+                return
+            end += len(TSP_TERMINATOR)
+            if end > MAX_TSP_FRAGMENT_BYTES:
+                self._fail("TSP fragment exceeded bounded parser capacity")
+                del self.buffer[:end]
+                continue
+            raw = bytes(self.buffer[:end])
+            del self.buffer[:end]
+            self._handle_message(raw)
+
+    def drain(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.master, 16 * 1024)
+            except BlockingIOError:
+                return
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    return
+                self._fail(f"PTY read failed: {error}")
+                return
+            if not chunk:
+                return
+            self.wire_bytes += len(chunk)
+            self.buffer.extend(chunk)
+            self._consume()
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "columns": PTY_COLUMNS,
+            "rows": PTY_ROWS,
+            "helloSeen": self.hello_seen,
+            "framesSent": self.frames_sent,
+            "framesAcknowledged": self.frames_acknowledged,
+            "unackedFrames": max(0, self.frames_sent - self.frames_acknowledged),
+            "tspFragments": self.tsp_fragments,
+            "wireBytes": self.wire_bytes,
+            "latestSentinelObserved": self.latest_sentinel_observed,
+            "protocolError": self.protocol_error,
+        }
+
 
 def clean_environment(home: Path, metrics_path: Path, stop_file: Path) -> dict[str, str]:
     required = ("PATH", "LANG", "LC_CTYPE", "TMPDIR", "SYSTEMROOT", "ComSpec")
@@ -283,6 +587,12 @@ def clean_environment(home: Path, metrics_path: Path, stop_file: Path) -> dict[s
     env["PI_CODING_AGENT_DIR"] = str(home / "agent")
     env["CI"] = "1"
     env["NO_COLOR"] = "1"
+    env["TERM"] = "xterm-256color"
+    env["TERM_PROGRAM"] = "tern"
+    env["COLUMNS"] = str(PTY_COLUMNS)
+    env["LINES"] = str(PTY_ROWS)
+    env["PI_TUI_NATIVE"] = "1"
+    env["PI_NO_GLYPH_PROTOCOL"] = "1"
     env["OMP_TASK_LAUNCH_MEMORY_PROBE"] = "1"
     env["OMP_SESSION_RETENTION_MEMORY_PROBE"] = "1"
     env["OMP_MEMORY_PROBE_METRICS_PATH"] = str(metrics_path)
@@ -298,8 +608,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval-ms", type=int, default=int(DEFAULT_INTERVAL_SECONDS * 1000))
     parser.add_argument("--deadline-seconds", type=float, default=DEFAULT_DEADLINE_SECONDS)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[3])
-    parser.add_argument("--probe", type=Path, default=Path(__file__).resolve().parents[1] / "test" / "task-launch-memory-probe.ts")
+    launch = parser.add_mutually_exclusive_group()
+    launch.add_argument(
+        "--source-probe",
+        "--probe",
+        dest="source_probe",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "test" / "task-launch-memory-probe.ts",
+    )
+    launch.add_argument("--executable", type=Path)
     parser.add_argument("--bun", type=Path)
+    parser.add_argument("--pty-tsp", action="store_true")
+    parser.add_argument("--expect-sentinel")
     parser.add_argument("probe_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.probe_args[:1] == ["--"]:
@@ -317,20 +637,52 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def file_checksum(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stderr_summary(path: Path) -> str | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    with path.open("rb") as stream:
+        stream.seek(max(0, path.stat().st_size - 4096))
+        text = stream.read().decode("utf-8", "replace")
+    return " ".join(text.split())[-512:]
+
+
+
 def main() -> int:
     args = parse_args()
-    probe = args.probe.resolve()
     repo_root = args.repo_root.resolve()
-    bun = args.bun or Path(shutil.which("bun") or "")
-    if not probe.is_file():
-        raise SystemExit(f"probe missing: {probe}")
     if not repo_root.is_dir():
         raise SystemExit(f"repository missing: {repo_root}")
-    if not bun.is_file():
-        raise SystemExit("bun executable not found")
+
+    launch_mode: str
+    launch_target: Path
+    command: list[str]
+    if args.executable is not None:
+        launch_target = args.executable.resolve()
+        if not launch_target.is_file() or not os.access(launch_target, os.X_OK):
+            raise SystemExit(f"compiled executable missing or not executable: {launch_target}")
+        launch_mode = "compiled"
+        command = [str(launch_target), *args.probe_args]
+    else:
+        launch_target = args.source_probe.resolve()
+        bun = args.bun or Path(shutil.which("bun") or "")
+        if not launch_target.is_file():
+            raise SystemExit(f"source probe missing: {launch_target}")
+        if not bun.is_file():
+            raise SystemExit("bun executable not found")
+        launch_mode = "source"
+        command = [str(bun), str(launch_target), *args.probe_args]
 
     args.report.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
+    expected_sentinel = args.expect_sentinel or expected_live_sentinel(args.probe_args)
     with tempfile.TemporaryDirectory(prefix="omp-memory-probe-home-") as home_text, tempfile.TemporaryDirectory(
         prefix="omp-memory-probe-output-"
     ) as output_text:
@@ -340,102 +692,199 @@ def main() -> int:
         stderr_path = output / "stderr.txt"
         metrics_path = output / "metrics.jsonl"
         stop_file = home / "cooperative-stop"
-        command = [str(bun), str(probe), *args.probe_args]
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-            child = subprocess.Popen(
-                command,
-                cwd=repo_root,
-                env=clean_environment(home, metrics_path, stop_file),
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-            )
-            expected_group = child.pid
-            initial: Usage | None = None
-            for _ in range(20):
-                initial = read_usage(child.pid)
-                if initial is not None:
-                    break
-                if child.poll() is not None:
-                    break
-                time.sleep(0.01)
-            if initial is None:
-                child.wait(timeout=5)
-                trace_path = metrics_path if metrics_path.exists() and metrics_path.stat().st_size > 0 else stdout_path
-                rows, dropped = probe_trace(trace_path)
-                report = {
-                    "schemaVersion": 1,
-                    "outcome": "startup_unreadable",
-                    "pid": child.pid,
-                    "limitBytes": args.limit_bytes,
-                    "cooperativeLimitBytes": args.cooperative_limit_bytes,
-                    "cooperativeStopRequested": stop_file.exists(),
-                    "intervalMs": args.interval_ms,
-                    "deadlineSeconds": args.deadline_seconds,
-                    "probeRows": rows,
-                    "probeRowsDropped": dropped,
-                    "probeMetricsBytes": metrics_path.stat().st_size if metrics_path.exists() else 0,
-                    "probeStdoutBytes": stdout_path.stat().st_size,
-                    "probeStderrBytes": stderr_path.stat().st_size,
-                }
-                args.report.write_text(json.dumps(report, separators=(",", ":")) + "\n")
-                return 1
+        environment = clean_environment(home, metrics_path, stop_file)
+        transport: PtyTspTransport | None = None
+        selector: selectors.BaseSelector | None = None
+        master: int | None = None
+        child: subprocess.Popen[bytes]
+        try:
+            with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+                if args.pty_tsp:
+                    master, slave = pty.openpty()
+                    winsize = struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0)
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, winsize)
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
 
-            peak_footprint = initial.physical_footprint
-            peak_lifetime = initial.lifetime_max_physical_footprint
-            peak_resident = initial.resident
-            samples: list[Sample] = []
-            outcome = "exited"
-            killed = False
-            cooperative_stop_requested = False
-            while True:
-                now = time.time()
-                current = read_usage(child.pid)
-                if current is not None:
-                    peak_footprint = max(peak_footprint, current.physical_footprint)
-                    peak_lifetime = max(peak_lifetime, current.lifetime_max_physical_footprint)
-                    peak_resident = max(peak_resident, current.resident)
-                    if len(samples) < 1_200:
-                        samples.append(
-                            Sample(
-                                elapsed_ms=round((now - started) * 1000),
-                                physical_footprint=current.physical_footprint,
-                                lifetime_max_physical_footprint=current.lifetime_max_physical_footprint,
-                                resident=current.resident,
-                            )
+                    def attach_private_tty() -> None:
+                        os.setsid()
+                        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+                    try:
+                        child = subprocess.Popen(
+                            command,
+                            cwd=repo_root,
+                            env=environment,
+                            stdin=slave,
+                            stdout=slave,
+                            stderr=stderr,
+                            preexec_fn=attach_private_tty,
                         )
-                    if current.start != initial.start:
-                        outcome = "identity_changed"
-                        break
-                    if current.physical_footprint >= args.cooperative_limit_bytes and not cooperative_stop_requested:
-                        stop_file.write_text("stop\n")
-                        cooperative_stop_requested = True
-                    if current.physical_footprint >= args.limit_bytes:
-                        killed = kill_owned_group(child.pid, initial.start, expected_group)
-                        outcome = "limit_killed" if killed else "ownership_lost"
-                        break
-                elif child.poll() is not None:
-                    break
-                if now - started >= args.deadline_seconds:
-                    killed = kill_owned_group(child.pid, initial.start, expected_group)
-                    outcome = "deadline_killed" if killed else "ownership_lost"
-                    break
-                time.sleep(args.interval_ms / 1000)
+                    finally:
+                        os.close(slave)
+                    os.set_blocking(master, False)
+                    selector = selectors.DefaultSelector()
+                    selector.register(master, selectors.EVENT_READ)
+                    transport = PtyTspTransport(master, expected_sentinel)
+                else:
+                    child = subprocess.Popen(
+                        command,
+                        cwd=repo_root,
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout,
+                        stderr=stderr,
+                        start_new_session=True,
+                    )
 
-            try:
-                return_code = child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                if kill_owned_group(child.pid, initial.start, expected_group):
-                    outcome = "deadline_killed"
-                return_code = child.wait(timeout=5)
+                expected_group = child.pid
+                initial: Usage | None = None
+                for _ in range(20):
+                    if transport is not None:
+                        for _key, _mask in selector.select(timeout=0):
+                            transport.drain()
+                    initial = read_usage(child.pid)
+                    if initial is not None:
+                        break
+                    if child.poll() is not None:
+                        break
+                    time.sleep(0.01)
+
+                samples: list[Sample] = []
+                outcome = "exited"
+                killed = False
+                cooperative_stop_requested = False
+                return_code: int | None = None
+                peak_footprint = 0
+                peak_lifetime = 0
+                peak_resident = 0
+
+                if initial is None:
+                    try:
+                        return_code = child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        return_code = child.kill() or child.wait(timeout=5)
+                    outcome = "startup_unreadable"
+                else:
+                    peak_footprint = initial.physical_footprint
+                    peak_lifetime = initial.lifetime_max_physical_footprint
+                    peak_resident = initial.resident
+                    next_sample = time.monotonic()
+                    while True:
+                        if transport is not None:
+                            timeout = max(0.0, min(args.interval_ms / 1000, next_sample - time.monotonic()))
+                            for _key, _mask in selector.select(timeout=timeout):
+                                transport.drain()
+                        else:
+                            sleep_seconds = max(0.0, next_sample - time.monotonic())
+                            if sleep_seconds:
+                                time.sleep(sleep_seconds)
+                        if time.monotonic() < next_sample:
+                            continue
+                        now = time.time()
+                        next_sample += args.interval_ms / 1000
+                        current = read_usage(child.pid)
+                        if current is not None:
+                            peak_footprint = max(peak_footprint, current.physical_footprint)
+                            peak_lifetime = max(peak_lifetime, current.lifetime_max_physical_footprint)
+                            peak_resident = max(peak_resident, current.resident)
+                            if len(samples) < 1_200:
+                                samples.append(
+                                    Sample(
+                                        elapsed_ms=round((now - started) * 1000),
+                                        physical_footprint=current.physical_footprint,
+                                        lifetime_max_physical_footprint=current.lifetime_max_physical_footprint,
+                                        resident=current.resident,
+                                    )
+                                )
+                            if current.start != initial.start:
+                                outcome = "identity_changed"
+                                break
+                            if current.physical_footprint >= args.cooperative_limit_bytes and not cooperative_stop_requested:
+                                stop_file.write_text("stop\n")
+                                cooperative_stop_requested = True
+                            if current.physical_footprint >= args.limit_bytes:
+                                killed = kill_owned_group(child.pid, initial.start, expected_group)
+                                outcome = "limit_killed" if killed else "ownership_lost"
+                                break
+                        elif child.poll() is not None:
+                            break
+                        if now - started >= args.deadline_seconds:
+                            killed = kill_owned_group(child.pid, initial.start, expected_group)
+                            outcome = "deadline_killed" if killed else "ownership_lost"
+                            break
+
+                    try:
+                        return_code = child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        if kill_owned_group(child.pid, initial.start, expected_group):
+                            outcome = "deadline_killed"
+                        return_code = child.wait(timeout=5)
+
+                if transport is not None:
+                    for _ in range(10):
+                        for _key, _mask in selector.select(timeout=0.01):
+                            transport.drain()
+                        transport.drain()
+        finally:
+            if selector is not None:
+                selector.close()
+            if master is not None:
+                os.close(master)
+
         trace_path = metrics_path if metrics_path.exists() and metrics_path.stat().st_size > 0 else stdout_path
         rows, dropped = probe_trace(trace_path)
+        pty_summary = transport.summary() if transport is not None else None
+        if outcome == "exited" and return_code != 0:
+            outcome = "probe_failed"
+        if outcome == "exited" and cooperative_stop_requested:
+            outcome = "cooperative_stopped"
+        if outcome == "exited" and dropped != 0:
+            outcome = "trace_dropped"
+        if outcome == "exited" and pty_summary is not None:
+            pty_complete = (
+                pty_summary["helloSeen"] is True
+                and pty_summary["protocolError"] is None
+                and pty_summary["framesSent"] == pty_summary["framesAcknowledged"]
+                and pty_summary["unackedFrames"] == 0
+                and (expected_sentinel is None or pty_summary["latestSentinelObserved"] is True)
+            )
+            if not pty_complete:
+                outcome = "pty_protocol_incomplete"
+        if outcome == "exited" and expected_sentinel is not None:
+            completed_rows = [
+                row
+                for row in rows
+                if row.get("scenario") == "live-tool-result" and row.get("stage") == "live:complete"
+            ]
+            if not completed_rows:
+                outcome = "live_probe_incomplete"
+            else:
+                final = completed_rows[-1]
+                expected_updates = probe_option(args.probe_args, "--cycles", 8) * probe_option(
+                    args.probe_args, "--updates-per-cycle", 32
+                )
+                if (
+                    final["modeConstructs"] != 1
+                    or final["modeStops"] != 0
+                    or final["tuiStops"] != 0
+                    or final["pendingTools"] != 0
+                    or final["updatesApplied"] != expected_updates
+                    or final["latestSentinelObserved"] != expected_updates
+                    or final["unackedFrames"] != 0
+                    or final["pendingOutputBytes"] != 0
+                    or final["ttyWriterConstructed"] is not True
+                ):
+                    outcome = "live_probe_incomplete"
         report = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "outcome": outcome,
+            "launch": {
+                "mode": launch_mode,
+                "inputChecksum": file_checksum(launch_target),
+                "ptyTsp": args.pty_tsp,
+            },
             "pid": child.pid,
-            "start": initial.start,
+            "start": initial.start if initial is not None else None,
             "processGroup": expected_group,
             "limitBytes": args.limit_bytes,
             "cooperativeLimitBytes": args.cooperative_limit_bytes,
@@ -450,11 +899,14 @@ def main() -> int:
                 "resident": peak_resident,
             },
             "samples": [asdict(sample) for sample in samples],
+            "pty": pty_summary,
+            "expectedSentinel": expected_sentinel,
             "probeRows": rows,
             "probeRowsDropped": dropped,
             "probeMetricsBytes": metrics_path.stat().st_size if metrics_path.exists() else 0,
             "probeStdoutBytes": stdout_path.stat().st_size,
             "probeStderrBytes": stderr_path.stat().st_size,
+            "stderrSummary": stderr_summary(stderr_path),
         }
         args.report.write_text(json.dumps(report, separators=(",", ":")) + "\n")
 

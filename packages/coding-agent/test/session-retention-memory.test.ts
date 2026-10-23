@@ -67,6 +67,15 @@ function toolResult(index: number) {
 	};
 }
 
+function partialToolResult(sentinel: string, bytes = 4096) {
+	const prefix = `${sentinel}\n`;
+	const prefixBytes = Buffer.byteLength(prefix, "utf8");
+	if (prefixBytes > bytes) throw new Error("test sentinel exceeds fixed partial result size");
+	const text = `${prefix}${"x".repeat(bytes - prefixBytes)}`;
+	expect(Buffer.byteLength(text, "utf8")).toBe(bytes);
+	return { content: [{ type: "text" as const, text }] };
+}
+
 async function drainRender(harness: Pick<ReplayHarness, "scheduler" | "terminal">): Promise<void> {
 	for (let pass = 0; pass < 4; pass++) {
 		harness.scheduler.drain();
@@ -216,6 +225,121 @@ describe("session retention replay lifecycle", () => {
 			expect(harness.manager.getBranchView()).toHaveLength(beforeReplacement + 1);
 			expect(harness.mode.pendingTools.size).toBe(0);
 		} finally {
+			await disposeHarness(harness);
+		}
+	});
+
+	it("keeps one live tool card across acknowledged fixed-size partial-result replacements", async () => {
+		const harness = await createHarness(4);
+		let restoreStops = () => {};
+		try {
+			await harness.mode.renderInitialMessages({ clearTerminalHistory: true });
+			await drainRender(harness);
+			const toolCallId = "live-tool-result";
+			const toolName = "memory_probe";
+			const args = { fixture: "live-tool-result", bytes: 4096 };
+			let modeStops = 0;
+			let tuiStops = 0;
+			const originalModeStop = harness.mode.stop.bind(harness.mode);
+			const originalTuiStop = harness.mode.ui.stop.bind(harness.mode.ui);
+			harness.mode.stop = () => {
+				modeStops++;
+				originalModeStop();
+			};
+			harness.mode.ui.stop = () => {
+				tuiStops++;
+				originalTuiStop();
+			};
+			restoreStops = () => {
+				harness.mode.stop = originalModeStop;
+				harness.mode.ui.stop = originalTuiStop;
+			};
+
+			await harness.mode.eventController.dispatchSessionEvent({
+				type: "tool_execution_start",
+				toolCallId,
+				toolName,
+				args,
+			});
+			await drainRender(harness);
+			expect(harness.mode.pendingTools.size).toBe(1);
+			const mountedComponents = harness.mode.chatContainer.children.length;
+			let latestSentinel = "";
+			for (let batch = 1; batch <= 8; batch++) {
+				for (let update = 1; update <= 32; update++) {
+					latestSentinel = `live-tool-result:${batch}:${update}`;
+					await harness.mode.eventController.dispatchSessionEvent({
+						type: "tool_execution_update",
+						toolCallId,
+						toolName,
+						args,
+						partialResult: partialToolResult(latestSentinel),
+					});
+					await drainRender(harness);
+					expect(harness.mode.pendingTools.size).toBe(1);
+					expect(harness.mode.chatContainer.children).toHaveLength(mountedComponents);
+					expect(harness.terminal.metrics().frames).toBe(harness.terminal.metrics().acknowledgements);
+				}
+			}
+
+			await harness.mode.eventController.dispatchSessionEvent({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName,
+				result: partialToolResult(latestSentinel),
+				isError: false,
+			});
+			await drainRender(harness);
+			expect(harness.mode.pendingTools.size).toBe(0);
+			expect(modeStops).toBe(0);
+			expect(tuiStops).toBe(0);
+
+			harness.manager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolCallId, name: toolName, arguments: args }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			});
+			harness.manager.appendMessage({
+				role: "toolResult",
+				toolCallId,
+				toolName,
+				content: partialToolResult(latestSentinel).content,
+				isError: false,
+				timestamp: Date.now(),
+			});
+			await harness.manager.flush();
+			const reopened = await SessionManager.open(harness.sessionFile, harness.tempDir.path(), undefined, {
+				initialCwd: harness.tempDir.path(),
+				suppressBreadcrumb: true,
+				throwIfMissing: true,
+			});
+			try {
+				const final = reopened.getBranchView().at(-1);
+				expect(final?.type).toBe("message");
+				if (final?.type !== "message" || final.message.role !== "toolResult") {
+					throw new Error("live terminal result was not persisted");
+				}
+				expect(final.message.content[0]).toEqual({
+					type: "text",
+					text: partialToolResult(latestSentinel).content[0]!.text,
+				});
+			} finally {
+				await closeAndRelease(reopened);
+			}
+		} finally {
+			restoreStops();
 			await disposeHarness(harness);
 		}
 	});

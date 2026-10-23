@@ -669,6 +669,11 @@ export class ToolExecutionComponent extends Container {
 		this.#maybeConvertImagesForKitty();
 	}
 
+	/** The one current result description this card owns during live replacement. */
+	getProbeRetainedDescriptionCount(): number {
+		return this.#result === undefined ? 0 : 1;
+	}
+
 	/**
 	 * Get all image blocks from result content and details.
 	 * Some tools (like generate_image) store images in details to avoid bloating

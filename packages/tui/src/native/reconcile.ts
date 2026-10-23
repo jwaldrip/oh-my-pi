@@ -250,6 +250,11 @@ export class Reconciler {
 		return this.#rows;
 	}
 
+	/** Scalar ownership counts for bounded live-render attribution probes. */
+	get probeStateCounts(): { componentStates: number; idStates: number } {
+		return { componentStates: this.#states.size, idStates: this.#byId.size };
+	}
+
 	/** Diff the regions against the previous frame; the first call adds everything. */
 	reconcile(regions: NativeRegions, cx: DescribeContext): TspOp[] {
 		this.#cx = cx;
