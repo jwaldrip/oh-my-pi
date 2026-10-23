@@ -144,7 +144,12 @@ export class BoundedMemoryTerminal implements Terminal {
 		return this.#probePending;
 	}
 
-	start(onInput: (data: string) => void, _onResize: () => void, _onDisconnect?: () => void, _options?: TerminalStartOptions): void {
+	start(
+		onInput: (data: string) => void,
+		_onResize: () => void,
+		_onDisconnect?: () => void,
+		_options?: TerminalStartOptions,
+	): void {
 		this.#onInput = onInput;
 		this.#stopped = false;
 		this.#probePending = this.#native;
@@ -199,7 +204,9 @@ export class BoundedMemoryTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(_title: string): void {}
 	setProgress(_active: boolean): void {}
-	onAppearanceChange(_callback: (appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void): void {}
+	onAppearanceChange(
+		_callback: (appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void,
+	): void {}
 	refreshAppearance(_requestToken?: TerminalAppearanceRequestToken): TerminalAppearanceRequestToken | void {}
 
 	metrics(): BoundedTerminalMetrics {

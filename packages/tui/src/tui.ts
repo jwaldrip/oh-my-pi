@@ -2733,6 +2733,16 @@ export class TUI extends Container {
 		this.terminal.showCursor(true);
 		this.#forgetHardwareCursorState();
 		this.terminal.stop();
+		// The terminal handoff above is the last consumer of the previous frame.
+		// Keep the component tree for a later start(), but not the full rendered
+		// transcript and its prepared-row sidecars.
+		this.#providerWindow = [];
+		this.#providerPreparedRows = [];
+		this.#resizeProbeWindow = [];
+		this.#preparedLineMemo.clear();
+		this.#preparedLineMemoSpare.clear();
+		this.#previousFrameLength = 0;
+		this.#debugPaint = undefined;
 	}
 
 	/**

@@ -31,7 +31,14 @@ beforeAll(async () => {
 function toolCall(index: number) {
 	return {
 		role: "assistant" as const,
-		content: [{ type: "toolCall" as const, id: `call-${index}`, name: "write", arguments: { path: `file-${index}.txt`, content: "" } }],
+		content: [
+			{
+				type: "toolCall" as const,
+				id: `call-${index}`,
+				name: "write",
+				arguments: { path: `file-${index}.txt`, content: "" },
+			},
+		],
 		api: "anthropic-messages",
 		provider: "anthropic",
 		model: "claude-sonnet-4-5",
@@ -149,6 +156,7 @@ describe("session retention replay lifecycle", () => {
 			expect(harness.terminal.metrics().acknowledgements).toBeGreaterThan(0);
 
 			harness.mode.stop();
+			expect(harness.mode.chatContainer.children).toHaveLength(0);
 			await harness.session.dispose();
 			disposed = true;
 			expect(harness.manager.getEntries()).toHaveLength(0);

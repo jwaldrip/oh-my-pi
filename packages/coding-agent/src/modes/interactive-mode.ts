@@ -7253,6 +7253,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
+		// A stopped mode has already persisted the session. Drop replayed cards
+		// before TUI teardown so its terminal handoff cannot cache the full
+		// transcript after disposal.
+		this.chatContainer.disposeChildren();
 		if (this.#ownsStartedUi) {
 			this.ui.stop();
 			this.#ownsStartedUi = false;

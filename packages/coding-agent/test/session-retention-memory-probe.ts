@@ -25,7 +25,7 @@ const ABSOLUTE_FIXTURE_LIMIT = 160 * MIB;
 const MAX_NORMAL_RECORD_BYTES = 128 * 1024;
 const SYNTHETIC_TIMESTAMP = "2026-10-22T00:00:00.000Z";
 
-const STOP_AFTER = ["load", "prompt", "replay", "wire"] as const;
+const STOP_AFTER = ["load", "prompt", "construct", "init", "replay", "wire"] as const;
 type StopAfter = (typeof STOP_AFTER)[number];
 const PAYLOAD_PLACEMENTS = ["message", "custom", "tool-result"] as const;
 type PayloadPlacement = (typeof PAYLOAD_PLACEMENTS)[number];
@@ -40,6 +40,8 @@ interface ProbeOptions {
 	readonly payloadPlacement: PayloadPlacement;
 	readonly gcMode: GcMode;
 	readonly replayRestart: boolean;
+	readonly clearHistoryHooks: boolean;
+	readonly disposeTranscript: boolean;
 }
 
 interface FixtureStats {
@@ -115,7 +117,8 @@ class MetricsWriter {
 
 	async write(row: ProbeRow): Promise<void> {
 		const line = `${JSON.stringify(row)}\n`;
-		if (Buffer.byteLength(line, "utf8") > 4 * 1024) throw new Error("memory probe metric exceeded its bounded row size");
+		if (Buffer.byteLength(line, "utf8") > 4 * 1024)
+			throw new Error("memory probe metric exceeded its bounded row size");
 		if (this.#handle) {
 			await this.#handle.write(line);
 			return;
@@ -156,6 +159,8 @@ function parseOptions(): ProbeOptions {
 	const entries = positiveInteger("--entries", DEFAULT_ENTRIES);
 	const payloadPlacement = enumValue("--payload", PAYLOAD_PLACEMENTS, "tool-result");
 	const replayRestart = !process.argv.includes("--skip-replay-restart");
+	const clearHistoryHooks = process.argv.includes("--clear-history-hooks");
+	const disposeTranscript = process.argv.includes("--dispose-transcript");
 	if (fixtureBytes > ABSOLUTE_FIXTURE_LIMIT) {
 		throw new Error(`fixture bytes exceeds absolute ${ABSOLUTE_FIXTURE_LIMIT} byte cap`);
 	}
@@ -178,6 +183,8 @@ function parseOptions(): ProbeOptions {
 		payloadPlacement,
 		gcMode: enumValue("--gc", GC_MODES, "natural"),
 		replayRestart,
+		clearHistoryHooks,
+		disposeTranscript,
 	};
 }
 
@@ -365,7 +372,12 @@ function emptyState(cycle: number, fixture: FixtureStats, options: ProbeOptions)
 	return { cycle, fixture, options };
 }
 
-async function emit(metrics: MetricsWriter, stage: string, state: CycleState, runtime?: RuntimeIdentity): Promise<void> {
+async function emit(
+	metrics: MetricsWriter,
+	stage: string,
+	state: CycleState,
+	runtime?: RuntimeIdentity,
+): Promise<void> {
 	const heap = heapStats();
 	const terminal = state.terminal?.metrics();
 	const manager = state.manager;
@@ -425,7 +437,7 @@ function createSettings(): Settings {
 	});
 }
 
-async function createSession(manager: SessionManager, cwd: string): Promise<{ session: AgentSession; authStorage: AuthStorage }> {
+async function createSession(manager: SessionManager): Promise<{ session: AgentSession; authStorage: AuthStorage }> {
 	const authStorage = await AuthStorage.create(":memory:");
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("bundled probe model is unavailable");
@@ -458,7 +470,11 @@ async function releaseLoadedManager(manager: SessionManager): Promise<void> {
 }
 
 async function runCycle(file: string, cwd: string, state: CycleState, metrics: MetricsWriter): Promise<boolean> {
-	const manager = await SessionManager.open(file, cwd, undefined, { initialCwd: cwd, suppressBreadcrumb: true, throwIfMissing: true });
+	const manager = await SessionManager.open(file, cwd, undefined, {
+		initialCwd: cwd,
+		suppressBreadcrumb: true,
+		throwIfMissing: true,
+	});
 	state.manager = manager;
 	assertLinkedBranch(manager, state.fixture.branchEntries);
 	await emit(metrics, "load:complete", state);
@@ -474,7 +490,7 @@ async function runCycle(file: string, cwd: string, state: CycleState, metrics: M
 		return false;
 	}
 
-	const { session, authStorage } = await createSession(manager, cwd);
+	const { session, authStorage } = await createSession(manager);
 	let mode: InteractiveMode | undefined;
 	try {
 		{
@@ -496,11 +512,28 @@ async function runCycle(file: string, cwd: string, state: CycleState, metrics: M
 			tuiOptions: { renderScheduler: scheduler },
 			preferences: { quiet: true },
 		});
-		mode = new InteractiveMode(session, "memory-probe", undefined, undefined, undefined, undefined, undefined, composer);
+		mode = new InteractiveMode(
+			session,
+			"memory-probe",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			composer,
+		);
 		state.mode = mode;
 		state.terminal = terminal;
+		if (state.options.stopAfter === "construct") {
+			await emit(metrics, "construct:complete", state);
+			return false;
+		}
 		await mode.init({ suppressWelcomeIntro: true });
 		await drainRender(scheduler, terminal);
+		if (state.options.stopAfter === "init") {
+			await emit(metrics, "init:complete", state);
+			return false;
+		}
 		if (state.options.stopAfter === "wire" && !mode.ui.nativeRendering) {
 			throw new Error("wire probe did not construct the real NativeBackend");
 		}
@@ -513,7 +546,12 @@ async function runCycle(file: string, cwd: string, state: CycleState, metrics: M
 		if (await shouldStopAtBoundary(metrics, state)) return true;
 		return false;
 	} finally {
+		if (state.options.disposeTranscript) mode?.chatContainer.disposeChildren();
 		mode?.stop();
+		if (state.options.clearHistoryHooks) {
+			mode?.historyStorage?.setSessionResolver(() => undefined);
+			mode?.historyStorage?.setErrorListener(() => {});
+		}
 		mode = undefined;
 		state.mode = undefined;
 		state.terminal = undefined;
@@ -525,14 +563,27 @@ async function runCycle(file: string, cwd: string, state: CycleState, metrics: M
 	}
 }
 
-async function runReplayRestart(file: string, cwd: string, state: CycleState, metrics: MetricsWriter): Promise<boolean> {
-	const manager = await SessionManager.open(file, cwd, undefined, { initialCwd: cwd, suppressBreadcrumb: true, throwIfMissing: true });
+async function runReplayRestart(
+	file: string,
+	cwd: string,
+	state: CycleState,
+	metrics: MetricsWriter,
+): Promise<boolean> {
+	const manager = await SessionManager.open(file, cwd, undefined, {
+		initialCwd: cwd,
+		suppressBreadcrumb: true,
+		throwIfMissing: true,
+	});
 	state.manager = manager;
 	assertLinkedBranch(manager, state.fixture.branchEntries);
-	const { session, authStorage } = await createSession(manager, cwd);
+	const { session, authStorage } = await createSession(manager);
 	const scheduler = new BoundedRenderScheduler();
 	const terminal = new BoundedMemoryTerminal(120, 40, { native: state.options.stopAfter === "wire" });
-	const composer = new Composer({ terminal, tuiOptions: { renderScheduler: scheduler }, preferences: { quiet: true } });
+	const composer = new Composer({
+		terminal,
+		tuiOptions: { renderScheduler: scheduler },
+		preferences: { quiet: true },
+	});
 	let mode: InteractiveMode | undefined = new InteractiveMode(
 		session,
 		"memory-probe",
@@ -581,13 +632,19 @@ async function runReplayRestart(file: string, cwd: string, state: CycleState, me
 		await emit(metrics, "replay-restart:complete", state);
 		return await shouldStopAtBoundary(metrics, state);
 	} finally {
+		if (state.options.disposeTranscript) mode?.chatContainer.disposeChildren();
 		mode?.stop();
+		if (state.options.clearHistoryHooks) {
+			mode?.historyStorage?.setSessionResolver(() => undefined);
+			mode?.historyStorage?.setErrorListener(() => {});
+		}
 		mode = undefined;
 		state.mode = undefined;
 		state.terminal = undefined;
 		await session.dispose();
 		authStorage.close();
-		if (manager.getEntries().length !== 0) throw new Error("replay restart disposal did not release retained entries");
+		if (manager.getEntries().length !== 0)
+			throw new Error("replay restart disposal did not release retained entries");
 		state.manager = undefined;
 		await emit(metrics, "replay-restart:disposed", state);
 	}
@@ -602,7 +659,11 @@ async function diagnosticCollect(metrics: MetricsWriter, state: CycleState): Pro
 }
 
 async function verifyRestartPersistence(file: string, cwd: string, expectedEntries: number): Promise<void> {
-	const reopened = await SessionManager.open(file, cwd, undefined, { initialCwd: cwd, suppressBreadcrumb: true, throwIfMissing: true });
+	const reopened = await SessionManager.open(file, cwd, undefined, {
+		initialCwd: cwd,
+		suppressBreadcrumb: true,
+		throwIfMissing: true,
+	});
 	try {
 		assertLinkedBranch(reopened, expectedEntries);
 	} finally {
@@ -649,6 +710,8 @@ async function main(): Promise<void> {
 }
 
 void main().catch(error => {
-	process.stderr.write(`session retention memory probe failed: ${error instanceof Error ? error.message : String(error)}\n`);
+	process.stderr.write(
+		`session retention memory probe failed: ${error instanceof Error ? error.message : String(error)}\n`,
+	);
 	process.exitCode = 1;
 });
