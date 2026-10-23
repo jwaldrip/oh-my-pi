@@ -35,6 +35,68 @@ const DEFAULT_MAX_ATTEMPTS = 6;
 /** Bound the `Error.message` allocation for proxy HTML error pages and the like. */
 const MAX_DETAIL_CHARS = 4096;
 
+export type OpenAIRequestPreparationPhase =
+	| "responses-params-built"
+	| "before-json-stringify"
+	| "after-json-stringify"
+	| "before-fetch";
+
+export type OpenAIRequestPreparationObserver = (
+	phase: OpenAIRequestPreparationPhase,
+	inputItemCount: number,
+	toolCount: number,
+	serializedCodeUnits: number,
+) => void;
+
+type OpenAIRequestPreparationProbe = {
+	observer: OpenAIRequestPreparationObserver;
+	inputItemCount: number;
+	toolCount: number;
+	serializedCodeUnits: number;
+};
+
+let activeOpenAIRequestPreparationProbe: OpenAIRequestPreparationProbe | undefined;
+
+/**
+ * Installs bounded scalar-only request-preparation accounting for one controlled
+ * process. The observer never receives the request body or any nested payload.
+ */
+export function beginOpenAIRequestPreparationProbe(observer: OpenAIRequestPreparationObserver): () => void {
+	if (activeOpenAIRequestPreparationProbe !== undefined) {
+		throw new Error("an OpenAI request preparation probe is already active");
+	}
+	const probe: OpenAIRequestPreparationProbe = {
+		observer,
+		inputItemCount: 0,
+		toolCount: 0,
+		serializedCodeUnits: 0,
+	};
+	activeOpenAIRequestPreparationProbe = probe;
+	return () => {
+		if (activeOpenAIRequestPreparationProbe === probe) activeOpenAIRequestPreparationProbe = undefined;
+	};
+}
+
+export function markOpenAIRequestPreparation(
+	phase: OpenAIRequestPreparationPhase,
+	values: {
+		inputItemCount?: number;
+		toolCount?: number;
+		serializedCodeUnits?: number;
+	} = {},
+): void {
+	const probe = activeOpenAIRequestPreparationProbe;
+	if (probe === undefined) return;
+	if (values.inputItemCount !== undefined) probe.inputItemCount = values.inputItemCount;
+	if (values.toolCount !== undefined) probe.toolCount = values.toolCount;
+	if (values.serializedCodeUnits !== undefined) probe.serializedCodeUnits = values.serializedCodeUnits;
+	try {
+		probe.observer(phase, probe.inputItemCount, probe.toolCount, probe.serializedCodeUnits);
+	} catch {
+		// A diagnostic observer must not alter provider delivery.
+	}
+}
+
 /**
  * LiteLLM (and compatible proxies) shed over-concurrency requests *before* the
  * upstream call with an immediate HTTP 429 marked `rate_limit_type:
@@ -98,12 +160,16 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	markOpenAIRequestPreparation("before-json-stringify");
+	const body = JSON.stringify(init.body);
+	markOpenAIRequestPreparation("after-json-stringify", { serializedCodeUnits: body.length });
 	let response: Response;
 	try {
+		markOpenAIRequestPreparation("before-fetch");
 		response = await fetchWithRetry(init.url, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
-			body: JSON.stringify(init.body),
+			body,
 			signal: init.signal,
 			fetch: init.fetch,
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,

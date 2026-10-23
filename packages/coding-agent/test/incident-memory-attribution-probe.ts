@@ -1,4 +1,5 @@
 import { heapStats } from "bun:jsc";
+import { writeSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +7,10 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { beginEventStreamProbe, eventStreamProbeMetrics } from "@oh-my-pi/pi-ai/utils/event-stream";
+import {
+	beginOpenAIRequestPreparationProbe,
+	type OpenAIRequestPreparationPhase,
+} from "@oh-my-pi/pi-ai/utils/openai-http";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -36,6 +41,7 @@ const ARGUMENT_DELTA_BYTES = 8 * 1024;
 const PROBE_REPLACEMENT_COUNT = 8;
 const PROBE_RESULT_TEXT_BYTES = 256 * 1024;
 const PROBE_DETAILS_BYTES = MIB;
+const MAX_REQUEST_PREPARATION_SNAPSHOTS = 4;
 const FINAL_SENTINEL = "incident-memory:complete";
 const FINAL_COMPLETION = `${FINAL_SENTINEL} synthetic loopback final completion`;
 const incidentReplacementParameters = type({ turn: "number" });
@@ -48,6 +54,13 @@ type DiagnosticHeap = {
 	readonly extraMemorySize: number;
 	readonly objectCount: number;
 	readonly protectedObjectCount: number;
+};
+
+type RequestPreparationSnapshot = {
+	readonly phase: string;
+	readonly inputItemCount: number;
+	readonly toolCount: number;
+	readonly serializedCodeUnits: number;
 };
 
 interface ProbeOptions {
@@ -77,6 +90,10 @@ interface IncidentProbeRow {
 	readonly ruleCount: number;
 	readonly contextFileCount: number;
 	readonly promptBytes: number;
+	readonly requestPreparationPhase: string;
+	readonly requestPreparationInputItems: number;
+	readonly requestPreparationToolCount: number;
+	readonly requestPreparationSerializedCodeUnits: number;
 	readonly requestCount: number;
 	readonly requestBytes: number;
 	readonly providerDeltaBytes: number;
@@ -139,11 +156,16 @@ class MetricsWriter {
 		return writer;
 	}
 
-	async write(row: IncidentProbeRow): Promise<void> {
+	#serialize(row: IncidentProbeRow): string {
 		const line = `${JSON.stringify(row)}\n`;
 		if (Buffer.byteLength(line, "utf8") > 4 * 1024) {
 			throw new Error("incident attribution metric exceeded its bounded row size");
 		}
+		return line;
+	}
+
+	async write(row: IncidentProbeRow): Promise<void> {
+		const line = this.#serialize(row);
 		this.#tail = this.#tail.then(async () => {
 			if (this.#handle) {
 				await this.#handle.write(line);
@@ -152,6 +174,15 @@ class MetricsWriter {
 			process.stdout.write(line);
 		});
 		await this.#tail;
+	}
+
+	writeImmediately(row: IncidentProbeRow): void {
+		const line = this.#serialize(row);
+		if (this.#handle) {
+			writeSync(this.#handle.fd, line);
+			return;
+		}
+		process.stdout.write(line);
 	}
 
 	async close(): Promise<void> {
@@ -562,6 +593,7 @@ class AttributionState {
 	tuiStops = 0;
 	toolMetrics: ToolExecutionProbeMetrics = zeroToolMetrics();
 	observerError: Error | undefined;
+	requestPreparationSnapshots = 0;
 
 	constructor(options: ProbeOptions, fixture: IncidentFixtureVerification, metrics: MetricsWriter) {
 		this.options = options;
@@ -603,13 +635,18 @@ class AttributionState {
 		}
 	}
 
-	async emit(stage: string, collection: Collection = "passive", diagnostic?: DiagnosticHeap): Promise<void> {
+	#row(
+		stage: string,
+		collection: Collection,
+		diagnostic?: DiagnosticHeap,
+		preparation?: RequestPreparationSnapshot,
+	): IncidentProbeRow {
 		const memory = process.memoryUsage();
 		const queue = eventStreamProbeMetrics();
 		const reveal = this.mode?.eventController.getToolArgsRevealProbeMetrics();
 		const native = this.mode?.ui.getNativeProbeMetrics();
 		const terminal = this.terminal?.getProbeMetrics();
-		await this.metrics.write({
+		return {
 			kind: "incident-memory-attribution",
 			timestamp: Date.now(),
 			pid: process.pid,
@@ -630,6 +667,10 @@ class AttributionState {
 			ruleCount: this.ruleCount,
 			contextFileCount: this.contextFileCount,
 			promptBytes: this.promptBytes,
+			requestPreparationPhase: preparation?.phase ?? "",
+			requestPreparationInputItems: preparation?.inputItemCount ?? 0,
+			requestPreparationToolCount: preparation?.toolCount ?? 0,
+			requestPreparationSerializedCodeUnits: preparation?.serializedCodeUnits ?? 0,
 			requestCount: this.loopback?.requestCount ?? 0,
 			requestBytes: this.loopback?.requestBytes ?? 0,
 			providerDeltaBytes: this.loopback?.providerDeltaBytes ?? 0,
@@ -675,7 +716,38 @@ class AttributionState {
 			diagnosticExtraMemorySize: diagnostic?.extraMemorySize ?? 0,
 			diagnosticObjectCount: diagnostic?.objectCount ?? 0,
 			diagnosticProtectedObjectCount: diagnostic?.protectedObjectCount ?? 0,
-		});
+		};
+	}
+
+	async emit(
+		stage: string,
+		collection: Collection = "passive",
+		diagnostic?: DiagnosticHeap,
+		preparation?: RequestPreparationSnapshot,
+	): Promise<void> {
+		await this.metrics.write(this.#row(stage, collection, diagnostic, preparation));
+	}
+
+	recordRequestPreparation(
+		phase: OpenAIRequestPreparationPhase,
+		inputItemCount: number,
+		toolCount: number,
+		serializedCodeUnits: number,
+	): void {
+		if (this.requestPreparationSnapshots >= MAX_REQUEST_PREPARATION_SNAPSHOTS) return;
+		this.requestPreparationSnapshots++;
+		try {
+			this.metrics.writeImmediately(
+				this.#row(`incident:request-preparation:${phase}`, "passive", undefined, {
+					phase,
+					inputItemCount,
+					toolCount,
+					serializedCodeUnits,
+				}),
+			);
+		} catch (error) {
+			this.observerError ??= error instanceof Error ? error : new Error(String(error));
+		}
 	}
 
 	schedule(stage: string): void {
@@ -916,11 +988,18 @@ async function run(): Promise<void> {
 	const stopEventProbe = beginEventStreamProbe(streamedEventBytes);
 	const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "omp-incident-memory-attribution-"));
 	const state = new AttributionState(options, fixture, metrics);
+	const stopRequestPreparationProbe = beginOpenAIRequestPreparationProbe(
+		(phase, inputItemCount, toolCount, serializedCodeUnits) => {
+			state.recordRequestPreparation(phase, inputItemCount, toolCount, serializedCodeUnits);
+		},
+	);
 	state.workspace = workspace;
 	let server: Bun.Server<undefined> | undefined;
 	let session: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
 	let authStorage: AuthStorage | undefined;
+	let removeProviderContextProbe: (() => void) | undefined;
+	let providerContextObserved = false;
 	try {
 		const loopback = new LoopbackResponses(workspace, state.expectedWriteHashes);
 		state.loopback = loopback;
@@ -981,6 +1060,16 @@ async function run(): Promise<void> {
 			bindProcessState: false,
 		});
 		session = created.session;
+		removeProviderContextProbe = session.agent.addBeforeModelCall(async context => {
+			if (providerContextObserved) return;
+			providerContextObserved = true;
+			await state.emit("incident:provider-context-prepared", "passive", undefined, {
+				phase: "agent-provider-context-prepared",
+				inputItemCount: context.messages.length,
+				toolCount: context.tools?.length ?? 0,
+				serializedCodeUnits: 0,
+			});
+		});
 		state.restoredEntries = manager.getBranchView().length;
 		state.agentMessageCount = session.agent.state.messages.length;
 		state.builtinToolCount = session.getAllToolNames().length;
@@ -1072,6 +1161,8 @@ async function run(): Promise<void> {
 		unsubscribe();
 		unsubscribe = undefined;
 	} finally {
+		removeProviderContextProbe?.();
+		stopRequestPreparationProbe();
 		unsubscribe?.();
 		if (state.mode) state.mode.stop();
 		if (session) {

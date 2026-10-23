@@ -275,6 +275,10 @@ INCIDENT_TRACE_FIELDS = {
     "ruleCount",
     "contextFileCount",
     "promptBytes",
+    "requestPreparationPhase",
+    "requestPreparationInputItems",
+    "requestPreparationToolCount",
+    "requestPreparationSerializedCodeUnits",
     "requestCount",
     "requestBytes",
     "providerDeltaBytes",
@@ -326,6 +330,7 @@ INCIDENT_INTEGER_FIELDS = INCIDENT_TRACE_FIELDS - {
     "arm",
     "stage",
     "collection",
+    "requestPreparationPhase",
     "fixtureChecksum",
     "fixtureLinkedTailId",
 }
@@ -343,6 +348,8 @@ def valid_incident_row(row: dict[str, object]) -> bool:
     if any(not is_nonnegative_integer(row[field]) for field in INCIDENT_INTEGER_FIELDS):
         return False
     if not is_bounded_string(row["stage"], 128):
+        return False
+    if not is_bounded_string(row["requestPreparationPhase"], 128):
         return False
     if not is_bounded_string(row["fixtureLinkedTailId"], 128):
         return False

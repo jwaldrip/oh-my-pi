@@ -8,6 +8,8 @@ import { compileCodingAgent } from "./compile-binary";
 const packageDir = path.join(import.meta.dir, "..");
 const repoRoot = path.join(packageDir, "..", "..");
 const identityFiles = [
+	"packages/ai/src/providers/openai-responses.ts",
+	"packages/ai/src/utils/openai-http.ts",
 	"packages/ai/src/utils/event-stream.ts",
 	"packages/coding-agent/src/modes/controllers/event-controller.ts",
 	"packages/coding-agent/src/modes/controllers/tool-args-reveal.ts",

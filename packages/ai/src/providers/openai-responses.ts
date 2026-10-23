@@ -37,7 +37,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { markOpenAIRequestPreparation, OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { waitForRetry } from "../utils/retry-wait";
@@ -810,6 +810,10 @@ const streamOpenAIResponsesOnce = (
 				chainState?.canAppend ? chainState.lastParams?.input : undefined,
 			);
 			const { params, trailingScaffoldingItems } = builtParams;
+			markOpenAIRequestPreparation("responses-params-built", {
+				inputItemCount: Array.isArray(params.input) ? params.input.length : 0,
+				toolCount: params.tools?.length ?? 0,
+			});
 			let activeParams = params;
 			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
