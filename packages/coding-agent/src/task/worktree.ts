@@ -11,7 +11,7 @@ import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -22,6 +22,29 @@ const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
+/**
+ * A native isolation backend may have allocated resources even though setup or
+ * teardown rejected. Its owner marker and backend sidecar are intentionally
+ * retained for the external reclaimer rather than being removed optimistically.
+ */
+export class IsolationTeardownUnresolvedError extends Error {
+	readonly unresolvedIsolation = true;
+
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "IsolationTeardownUnresolvedError";
+	}
+}
+
+export function isIsolationTeardownUnresolved(error: unknown): error is IsolationTeardownUnresolvedError {
+	return error instanceof IsolationTeardownUnresolvedError;
+}
+
+function aggregateError(message: string, errors: unknown[]): Error {
+	const present = errors.filter((error): error is Error => error instanceof Error);
+	if (present.length === 1) return present[0];
+	return new AggregateError(errors, message);
+}
 
 async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
 	try {
@@ -604,39 +627,52 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 }
 
 /**
- * Apply nested repo patches directly to their working directories after parent merge.
- *
- * Pre-existing dirty state in a nested repo is stashed before the patch is
- * applied and popped back (with `--index` so staged WIP stays staged) after
- * the commit, so unrelated user edits never get folded into the agent's
- * commit. A failing `git stash pop` (e.g. user edits collide with the patched
- * lines) leaves the stash entry intact, emits a `logger.warn`, and is
- * returned to the caller as a human-readable warning string — the agent
- * commit already landed, so this is a partial success the workflow needs to
- * see, not a thrown failure.
- *
- * Returns the collected stash-restore warnings (empty when every nested repo
- * was restored cleanly). Throws when the patch apply itself fails.
- *
- * @param commitMessage Optional async function to generate a commit message from the combined diff.
- *                      If omitted or returns null, falls back to a generic message.
+ * One AI commit-message request for a nested repository. The diff is captured
+ * before the cloud call so callers can release host admission while waiting.
  */
-export async function applyNestedPatches(
+export interface NestedPatchCommitMessageInput {
+	relativePath: string;
+	diff: string;
+}
+
+function groupNestedPatches(patches: readonly NestedRepoPatch[]): Map<string, NestedRepoPatch[]> {
+	const byRepo = new Map<string, NestedRepoPatch[]>();
+	for (const patch of patches) {
+		if (!patch.patch.trim()) continue;
+		const group = byRepo.get(patch.relativePath) ?? [];
+		group.push(patch);
+		byRepo.set(patch.relativePath, group);
+	}
+	return byRepo;
+}
+
+/**
+ * Collect every diff that can require an AI commit message without entering a
+ * target repository. The caller can perform those cloud waits outside the
+ * local allocation operation, then pass the settled messages to
+ * {@link applyNestedPatchesWithMessages}.
+ */
+export function collectNestedPatchCommitMessageInputs(
+	patches: readonly NestedRepoPatch[],
+): NestedPatchCommitMessageInput[] {
+	return [...groupNestedPatches(patches)].map(([relativePath, repoPatches]) => ({
+		relativePath,
+		diff: repoPatches.map(patch => patch.patch).join("\n"),
+	}));
+}
+
+/**
+ * Apply nested repo patches using messages already resolved by the caller.
+ * This function performs no cloud work: every filesystem and Git mutation is
+ * local so it can run wholly inside an allocation operation.
+ */
+export async function applyNestedPatchesWithMessages(
 	repoRoot: string,
 	patches: NestedRepoPatch[],
-	commitMessage?: (diff: string) => Promise<string | null>,
+	commitMessages: ReadonlyMap<string, string | null | undefined> = new Map(),
 ): Promise<string[]> {
 	const warnings: string[] = [];
-	// Group patches by target repo to apply all at once and commit
-	const byRepo = new Map<string, NestedRepoPatch[]>();
-	for (const p of patches) {
-		if (!p.patch.trim()) continue;
-		const group = byRepo.get(p.relativePath) ?? [];
-		group.push(p);
-		byRepo.set(p.relativePath, group);
-	}
-
-	for (const [relativePath, repoPatches] of byRepo) {
+	for (const [relativePath, repoPatches] of groupNestedPatches(patches)) {
 		const nestedDir = path.join(repoRoot, relativePath);
 		try {
 			await fs.access(path.join(nestedDir, ".git"));
@@ -644,12 +680,7 @@ export async function applyNestedPatches(
 			continue;
 		}
 		const repository = vcs.requireGit(nestedDir);
-
-		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
-
-		// Preserve any pre-existing dirty state (tracked + untracked) so we
-		// commit only the agent delta, not the user's in-flight work.
+		const touchedFiles = [...new Set(repoPatches.flatMap(patch => patchTouchedFiles(patch.patch)))];
 		const stashed = (await repository.isDirty())
 			? await repository.stashPush(`omp-isolation-${Snowflake.next()}`)
 			: false;
@@ -661,9 +692,9 @@ export async function applyNestedPatches(
 				if (touchedFiles.length === 0) {
 					throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
 				}
-				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
+				const message = commitMessages.get(relativePath) ?? "changes from isolated task(s)";
 				await repository.stageFiles(touchedFiles);
-				await repository.commitCreate(msg, {});
+				await repository.commitCreate(message, {});
 			}
 		} finally {
 			if (stashed) {
@@ -680,6 +711,25 @@ export async function applyNestedPatches(
 		}
 	}
 	return warnings;
+}
+
+/**
+ * Compatibility wrapper for direct callers. Task isolation resolves
+ * `commitMessage` before entering its local operation and calls
+ * {@link applyNestedPatchesWithMessages} directly.
+ */
+export async function applyNestedPatches(
+	repoRoot: string,
+	patches: NestedRepoPatch[],
+	commitMessage?: (diff: string) => Promise<string | null>,
+): Promise<string[]> {
+	const messages = new Map<string, string | null | undefined>();
+	if (commitMessage) {
+		for (const { relativePath, diff } of collectNestedPatchCommitMessageInputs(patches)) {
+			messages.set(relativePath, await commitMessage(diff));
+		}
+	}
+	return applyNestedPatchesWithMessages(repoRoot, patches, messages);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -807,6 +857,26 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	}
 }
 
+async function retainUnresolvedIsolation(
+	baseDir: string,
+	backend: IsoBackendKind,
+	message: string,
+	errors: unknown[],
+): Promise<never> {
+	const metadataErrors: unknown[] = [];
+	if (needsNativeTeardown(backend)) {
+		try {
+			await writeRetainedBackend(baseDir, backend);
+		} catch (error) {
+			metadataErrors.push(error);
+		}
+	}
+	throw new IsolationTeardownUnresolvedError(
+		`${message}; retaining isolation ownership at ${baseDir} for explicit teardown.`,
+		{ cause: aggregateError(message, [...errors, ...metadataErrors]) },
+	);
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
@@ -848,13 +918,26 @@ export async function ensureIsolation(
 				fallbackReason,
 				excludedPaths,
 			};
-		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
-			const message = errorMessage(err);
-			if (!natives.isoIsUnavailableError(message)) {
-				throw err;
+		} catch (error) {
+			const message = errorMessage(error);
+			if (natives.isoIsUnavailableError(message)) {
+				await fs.rm(baseDir, { recursive: true, force: true });
+				fallbackReason ??= message;
+				continue;
 			}
-			fallbackReason ??= message;
+			try {
+				await natives.isoStop(candidate, mergedDir);
+			} catch (teardownError) {
+				await retainUnresolvedIsolation(baseDir, candidate, "isolation setup teardown failed", [error, teardownError]);
+			}
+			try {
+				await fs.rm(baseDir, { recursive: true, force: true });
+			} catch (removeError) {
+				throw new Error(`isolation setup stopped its backend but could not remove ${baseDir}`, {
+					cause: aggregateError("isolation setup cleanup failed", [error, removeError]),
+				});
+			}
+			throw error;
 		}
 	}
 
@@ -863,21 +946,13 @@ export async function ensureIsolation(
 
 /** Tear down a handle returned by {@link ensureIsolation}. */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	const baseDir = path.dirname(handle.mergedDir);
 	try {
-		try {
-			await natives.isoStop(handle.backend, handle.mergedDir);
-		} catch (err) {
-			logger.warn("isolation backend stop failed during cleanup", {
-				backend: handle.backend,
-				mergedDir: handle.mergedDir,
-				error: err instanceof Error ? err.message : String(err),
-			});
-		}
-	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
-		await fs.rm(baseDir, { recursive: true, force: true });
+		await natives.isoStop(handle.backend, handle.mergedDir);
+	} catch (error) {
+		await retainUnresolvedIsolation(baseDir, handle.backend, "isolation backend stop failed during cleanup", [error]);
 	}
+	await fs.rm(baseDir, { recursive: true, force: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1006,35 +1081,63 @@ async function commitPatch(
 	return vcs.requireGit(repoDir).commitTree(tree, [parentSha], message, author);
 }
 
-interface FilteredAgentReplayOptions {
-	baseline: WorktreeBaseline;
-	commitMessage?: (diff: string) => Promise<string | null>;
+export interface CommitToBranchPatch {
+	patch: string;
+	author?: VcsCommitAuthor;
+	/** Preserved message from an agent-authored commit. */
+	message?: string;
+	/** Diff whose message must be generated before local materialization. */
+	messageDiff?: string;
+	/** Baseline WIP needed to synthesize the patch safely. */
+	baselineWip?: BaselineWipContext;
+}
+
+/**
+ * Local branch-capture plan. It intentionally contains all diffs that may
+ * need an AI message so callers can make those cloud requests after the
+ * capture admission releases and before local commits begin.
+ */
+export interface CommitToBranchPreparation {
+	isolationDir: string;
+	repoRoot: string;
+	taskId: string;
+	branchName: string;
+	baseSha: string;
+	rootPatch: string;
+	nestedPatches: NestedRepoPatch[];
 	fallbackMessage: string;
+	/** Copy the child HEAD into the parent ODB before materializing patches. */
+	fetchAgentHead: boolean;
+	isolationHead?: string;
+	patches: CommitToBranchPatch[];
+	messageDiffs: string[];
+}
+
+interface FilteredAgentReplayPreparationOptions {
+	baseline: WorktreeBaseline;
 	isolationDir: string;
 	isolationHead: string;
 	repoRoot: string;
 	rootPatch: string;
-	taskId: string;
 }
 
 /**
- * Rewrite each agent commit against the captured baseline WIP so user
- * staged/unstaged/untracked changes never enter the task history. Returns the
- * tip commit (the baseline sha when nothing survived filtering).
+ * Resolve dirty-baseline replay into patch plans without committing them. The
+ * temporary trees are local Git objects, while every cloud message wait is
+ * deferred until the caller holds no allocation permit.
  */
-async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Promise<string> {
+async function prepareFilteredAgentReplay(
+	opts: FilteredAgentReplayPreparationOptions,
+): Promise<CommitToBranchPatch[]> {
 	const baselineSha = opts.baseline.root.headCommit;
 	const repo = vcs.requireGit(opts.repoRoot);
 	const isolationRepo = vcs.requireGit(opts.isolationDir);
 	const agentCommits = await isolationRepo.revListRange(baselineSha, opts.isolationHead);
 	const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
-	// Seed the parent ODB with the dirty-side blobs needed by `git apply
-	// --3way`. Isolation repositories can read parent objects, but the parent
-	// cannot read objects created only inside isolation.
 	await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
 	const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
-	let tip = baselineSha;
 	let previousFilteredTree = baselineSha;
+	const patches: CommitToBranchPatch[] = [];
 
 	for (const commitSha of agentCommits) {
 		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
@@ -1044,105 +1147,80 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
 			const details = await isolationRepo.commitDetails(commitSha);
-			tip = await commitPatch(
-				opts.repoRoot,
-				tip,
-				opts.taskId,
-				commitPatchText,
-				details.message || commitSha,
-				details.author,
-			);
+			patches.push({
+				patch: commitPatchText,
+				message: details.message || commitSha,
+				author: details.author,
+			});
 		}
 		previousFilteredTree = currentFilteredTree;
 	}
-	if (tip === baselineSha) {
-		// No filtered commit landed. Synthesising `HEAD + rootPatch` fails
-		// whenever rootPatch's WIP context can't be applied to a HEAD-only
-		// index (untracked WIP + agent modifies, staged-new WIP + agent
-		// modifies — see #4136), so collapse the isolation output onto a
-		// single WIP-seeded commit, matching the no-agent-commit path. This
-		// also covers an agent that committed only baseline WIP.
-		if (!opts.rootPatch.trim()) return tip;
-		const msg = (opts.commitMessage && (await opts.commitMessage(opts.rootPatch))) || opts.fallbackMessage;
-		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
+	if (patches.length === 0) {
+		if (opts.rootPatch.trim()) {
+			patches.push({
+				patch: opts.rootPatch,
+				messageDiff: opts.rootPatch,
+				baselineWip: opts.baseline.root,
+			});
+		}
+		return patches;
 	}
-	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
-	// and 3-way synthesis used above; anything left is uncommitted work.
 	const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
 		threeWay: true,
 	});
 	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
-	if (!leftoverPatch.trim()) return tip;
-	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;
-	return commitPatch(opts.repoRoot, tip, opts.taskId, leftoverPatch, msg);
+	if (leftoverPatch.trim()) {
+		patches.push({ patch: leftoverPatch, messageDiff: leftoverPatch });
+	}
+	return patches;
 }
 
 /**
- * Capture task-only changes from the isolation worktree onto a parent-repo
- * branch named `omp/task/${taskId}`. Only root-repo changes go on the branch;
- * nested-repo patches are returned separately because the parent git can't
- * track files inside gitlinks.
- *
- * Commits are built as detached objects through temporary indexes and the
- * branch ref is written once the whole chain exists, so no checkout is ever
- * materialised and a crash mid-capture leaves no branch or worktree behind.
- *
- * If the agent committed inside isolation (HEAD moved past
- * `baseline.root.headCommit`), clean-baseline runs fetch the raw commit range
- * into the parent repo and later cherry-pick `baseSha..branchName`, preserving
- * every message and author verbatim. Dirty-baseline runs rewrite each agent
- * commit against the captured baseline WIP before committing it to the task
- * branch, so user staged/unstaged/untracked changes present at isolation
- * start are not replayed into the parent commit history.
- *
- * If the agent did not commit, the captured delta is collapsed onto a single
- * branch commit with an AI-generated (or fallback) message.
- *
- * Returns `null` when no root or nested changes exist.
+ * Capture task-only changes and compute a local branch plan. It performs no
+ * model request and creates no branch, so a caller may release host admission
+ * before generating commit messages.
  */
-export async function commitToBranch(
+export async function prepareCommitToBranch(
 	isolationDir: string,
 	baseline: WorktreeBaseline,
 	taskId: string,
 	description: string | undefined,
-	commitMessage?: (diff: string) => Promise<string | null>,
-): Promise<CommitToBranchResult | null> {
-	const baselineSha = baseline.root.headCommit;
+): Promise<CommitToBranchPreparation | null> {
+	const baseSha = baseline.root.headCommit;
 	const isolationRepo = vcs.requireGit(isolationDir);
 	const isolationHead = (await isolationRepo.headSha()) ?? "";
-	const agentCommitted = isolationHead !== "" && isolationHead !== baselineSha;
-
+	const agentCommitted = isolationHead !== "" && isolationHead !== baseSha;
 	const { rootPatch, nestedPatches } = await captureDeltaPatch(isolationDir, baseline);
 	if (!rootPatch.trim() && nestedPatches.length === 0) return null;
-	if (!rootPatch.trim()) return { rootPatch, nestedPatches };
 
 	const repoRoot = baseline.root.repoRoot;
-	const repo = vcs.requireGit(repoRoot);
-	const branchName = `omp/task/${taskId}`;
 	const fallbackMessage = description || taskId;
+	const preparation: CommitToBranchPreparation = {
+		isolationDir,
+		repoRoot,
+		taskId,
+		branchName: `omp/task/${taskId}`,
+		baseSha,
+		rootPatch,
+		nestedPatches,
+		fallbackMessage,
+		fetchAgentHead: false,
+		patches: [],
+		messageDiffs: [],
+	};
+	if (!rootPatch.trim()) return preparation;
 
-	let tip: string;
 	if (agentCommitted && baselineHasRootWip(baseline.root)) {
-		tip = await replayFilteredAgentCommits({
+		preparation.patches = await prepareFilteredAgentReplay({
 			baseline,
-			commitMessage,
-			fallbackMessage,
 			isolationDir,
 			isolationHead,
 			repoRoot,
 			rootPatch,
-			taskId,
 		});
 	} else if (agentCommitted) {
-		// Transfer the agent's commit objects (which live in isolation's `.git`,
-		// stranded once `cleanupIsolation` tears the workspace down) into the
-		// parent repo's object DB and create the branch at the agent's HEAD.
-		// `+HEAD:…` force-overwrites a stale branch from a prior run.
-		await repo.fetch(isolationDir, "HEAD", `refs/heads/${branchName}`, GIT_NETWORK_TIMEOUT_MS);
-		tip = isolationHead;
-		// Leftover = anything still uncommitted in isolation on top of the
-		// agent's last commit (staged, unstaged, untracked). The agent didn't
-		// commit it, so it goes in as one AI-summarized trailing commit.
+		preparation.fetchAgentHead = true;
+		preparation.isolationHead = isolationHead;
 		const leftoverPatch = await captureRepoDeltaPatch(isolationDir, {
 			repoRoot: isolationDir,
 			headCommit: isolationHead,
@@ -1152,18 +1230,90 @@ export async function commitToBranch(
 			untrackedPatch: "",
 		});
 		if (leftoverPatch.trim()) {
-			const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
-			tip = await commitPatch(repoRoot, tip, taskId, leftoverPatch, msg);
+			preparation.patches.push({ patch: leftoverPatch, messageDiff: leftoverPatch });
 		}
 	} else {
-		const msg = (commitMessage && (await commitMessage(rootPatch))) || fallbackMessage;
-		const wip = baselineHasRootWip(baseline.root) ? baseline.root : undefined;
-		tip = await commitPatch(repoRoot, baselineSha, taskId, rootPatch, msg, undefined, wip);
+		preparation.patches.push({
+			patch: rootPatch,
+			messageDiff: rootPatch,
+			baselineWip: baselineHasRootWip(baseline.root) ? baseline.root : undefined,
+		});
 	}
+	preparation.messageDiffs = preparation.patches.flatMap(patch => (patch.messageDiff ? [patch.messageDiff] : []));
+	return preparation;
+}
 
-	if (tip === baselineSha) return { rootPatch, baseSha: baselineSha, nestedPatches };
-	await repo.createBranch(branchName, tip, true);
-	return { branchName, baseSha: baselineSha, rootPatch, nestedPatches };
+/**
+ * Materialize a previously captured branch plan. The supplied messages are
+ * already settled values, never callbacks, so this local Git work cannot
+ * retain admission while an AI provider is waiting.
+ */
+export async function finalizeCommitToBranch(
+	preparation: CommitToBranchPreparation,
+	messages: readonly (string | null | undefined)[] = [],
+): Promise<CommitToBranchResult | null> {
+	if (!preparation.rootPatch.trim()) {
+		return { rootPatch: preparation.rootPatch, nestedPatches: preparation.nestedPatches };
+	}
+	const repo = vcs.requireGit(preparation.repoRoot);
+	let tip = preparation.baseSha;
+	if (preparation.fetchAgentHead) {
+		const isolationHead = preparation.isolationHead;
+		if (!isolationHead) throw new Error("Missing isolated agent HEAD for branch materialization.");
+		await repo.fetch(preparation.isolationDir, "HEAD", `refs/heads/${preparation.branchName}`, GIT_NETWORK_TIMEOUT_MS);
+		tip = isolationHead;
+	}
+	let messageIndex = 0;
+	for (const patch of preparation.patches) {
+		const generatedMessage = patch.messageDiff ? messages[messageIndex++] : undefined;
+		const message = patch.message ?? generatedMessage ?? preparation.fallbackMessage;
+		tip = await commitPatch(
+			preparation.repoRoot,
+			tip,
+			preparation.taskId,
+			patch.patch,
+			message,
+			patch.author,
+			patch.baselineWip,
+		);
+	}
+	if (tip === preparation.baseSha) {
+		return {
+			rootPatch: preparation.rootPatch,
+			baseSha: preparation.baseSha,
+			nestedPatches: preparation.nestedPatches,
+		};
+	}
+	await repo.createBranch(preparation.branchName, tip, true);
+	return {
+		branchName: preparation.branchName,
+		baseSha: preparation.baseSha,
+		rootPatch: preparation.rootPatch,
+		nestedPatches: preparation.nestedPatches,
+	};
+}
+
+/**
+ * Compatibility wrapper for direct callers. Isolation lifecycle code uses the
+ * prepare/message/finalize phases independently to keep cloud waits outside
+ * the allocation operation.
+ */
+export async function commitToBranch(
+	isolationDir: string,
+	baseline: WorktreeBaseline,
+	taskId: string,
+	description: string | undefined,
+	commitMessage?: (diff: string) => Promise<string | null>,
+): Promise<CommitToBranchResult | null> {
+	const preparation = await prepareCommitToBranch(isolationDir, baseline, taskId, description);
+	if (!preparation) return null;
+	const messages: Array<string | null | undefined> = [];
+	if (commitMessage) {
+		for (const diff of preparation.messageDiffs) {
+			messages.push(await commitMessage(diff));
+		}
+	}
+	return finalizeCommitToBranch(preparation, messages);
 }
 
 export interface MergeBranchResult {

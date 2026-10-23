@@ -14,6 +14,7 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
+	IsolationOperationInfo,
 	PreparedExtension,
 } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
@@ -273,6 +274,16 @@ export interface ToolSession {
 	extensionPaths?: string[];
 	/** Imported extension factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
+	/**
+	 * Runs a host-allocation operation through this session's own extension
+	 * runner. SDK-created sessions bind this to their session-local runner;
+	 * manually constructed tool sessions may omit it.
+	 */
+	runIsolationOperation?<T>(
+		operation: Omit<IsolationOperationInfo, "operationId">,
+		body: () => Promise<T>,
+		signal?: AbortSignal,
+	): Promise<T>;
 	/**
 	 * Session-local extension roots for post-startup sub-discovery: explicit SDK
 	 * roots, discovery mode, and configured `extensions:`. A provider (not a

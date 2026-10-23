@@ -18,6 +18,7 @@ import {
 	parseIsolationBackend,
 	prepareIsolationCopyPlan,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
+import { RETAINED_BACKEND_FILE } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -251,6 +252,54 @@ describe("worktree isolation helpers", () => {
 			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
 			expect(handle.fellBack).toBe(true);
 			expect(handle.fallbackReason).toBe(unavailable.message);
+		});
+
+		it("retains ownership metadata when a partial backend setup cannot be stopped", async () => {
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-retained-start-"));
+			tempDirs.push(worktreeBase);
+			setWorktreesDir(worktreeBase);
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Overlayfs,
+				candidates: [natives.IsoBackendKind.Overlayfs],
+				fellBack: false,
+				reason: undefined,
+			});
+			vi.spyOn(natives, "isoStart").mockRejectedValue(new Error("partial backend start"));
+			vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("backend still owns mount"));
+			vi.spyOn(natives, "isoIsUnavailableError").mockReturnValue(false);
+
+			try {
+				await expect(ensureIsolation(repo, "partial-start-retained")).rejects.toThrow(
+					"retaining isolation ownership",
+				);
+				const entries = await fs.readdir(worktreeBase);
+				expect(entries).toHaveLength(1);
+				const retainedBase = path.join(worktreeBase, entries[0]!);
+				expect(await Bun.file(path.join(retainedBase, RETAINED_BACKEND_FILE)).exists()).toBe(true);
+				expect(await Bun.file(path.join(retainedBase, ".omp-isolation-owner.json")).exists()).toBe(true);
+			} finally {
+				setWorktreesDir(undefined);
+			}
+		});
+
+		it("does not remove a workspace when native teardown fails", async () => {
+			const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-retained-stop-"));
+			tempDirs.push(baseDir);
+			const mergedDir = path.join(baseDir, "m");
+			await fs.mkdir(mergedDir);
+			vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("backend still owns mount"));
+
+			await expect(
+				cleanupIsolation({
+					mergedDir,
+					backend: natives.IsoBackendKind.Overlayfs,
+					fellBack: false,
+					fallbackReason: null,
+					excludedPaths: [],
+				}),
+			).rejects.toThrow("retaining isolation ownership");
+			expect(await Bun.file(mergedDir).exists()).toBe(true);
+			expect(await Bun.file(path.join(baseDir, RETAINED_BACKEND_FILE)).exists()).toBe(true);
 		});
 
 		it("uses compact isolation paths that do not embed long task ids", async () => {

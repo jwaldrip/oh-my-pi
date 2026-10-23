@@ -3507,6 +3507,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
 		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
 		extensionRunner.setUserWaitTracker(trackUserWait);
+		// Allocation admission is per session. Descendants rebind their prepared
+		// extension factories and receive their own runner, never this closure.
+		toolSession.runIsolationOperation = extensionRunner.runIsolationOperation.bind(extensionRunner);
 
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {

@@ -607,6 +607,7 @@ function buildExecutorOptions(
 		parentToolCallId: request.parentToolCallId,
 		detached: request.detached,
 		id,
+		runIsolationOperation: session.runIsolationOperation,
 		taskDepth: session.taskDepth ?? 0,
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
@@ -916,6 +917,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				result,
 				repoRoot: isolationContext.repoRoot,
 				mergeMode: policy.mergeMode,
+				runIsolationOperation: baseOptions.runIsolationOperation,
 			});
 			mergeSummary = outcome.summary;
 			changesApplied = outcome.changesApplied;
@@ -926,7 +928,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					mergeMode: policy.mergeMode,
 					changesApplied: outcome.changesApplied,
 					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
-					commitMessage: makeIsolationCommitMessage(request.session)(),
+					buildCommitMessage: makeIsolationCommitMessage(request.session),
+					runIsolationOperation: baseOptions.runIsolationOperation,
 				});
 				mergeSummary += nestedPatchSummary;
 				requiresRecoveryArtifacts ||=

@@ -978,6 +978,39 @@ describe("structured subagent primitive", () => {
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
+	it("forwards each task and eval session's operation runner into isolated execution", async () => {
+		mockDiscovery();
+		const taskRunner = async <T>(_operation: unknown, body: () => Promise<T>): Promise<T> => body();
+		const evalRunner = async <T>(_operation: unknown, body: () => Promise<T>): Promise<T> => body();
+		const taskSession = session({ isolationEnabled: true });
+		const evalSession = session({ isolationEnabled: true });
+		taskSession.runIsolationOperation = taskRunner;
+		evalSession.runIsolationOperation = evalRunner;
+		const seen = [] as Array<executorModule.ExecutorOptions["runIsolationOperation"]>;
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
+			seen.push(baseOptions.runIsolationOperation);
+			return result();
+		});
+		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: true,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
+
+		await runStructuredSubagent(request({ session: taskSession, isolation: { requested: true } }));
+		await runStructuredSubagent(
+			request({
+				session: evalSession,
+				invocationKind: "eval",
+				isolation: { requested: true },
+			}),
+		);
+
+		expect(seen).toEqual([taskRunner, evalRunner]);
+	});
+
 	it("reuses a cached output manager across concurrent allocations and sanitizes artifact ids", async () => {
 		mockDiscovery();
 		const sharedSession = session();

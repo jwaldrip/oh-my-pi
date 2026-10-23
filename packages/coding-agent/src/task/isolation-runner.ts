@@ -25,6 +25,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
+import type { IsolationOperationInfo } from "../extensibility/extensions/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
@@ -35,17 +36,22 @@ import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
 import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import {
-	applyNestedPatches,
+	applyNestedPatchesWithMessages,
 	captureDeltaPatch,
 	captureIsolationBaseline,
 	cleanupIsolation,
 	cleanupTaskBranches,
+	collectNestedPatchCommitMessageInputs,
+	type CommitToBranchPreparation,
 	type CommitToBranchResult,
 	commitToBranch,
 	ensureIsolation,
+	finalizeCommitToBranch,
 	getRepoRoot,
 	type IsolationHandle,
+	isIsolationTeardownUnresolved,
 	mergeTaskBranches,
+	prepareCommitToBranch,
 	type WorktreeBaseline,
 } from "./worktree";
 
@@ -181,9 +187,9 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the subagent subprocess. This helper sets
-	 * `worktree`, clears prepared/path extension preloads and custom-tool paths
-	 * (isolated runs re-discover inside the worktree), and forwards everything
-	 * else unchanged.
+	 * `worktree`, clears path/custom-tool preloads so isolated work rediscovery
+	 * stays local, and retains trusted prepared factories for restricted
+	 * children to rebind against their own extension runner.
 	 */
 	baseOptions: ExecutorOptions;
 	/** Context returned by {@link prepareIsolationContext}. */
@@ -208,6 +214,60 @@ export interface IsolatedRunOptions {
 	buildFailureResult: (err: unknown) => SingleResult;
 	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
+}
+
+function freshOperationSignal(): AbortSignal {
+	return new AbortController().signal;
+}
+
+function runIsolationOperation<T>(
+	runner: ExecutorOptions["runIsolationOperation"],
+	operation: Omit<IsolationOperationInfo, "operationId">,
+	body: () => Promise<T>,
+	signal?: AbortSignal,
+): Promise<T> {
+	return runner ? runner(operation, body, signal) : body();
+}
+
+function isolationOperation(
+	kind: IsolationOperationInfo["kind"],
+	repoRoot: string,
+	agentId: string,
+	isolationDir?: string,
+): Omit<IsolationOperationInfo, "operationId"> {
+	return {
+		kind,
+		repoRoot,
+		agentId,
+		...(isolationDir ? { isolationDir } : {}),
+	};
+}
+
+async function resolveBranchCommitMessages(
+	preparation: CommitToBranchPreparation | null,
+	buildCommitMessage: BuildCommitMessage | undefined,
+): Promise<Array<string | null | undefined>> {
+	if (!preparation) return [];
+	const commitMessage = buildCommitMessage?.();
+	if (!commitMessage) return [];
+	const messages: Array<string | null | undefined> = [];
+	for (const diff of preparation.messageDiffs) {
+		messages.push(await commitMessage(diff));
+	}
+	return messages;
+}
+
+async function resolveNestedCommitMessages(
+	patches: readonly NestedRepoPatch[],
+	buildCommitMessage: BuildCommitMessage | undefined,
+): Promise<Map<string, string | null | undefined>> {
+	const commitMessage = buildCommitMessage?.();
+	const messages = new Map<string, string | null | undefined>();
+	if (!commitMessage) return messages;
+	for (const { relativePath, diff } of collectNestedPatchCommitMessageInputs(patches)) {
+		messages.set(relativePath, await commitMessage(diff));
+	}
+	return messages;
 }
 
 /**
@@ -390,6 +450,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
+	const runLocalOperation = <T>(
+		kind: IsolationOperationInfo["kind"],
+		body: () => Promise<T>,
+		signal: AbortSignal | undefined,
+		isolationDir = handle?.mergedDir,
+	): Promise<T> =>
+		runIsolationOperation(
+			opts.baseOptions.runIsolationOperation,
+			isolationOperation(kind, opts.context.repoRoot, opts.agentId, isolationDir),
+			body,
+			signal,
+		);
 	const releaseBase = (): Promise<void> => {
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
@@ -397,52 +469,74 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace) await cleanupIsolation(handle);
+			const activeHandle = handle;
+			if (activeHandle && !retainWorkspace) {
+				await runLocalOperation(
+					"cleanup",
+					() => cleanupIsolation(activeHandle),
+					freshOperationSignal(),
+					activeHandle.mergedDir,
+				);
+			}
 		})();
 		return cleanupPromise;
 	};
 	const releaseIsolation = (): Promise<void> => {
 		releasePromise ??= (async () => {
-			if (!handle || !taskBaseline || retainWorkspace) {
+			const activeHandle = handle;
+			const activeBaseline = taskBaseline;
+			if (!activeHandle || !activeBaseline || retainWorkspace) {
 				await cleanupHandle();
 				return;
 			}
 			try {
-				let capture: IsolationPatchCapture;
-				try {
-					capture = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
-				} catch (captureErr) {
-					retainWorkspace = true;
-					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
-					throw new Error(
-						renderIsolationError({
-							kind: "patch-capture-failed",
-							message: captureErr instanceof Error ? captureErr.message : String(captureErr),
-							retainedDir: retained.dir,
-							sidecarMissing: !retained.sidecarOk,
-						}),
-					);
-				}
-				const patchResult = capture.artifacts;
-				AgentRegistry.global().setHistory(opts.agentId, {
-					patchPath: patchResult.patchPath,
-					nestedPatchPaths: patchResult.nestedPatchPaths,
-				});
-				// Nothing changed since the run-end capture the caller already
-				// merged or applied: a branch now would only duplicate that work.
-				if (capture.fingerprint === handedOff) return;
-				const commitResult = await commitToBranch(
-					handle.mergedDir,
-					taskBaseline,
-					opts.agentId,
-					opts.description,
-					undefined,
+				await runLocalOperation(
+					"capture",
+					async () => {
+						let capture: IsolationPatchCapture;
+						try {
+							capture = await writeIsolationPatch(
+								activeHandle.mergedDir,
+								activeBaseline,
+								opts.artifactsDir,
+								opts.agentId,
+							);
+						} catch (captureErr) {
+							retainWorkspace = true;
+							const retained = await retainIsolationWorkspace(activeHandle.mergedDir, activeHandle.backend);
+							throw new Error(
+								renderIsolationError({
+									kind: "patch-capture-failed",
+									message: captureErr instanceof Error ? captureErr.message : String(captureErr),
+									retainedDir: retained.dir,
+									sidecarMissing: !retained.sidecarOk,
+								}),
+								{ cause: captureErr },
+							);
+						}
+						const patchResult = capture.artifacts;
+						AgentRegistry.global().setHistory(opts.agentId, {
+							patchPath: patchResult.patchPath,
+							nestedPatchPaths: patchResult.nestedPatchPaths,
+						});
+						// Nothing changed since the run-end capture the caller already
+						// merged or applied: a branch now would only duplicate that work.
+						if (capture.fingerprint === handedOff) return;
+						const commitResult = await commitToBranch(
+							activeHandle.mergedDir,
+							activeBaseline,
+							opts.agentId,
+							opts.description,
+						);
+						AgentRegistry.global().setHistory(opts.agentId, {
+							patchPath: patchResult.patchPath,
+							branchName: commitResult?.branchName,
+							nestedPatchPaths: patchResult.nestedPatchPaths,
+						});
+					},
+					freshOperationSignal(),
+					activeHandle.mergedDir,
 				);
-				AgentRegistry.global().setHistory(opts.agentId, {
-					patchPath: patchResult.patchPath,
-					branchName: commitResult?.branchName,
-					nestedPatchPaths: patchResult.nestedPatchPaths,
-				});
 			} finally {
 				await cleanupHandle();
 			}
@@ -450,21 +544,46 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return releasePromise;
 	};
 	try {
-		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
+		const setup = await runLocalOperation(
+			"materialize",
+			async () => {
+				let setupHandle: IsolationHandle | undefined;
+				try {
+					setupHandle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
+					const baseline = await captureIsolationBaseline(
+						setupHandle.mergedDir,
+						opts.context.repoRoot,
+						undefined,
+						setupHandle.excludedPaths,
+					);
+					return { ok: true as const, handle: setupHandle, baseline };
+				} catch (error) {
+					if (isIsolationTeardownUnresolved(error)) throw error;
+					if (setupHandle) await cleanupIsolation(setupHandle);
+					// Expected setup failures have no live allocation once cleanup
+					// settles. Return them locally so admission releases before the
+					// original error is surfaced to the caller.
+					return { ok: false as const, error };
+				}
+			},
+			opts.baseOptions.signal,
+		);
+		if (!setup.ok) throw setup.error;
+		handle = setup.handle;
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
-		const baseline = await captureIsolationBaseline(
-			isolationDir,
-			opts.context.repoRoot,
-			undefined,
-			handle.excludedPaths,
-		);
+		const baseline = setup.baseline;
 		taskBaseline = baseline;
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
-			preloadedPreparedExtensions: undefined,
+			// Restricted children receive trusted prepared factories and bind
+			// them to their own SDK-created extension runner. Unrestricted
+			// children continue discovering from the isolated worktree.
+			preloadedPreparedExtensions: opts.baseOptions.restrictToolNames
+				? opts.baseOptions.preloadedPreparedExtensions
+				: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
@@ -485,72 +604,91 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			await deferredCleanup;
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
-			let commitResult: CommitToBranchResult | null;
+			let commitResult: CommitToBranchResult | null = null;
 			try {
-				commitResult = await commitToBranch(
+				const preparation = await runLocalOperation(
+					"capture",
+					() => prepareCommitToBranch(isolationDir, baseline, opts.agentId, opts.description),
+					freshOperationSignal(),
 					isolationDir,
-					baseline,
-					opts.agentId,
-					opts.description,
-					opts.buildCommitMessage?.(),
 				);
+				// Message generation is deliberately outside host admission. The
+				// worktree remains owned, but another allocation may proceed.
+				const messages = await resolveBranchCommitMessages(preparation, opts.buildCommitMessage);
+				commitResult = preparation
+					? await runLocalOperation(
+							"capture",
+							() => finalizeCommitToBranch(preparation, messages),
+							freshOperationSignal(),
+							isolationDir,
+						)
+					: null;
 			} catch (mergeErr) {
-				// Agent succeeded but the branch commit failed. `commitToBranch`
-				// is not atomic: the clean-baseline path fetches the agent's
-				// commits into the parent ODB and creates `omp/task/<id>` before
-				// it commits the leftover working-tree delta, so a throw from
-				// that trailing step leaves behind a branch that already holds
-				// every commit the agent made. The isolation worktree — the only
-				// other copy of those objects — is destroyed by the `finally`
-				// below, so deleting the branch unconditionally turned a
-				// recoverable merge conflict into permanent loss of committed
-				// work (#8868). Delete only when nothing is at stake.
-				const baseSha = baseline.root.headCommit;
-				const branchName = `omp/task/${opts.agentId}`;
-				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
-				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
-				try {
-					const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
-					return rememberAgentArtifacts({
-						...result,
-						...capture.artifacts,
-						error: renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch }),
-					});
-				} catch (patchErr) {
-					retainWorkspace = true;
-					const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
-					return rememberAgentArtifacts({
-						...result,
-						error: renderIsolationError({
-							kind: "merge-failed",
-							message: msg,
-							captureError: patchErr instanceof Error ? patchErr.message : String(patchErr),
-							rescueBranch,
-							retainedDir: retained.dir,
-							sidecarMissing: !retained.sidecarOk,
-						}),
-					});
-				}
+				// Every recovery action below writes local artifacts or mutates a
+				// branch, so it runs under a fresh salvage admission after an
+				// expected cloud-message failure or local commit failure.
+				return await runLocalOperation(
+					"salvage",
+					async () => {
+						const baseSha = baseline.root.headCommit;
+						const branchName = `omp/task/${opts.agentId}`;
+						const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+						const message = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
+						try {
+							const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+							return rememberAgentArtifacts({
+								...result,
+								...capture.artifacts,
+								error: renderIsolationError({ kind: "merge-failed", message, rescueBranch }),
+							});
+						} catch (patchErr) {
+							retainWorkspace = true;
+							const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+							return rememberAgentArtifacts({
+								...result,
+								error: renderIsolationError({
+									kind: "merge-failed",
+									message,
+									captureError: patchErr instanceof Error ? patchErr.message : String(patchErr),
+									rescueBranch,
+									retainedDir: retained.dir,
+									sidecarMissing: !retained.sidecarOk,
+								}),
+							});
+						}
+					},
+					freshOperationSignal(),
+					isolationDir,
+				);
 			}
 			handedOff = deltaFingerprint(commitResult?.rootPatch ?? "", commitResult?.nestedPatches ?? []);
 			// The branch holds the root-repo work, but nested-repo patches exist
 			// only in memory until written; the workspace goes away in `finally`.
-			try {
-				const nestedPatchPaths = await persistNestedPatches(
-					opts.artifactsDir,
-					opts.agentId,
-					commitResult?.nestedPatches ?? [],
-				);
-				return rememberAgentArtifacts({
-					...result,
-					branchName: commitResult?.branchName,
-					branchBaseSha: commitResult?.baseSha,
-					nestedPatches: commitResult?.nestedPatches,
-					nestedPatchPaths,
-				});
-			} catch (persistErr) {
-				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+			const persisted = await runLocalOperation(
+				"capture",
+				async () => {
+					try {
+						return {
+							ok: true as const,
+							paths: await persistNestedPatches(
+								opts.artifactsDir,
+								opts.agentId,
+								commitResult?.nestedPatches ?? [],
+							),
+						};
+					} catch (error) {
+						retainWorkspace = true;
+						return {
+							ok: false as const,
+							error,
+							retained: await retainIsolationWorkspace(isolationDir, isolationBackend),
+						};
+					}
+				},
+				freshOperationSignal(),
+				isolationDir,
+			);
+			if (!persisted.ok) {
 				return rememberAgentArtifacts({
 					...result,
 					branchName: commitResult?.branchName,
@@ -558,31 +696,51 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					nestedPatches: commitResult?.nestedPatches,
 					error: renderIsolationError({
 						kind: "nested-capture-failed",
-						message: persistErr instanceof Error ? persistErr.message : String(persistErr),
-						retainedDir: retained.dir,
-						sidecarMissing: !retained.sidecarOk,
+						message: persisted.error instanceof Error ? persisted.error.message : String(persisted.error),
+						retainedDir: persisted.retained.dir,
+						sidecarMissing: !persisted.retained.sidecarOk,
 					}),
 				});
 			}
+			return rememberAgentArtifacts({
+				...result,
+				branchName: commitResult?.branchName,
+				branchBaseSha: commitResult?.baseSha,
+				nestedPatches: commitResult?.nestedPatches,
+				nestedPatchPaths: persisted.paths,
+			});
 		}
 		if (result.exitCode === 0) {
-			try {
-				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
-				handedOff = capture.fingerprint;
-				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
-			} catch (patchErr) {
-				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+			const captured = await runLocalOperation(
+				"capture",
+				async () => {
+					try {
+						return { ok: true as const, capture: await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId) };
+					} catch (error) {
+						retainWorkspace = true;
+						return {
+							ok: false as const,
+							error,
+							retained: await retainIsolationWorkspace(isolationDir, isolationBackend),
+						};
+					}
+				},
+				freshOperationSignal(),
+				isolationDir,
+			);
+			if (!captured.ok) {
 				return rememberAgentArtifacts({
 					...result,
 					error: renderIsolationError({
 						kind: "patch-capture-failed",
-						message: patchErr instanceof Error ? patchErr.message : String(patchErr),
-						retainedDir: retained.dir,
-						sidecarMissing: !retained.sidecarOk,
+						message: captured.error instanceof Error ? captured.error.message : String(captured.error),
+						retainedDir: captured.retained.dir,
+						sidecarMissing: !captured.retained.sidecarOk,
 					}),
 				});
 			}
+			handedOff = captured.capture.fingerprint;
+			return rememberAgentArtifacts({ ...result, ...captured.capture.artifacts });
 		}
 		return rememberAgentArtifacts(result);
 	} catch (err) {
@@ -595,7 +753,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
 		) {
 			if (deferredCleanup) {
-				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
+				const cleanupAfterDeferred = deferredCleanup.then(
+					() => cleanupHandle(),
+					async error => {
+						await cleanupHandle();
+						throw error;
+					},
+				);
+				trackLateCleanup(cleanupAfterDeferred, {
 					agentId: opts.agentId,
 					resource: "isolation",
 				});
@@ -610,6 +775,8 @@ export interface IsolationMergeOptions {
 	result: SingleResult;
 	repoRoot: string;
 	mergeMode: "patch" | "branch";
+	/** Current session's admission runner, when extensions registered one. */
+	runIsolationOperation?: ExecutorOptions["runIsolationOperation"];
 }
 
 export interface IsolationMergeOutcome {
@@ -665,14 +832,20 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 					mergedBranchForNestedPatches: canApplyNestedOnly,
 				};
 			}
-			const mergeResult = await mergeTaskBranches(repoRoot, [
-				{
-					branchName: result.branchName,
-					taskId: result.id,
-					description: result.description,
-					baseSha: result.branchBaseSha,
-				},
-			]);
+			const mergeResult = await runIsolationOperation(
+				opts.runIsolationOperation,
+				isolationOperation("merge", repoRoot, result.id),
+				() =>
+					mergeTaskBranches(repoRoot, [
+						{
+							branchName: result.branchName!,
+							taskId: result.id,
+							description: result.description,
+							baseSha: result.branchBaseSha,
+						},
+					]),
+				freshOperationSignal(),
+			);
 			const mergedBranchForNestedPatches = mergeResult.merged.includes(result.branchName);
 			const changesApplied = mergeResult.failed.length === 0;
 			const hadAnyChanges = changesApplied && mergeResult.merged.length > 0;
@@ -734,7 +907,12 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				} else if (forwardApplies) {
 					changesApplied = true;
 					try {
-						await repo.applyPatch(normalized, {});
+						await runIsolationOperation(
+							opts.runIsolationOperation,
+							isolationOperation("merge", repoRoot, result.id),
+							() => repo.applyPatch(normalized, {}),
+							freshOperationSignal(),
+						);
 						hadAnyChanges = true;
 					} catch {
 						changesApplied = false;
@@ -783,8 +961,10 @@ export interface NestedPatchApplyOptions {
 	changesApplied: boolean | null;
 	/** Branch mode gates nested apply on whether the root branch merged. */
 	mergedBranchForNestedPatches: boolean;
-	/** Optional AI commit-message callback for nested commits; falls back to a generic message. */
-	commitMessage?: (diff: string) => Promise<string | null>;
+	/** Factory for optional AI messages, resolved before the local apply admission. */
+	buildCommitMessage?: BuildCommitMessage;
+	/** Current session's admission runner, when extensions registered one. */
+	runIsolationOperation?: ExecutorOptions["runIsolationOperation"];
 }
 
 /**
@@ -797,7 +977,7 @@ export interface NestedPatchApplyOptions {
  * or an empty string when nothing was applied or the nested apply succeeded.
  */
 export async function applyEligibleNestedPatches(opts: NestedPatchApplyOptions): Promise<string> {
-	const { result, repoRoot, mergeMode, changesApplied, mergedBranchForNestedPatches, commitMessage } = opts;
+	const { result, repoRoot, mergeMode, changesApplied, mergedBranchForNestedPatches } = opts;
 	if (mergeMode === "patch" && changesApplied === false) return "";
 	const nestedPatches = result.nestedPatches ?? [];
 	const eligible =
@@ -807,7 +987,15 @@ export async function applyEligibleNestedPatches(opts: NestedPatchApplyOptions):
 		(mergeMode !== "branch" || mergedBranchForNestedPatches);
 	if (!eligible) return "";
 	try {
-		const warnings = await applyNestedPatches(repoRoot, nestedPatches, commitMessage);
+		// Model calls run before local admission. The subsequent operation only
+		// touches worktrees and Git state.
+		const messages = await resolveNestedCommitMessages(nestedPatches, opts.buildCommitMessage);
+		const warnings = await runIsolationOperation(
+			opts.runIsolationOperation,
+			isolationOperation("merge", repoRoot, result.id),
+			() => applyNestedPatchesWithMessages(repoRoot, nestedPatches, messages),
+			freshOperationSignal(),
+		);
 		if (warnings.length === 0) return "";
 		return `\n\n<system-notification>${warnings.join("\n")}</system-notification>`;
 	} catch (applyErr) {
