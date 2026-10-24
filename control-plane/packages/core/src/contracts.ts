@@ -212,6 +212,52 @@ export const SCOPE_PROMPT = "prompt";
  * so the contract owns it and both read it from here.
  */
 export const DEFAULT_DAEMON_PORT = 7777;
+// ---------------------------------------------------------------------------
+// OMP configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * The OMP roles operators can configure from the control plane.
+ *
+ * OMP itself has further specialist roles, but these are the durable
+ * interactive and subagent roles the control plane presents. `null` represents
+ * a role that deliberately has no configured override and therefore falls back
+ * to OMP's own selection.
+ */
+export const OMP_MODEL_ROLES = ["default", "smol", "slow", "plan", "task"] as const;
+export type OmpModelRole = (typeof OMP_MODEL_ROLES)[number];
+export type OmpModelRoles = Record<OmpModelRole, string | null>;
+
+/** A JSON-safe OMP setting value that may cross the daemon boundary. */
+export type OmpSettingValue =
+  | boolean
+  | null
+  | number
+  | string
+  | OmpSettingValue[]
+  | { [key: string]: OmpSettingValue };
+
+/** A partial, key-value update to OMP's public settings schema. */
+export type OmpSettingsValues = Record<string, OmpSettingValue>;
+
+export interface OmpSettingsResponse {
+  settings: OmpSettingsValues;
+}
+
+export interface OmpSettingsUpdate {
+  settings: OmpSettingsValues;
+}
+
+export interface OmpModelRolesResponse {
+  roles: OmpModelRoles;
+  cycleOrder: OmpModelRole[];
+}
+
+export interface OmpModelRolesUpdate {
+  roles?: Partial<OmpModelRoles>;
+  cycleOrder?: OmpModelRole[];
+}
+
 
 // ---------------------------------------------------------------------------
 // Agent-driveable WebView

@@ -16,18 +16,20 @@
 import { mock } from "bun:test";
 import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-
-// Resolve from this file's location (the app package), not from the workspace
-// root bun happened to start in.
-const react = require("react");
-const jsxRuntime = require("react/jsx-runtime");
-const jsxDevRuntime = require("react/jsx-dev-runtime");
-const reactDom = require("react-dom");
-const reactDomClient = require("react-dom/client");
+const appRequire = createRequire(import.meta.url);
+// RNW is hoisted and its CommonJS internals load the workspace copy of React.
+// Pin the test renderer to that same physical copy, not the app-local one.
+const rendererRequire = createRequire(appRequire.resolve("react-native-web"));
+const react = rendererRequire("react");
+const jsxRuntime = rendererRequire("react/jsx-runtime");
+const jsxDevRuntime = rendererRequire("react/jsx-dev-runtime");
+const reactDom = rendererRequire("react-dom");
+const reactDomClient = rendererRequire("react-dom/client");
+const reactDomServer = rendererRequire("react-dom/server");
 
 mock.module("react", () => react);
 mock.module("react/jsx-runtime", () => jsxRuntime);
 mock.module("react/jsx-dev-runtime", () => jsxDevRuntime);
 mock.module("react-dom", () => reactDom);
 mock.module("react-dom/client", () => reactDomClient);
+mock.module("react-dom/server", () => reactDomServer);

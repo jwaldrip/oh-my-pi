@@ -53,6 +53,7 @@ import { reachableEndpoints } from "./endpoints.ts";
 import { EvolutionEngine, ProposalStore } from "./evolution/index.ts";
 import { Gateway, GatewayEvents, type VoiceHandler } from "./gateway/index.ts";
 import { homeIdFor } from "./home-id.ts";
+import { OmpSettings } from "./omp-settings.ts";
 import { HostRegistry } from "./hosts.ts";
 import { ContainerBackend, HostProvisioner, LocalBackend } from "./provisioner/index.ts";
 import { Scheduler } from "./routines/index.ts";
@@ -176,6 +177,8 @@ export const DEFAULT_CONFIG: OmpdConfig = {
 export interface OmpdOptions {
   /** State directory. Defaults to `~/.ompd`. */
   home?: string;
+  /** OMP agent configuration directory. Defaults to OMP's normal user config root. */
+  ompAgentDir?: string;
   /** Overrides applied on top of the config file, for CLI flags. */
   overrides?: Partial<OmpdConfig>;
   /**
@@ -514,6 +517,7 @@ export class Ompd {
       skills: { list: listSkillCatalog },
       connectors: { list: listConnectorCatalog },
       tasks: this.#tasks,
+      ompSettings: new OmpSettings({ agentDir: opts.ompAgentDir }),
       // A rotation can be driven from any device, including a phone. The one
       // credential that also lives on disk has to follow, or `ompd rotate`
       // from the console leaves the CLI on this machine holding a token the

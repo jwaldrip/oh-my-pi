@@ -30,6 +30,8 @@ import {
   type ConnectorSummary,
   type EndpointOffer,
   type HostSpec,
+  type OmpModelRolesUpdate,
+  type OmpSettingsUpdate,
   type Run,
   type ServerFrame,
   type SessionLiveStatus,
@@ -43,6 +45,7 @@ import {
   type WebViewActionResult,
 } from "@ompd/core";
 import type { SessionIndex } from "../sessions/session-index.ts";
+import type { OmpSettingsController } from "../omp-settings.ts";
 import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
 import { Supervisor, UnauthorizedError, type PendingApproval } from "../supervisor.ts";
 import { DeviceAuth, PairingBacklogError, PairingError } from "./auth.ts";
@@ -105,6 +108,17 @@ function isWebViewActionResult(value: unknown): value is WebViewActionResult {
     default:
       return false;
   }
+}
+
+/** Settings payloads are data, never arrays, classes, or prototype carriers. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function describe(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 const SESSION_STATUSES: readonly SessionLiveStatus[] = ["live-tui", "live-ompd", "dormant", "archived"];
@@ -299,6 +313,12 @@ export interface GatewayOptions {
    */
   sessions?: SessionConfig;
   /**
+   * The daemon-owned boundary around OMP's persistent settings. Omitted only
+   * by stripped-down embedders, which report unavailable rather than treating
+   * an empty object as the user's configuration.
+   */
+  ompSettings?: OmpSettingsController;
+  /**
    * Directory of built web-client files served from `/`.
    *
    * Unauthenticated on purpose: it is the app shell, and a browser has to load
@@ -444,6 +464,7 @@ export class Gateway {
   #onTextPrompt: ((agentId: AgentId, actor: Actor) => void) | undefined;
   #routines: RoutineRunner | undefined;
   #sessions: SessionConfig | undefined;
+  #ompSettings: OmpSettingsController | undefined;
   #onTokenRotated: ((deviceId: string, token: string) => string | undefined) | undefined;
   #skills: SkillCatalog | undefined;
   #connectors: ConnectorCatalog | undefined;
@@ -478,6 +499,7 @@ export class Gateway {
     this.#onTextPrompt = opts.onTextPrompt;
     this.#routines = opts.routines;
     this.#sessions = opts.sessions;
+    this.#ompSettings = opts.ompSettings;
     this.#onTokenRotated = opts.onTokenRotated;
     this.#skills = opts.skills;
     this.#connectors = opts.connectors;
@@ -815,6 +837,69 @@ export class Gateway {
     if (!actor) return Response.json({ error: "unauthorized" }, { status: 401 });
     const scopes = new Set(actor.scopes);
 
+
+    if (path === "/v1/omp/settings") {
+      if (!scopes.has(req.method === "GET" ? SCOPE_READ : SCOPE_MANAGE)) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (this.#ompSettings === undefined) {
+        return Response.json({ error: "omp_settings_unavailable" }, { status: 503 });
+      }
+      if (req.method === "GET") return Response.json(await this.#ompSettings.readSettings());
+      if (req.method !== "POST") return Response.json({ error: "not_found" }, { status: 404 });
+
+      let body: { settings?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (!isPlainRecord(body.settings)) {
+        return Response.json({ error: "settings must be an object" }, { status: 400 });
+      }
+      try {
+        return Response.json(await this.#ompSettings.updateSettings({ settings: body.settings } as OmpSettingsUpdate));
+      } catch (cause) {
+        return Response.json({ error: describe(cause) }, { status: 400 });
+      }
+    }
+
+    if (path === "/v1/omp/roles") {
+      if (!scopes.has(req.method === "GET" ? SCOPE_READ : SCOPE_MANAGE)) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (this.#ompSettings === undefined) {
+        return Response.json({ error: "omp_settings_unavailable" }, { status: 503 });
+      }
+      if (req.method === "GET") return Response.json(await this.#ompSettings.readRoles());
+      if (req.method !== "POST") return Response.json({ error: "not_found" }, { status: 404 });
+
+      let body: { roles?: unknown; cycleOrder?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (body.roles !== undefined && !isPlainRecord(body.roles)) {
+        return Response.json({ error: "roles must be an object" }, { status: 400 });
+      }
+      if (body.cycleOrder !== undefined && !Array.isArray(body.cycleOrder)) {
+        return Response.json({ error: "cycleOrder must be an array" }, { status: 400 });
+      }
+      if (body.roles === undefined && body.cycleOrder === undefined) {
+        return Response.json({ error: "roles or cycleOrder is required" }, { status: 400 });
+      }
+      try {
+        return Response.json(
+          await this.#ompSettings.updateRoles({
+            roles: body.roles as OmpModelRolesUpdate["roles"],
+            cycleOrder: body.cycleOrder as OmpModelRolesUpdate["cycleOrder"],
+          }),
+        );
+      } catch (cause) {
+        return Response.json({ error: describe(cause) }, { status: 400 });
+      }
+    }
     if (path === "/v1/agents" && req.method === "GET") {
       if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
       return Response.json({ agents: this.#sup.listAgents() });

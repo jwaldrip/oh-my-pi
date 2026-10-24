@@ -42,7 +42,7 @@ export function redactString(input: string): string {
     // A fresh regex per call: the module-level literals carry /g, and reusing
     // them across calls would advance lastIndex and skip matches.
     const scoped = new RegExp(re.source, re.flags);
-    out = out.replace(scoped, (match, name?: string) =>
+    out = out.replace(scoped, (_match, name?: string) =>
       label === "named-secret" && typeof name === "string"
         ? `${name}=${REDACTED}`
         : `${REDACTED}:${label}`,

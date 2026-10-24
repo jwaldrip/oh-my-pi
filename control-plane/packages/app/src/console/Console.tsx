@@ -11,15 +11,17 @@
  */
 
 import type { JSX } from "react";
-import { useEffect, useMemo, useReducer, useRef } from "react";
-import { StyleSheet, View } from "react-native";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Pressable, StyleSheet, View } from "react-native";
 import { Toast } from "../components/Toast.tsx";
 import { useSplitLayout } from "../design/layout.ts";
+import { Label } from "../design/text.tsx";
 import { browserReduce, EMPTY_BROWSER } from "../session/browser.ts";
-import { ground, stroke } from "../design/tokens.ts";
+import { ground, ink, stroke } from "../design/tokens.ts";
 import type { Connection } from "../platform/connection.ts";
 import { FleetScreen } from "../screens/FleetScreen.tsx";
 import { SessionScreen } from "../screens/SessionScreen.tsx";
+import { OmpSettingsScreen } from "../screens/OmpSettingsScreen.tsx";
 import { browserSessionsOf, fleetClearances, sessionFor } from "./state.ts";
 import { useConsole } from "./useConsole.ts";
 import { useHardwareBack } from "./useHardwareBack.ts";
@@ -33,6 +35,7 @@ export function Console({
   const [state, actions] = useConsole(connection);
   const split = useSplitLayout();
   const [browser, dispatchBrowser] = useReducer(browserReduce, EMPTY_BROWSER);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (state.unauthorized === null) return;
@@ -62,33 +65,44 @@ export function Console({
   // Android hardware back is the system way back to the bay on a phone. On a
   // split layout the bay is already on screen, so claiming back would steal the
   // OS gesture for no gain.
-  useHardwareBack(!split && state.selected !== null, actions.back);
+  useHardwareBack(!split && (state.selected !== null || settingsOpen), settingsOpen ? () => setSettingsOpen(false) : actions.back);
 
   const bay = (
-    <FleetScreen
-      browser={browser}
-      onSort={(field) => {
-        dispatchBrowser({ t: "sort", field });
-      }}
-      onToggleGroup={(cwd) => {
-        dispatchBrowser({ t: "toggleGroup", cwd });
-      }}
-      onToggleGrouped={() => {
-        dispatchBrowser({ t: "toggleGrouped" });
-      }}
-      onToggleArchived={() => {
-        dispatchBrowser({ t: "toggleArchived" });
-      }}
-      onTakeover={(session) => {
-        actions.select(session.id);
-      }}
-      onArchive={(session) => {
-        dispatchBrowser({ t: "archive", id: session.id });
-      }}
-      onUnarchive={(session) => {
-        dispatchBrowser({ t: "unarchive", id: session.id });
-      }}
-    />
+    <View style={styles.bayContent}>
+      <Pressable
+        accessibilityLabel="Models and settings"
+        accessibilityRole="button"
+        onPress={() => setSettingsOpen(true)}
+        style={({ pressed }) => [styles.settings, pressed && styles.settingsPressed]}
+        testID="open-omp-settings"
+      >
+        <Label color={ink.plain}>Models and settings</Label>
+      </Pressable>
+      <FleetScreen
+        browser={browser}
+        onSort={(field) => {
+          dispatchBrowser({ t: "sort", field });
+        }}
+        onToggleGroup={(cwd) => {
+          dispatchBrowser({ t: "toggleGroup", cwd });
+        }}
+        onToggleGrouped={() => {
+          dispatchBrowser({ t: "toggleGrouped" });
+        }}
+        onToggleArchived={() => {
+          dispatchBrowser({ t: "toggleArchived" });
+        }}
+        onTakeover={(session) => {
+          actions.select(session.id);
+        }}
+        onArchive={(session) => {
+          dispatchBrowser({ t: "archive", id: session.id });
+        }}
+        onUnarchive={(session) => {
+          dispatchBrowser({ t: "unarchive", id: session.id });
+        }}
+      />
+    </View>
   );
 
   const log =
@@ -128,6 +142,10 @@ export function Console({
       />
     );
 
+  if (settingsOpen) {
+    return <OmpSettingsScreen connection={connection} onBack={() => setSettingsOpen(false)} />;
+  }
+
   return (
     <View style={styles.position} testID="console">
       {split ? (
@@ -145,7 +163,10 @@ export function Console({
 
 const styles = StyleSheet.create({
   position: { flex: 1, backgroundColor: ground.base },
+  bayContent: { flex: 1 },
   split: { flex: 1, flexDirection: "row" },
   bay: { width: 340, borderRightWidth: stroke.heavy, borderRightColor: ground.edge },
   log: { flex: 1 },
+  settings: { alignItems: "center", borderBottomColor: ground.edge, borderBottomWidth: stroke.hair, justifyContent: "center", minHeight: 44 },
+  settingsPressed: { backgroundColor: ground.active },
 });
