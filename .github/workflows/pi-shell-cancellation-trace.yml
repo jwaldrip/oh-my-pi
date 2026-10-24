@@ -1,5 +1,7 @@
 name: Trace pi-shell cancellation fixture
 
+run-name: pi-shell cancellation ${{ inputs.operation }} (${{ inputs.candidate_ref }})
+
 on:
    workflow_dispatch:
       inputs:
@@ -9,10 +11,11 @@ on:
             type: choice
             options:
                - trace
+               - rust-proof
                - darwin-addon
             default: trace
          candidate_ref:
-            description: Immutable candidate commit SHA for darwin-addon
+            description: Immutable candidate commit SHA for rust-proof and darwin-addon
             required: true
             type: string
             default: c84b6e5615089d82b6c767a1843654b2f9e0c5ef
@@ -148,6 +151,1322 @@ jobs:
                 echo "::error::the traced fixture failed with Bazel exit code $BAZEL_EXIT_CODE"
                 exit 1
               fi
+   prove_rust_cancellation:
+      name: Prove pi-shell cancellation regression and Rust gate
+      if: github.repository == 'jwaldrip/oh-my-pi' && github.ref == 'refs/heads/verify/cancellation-trace-20261022' && inputs.operation == 'rust-proof'
+      runs-on: ubuntu-22.04
+      env:
+         EVIDENCE_DIR: ${{ runner.temp }}/pi-shell-cancellation-proof
+         REQUESTED_CANDIDATE: ${{ inputs.candidate_ref }}
+         C1_SHA: a4e5800b435f53a2beb1002df0a01e4b82385954
+         C2_SHA: 606ef4e1431fe7ddb28ca5e00ef1ff712de417b9
+         FIXED_SHA: 7a750d9ba0de4e280e0198a8502990254bb7fd50
+         TEST_TARGET: //crates/pi-shell:pi-shell_test
+         C1_TEST_NAME: shell::tests::cancellation_keeps_output_open_for_a_term_trap_that_writes
+      steps:
+         - name: Prepare Rust proof evidence
+           shell: bash
+           run: |
+              set -euo pipefail
+              mkdir -p "$EVIDENCE_DIR/c1" "$EVIDENCE_DIR/fixed" "$EVIDENCE_DIR/candidate"
+              python3 - "$EVIDENCE_DIR/run-context.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              context = {
+                  "workflow_sha": os.environ["GITHUB_SHA"],
+                  "run_id": os.environ["GITHUB_RUN_ID"],
+                  "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                  "runner_os": os.environ["RUNNER_OS"],
+                  "runner_arch": os.environ["RUNNER_ARCH"],
+                  "sources": {
+                      "c1": {"requested": os.environ["C1_SHA"]},
+                      "c2": {"requested": os.environ["C2_SHA"]},
+                      "fixed": {"requested": os.environ["FIXED_SHA"]},
+                      "candidate": {"requested": os.environ["REQUESTED_CANDIDATE"]},
+                  },
+              }
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(context, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              PY
+
+         - name: Validate immutable candidate input
+           id: candidate_input
+           shell: bash
+           run: |
+              set -euo pipefail
+              if ! [[ "$REQUESTED_CANDIDATE" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                echo "::error::candidate_ref must be an immutable 40-character commit SHA"
+                exit 1
+              fi
+              printf '%s\n' "$REQUESTED_CANDIDATE" > "$EVIDENCE_DIR/candidate/requested-sha"
+              echo "candidate_sha=${REQUESTED_CANDIDATE,,}" >> "$GITHUB_OUTPUT"
+
+         - name: Check out immutable C1
+           uses: actions/checkout@v4
+           with:
+              ref: a4e5800b435f53a2beb1002df0a01e4b82385954
+              fetch-depth: 1
+              persist-credentials: false
+              clean: false
+
+         - name: Verify C1 checkout
+           id: c1_source
+           shell: bash
+           run: |
+              set -euo pipefail
+              resolved_sha="$(git rev-parse --verify HEAD)"
+              if [ "${resolved_sha,,}" != "${C1_SHA,,}" ]; then
+                echo "::error::C1 checkout resolved $resolved_sha instead of $C1_SHA"
+                exit 1
+              fi
+              RESOLVED_SHA="$resolved_sha" python3 - "$EVIDENCE_DIR/c1/source.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "requested": os.environ["C1_SHA"],
+                          "resolved": os.environ["RESOLVED_SHA"],
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              echo "resolved_sha=$resolved_sha" >> "$GITHUB_OUTPUT"
+
+         - id: c1_cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Build C1 pi-shell test target
+           id: c1_build
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.c1_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then
+                ulimit -Sn 65536 || true
+              fi
+              stage="$EVIDENCE_DIR/c1"
+              cat > "$stage/build-command.txt" <<'EOF'
+              bazelisk --bazelrc="$BAZELRC" build //crates/pi-shell:pi-shell_test
+              EOF
+              set +e
+              bazelisk --bazelrc="$BAZELRC" build "$TEST_TARGET" 2>&1 | tee "$stage/bazel-build.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              bazel_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              BAZEL_STATUS="$bazel_status" TEE_STATUS="$tee_status" python3 - "$stage/build-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "bazel_exit_code": int(os.environ["BAZEL_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain C1 Bazel build output"
+                exit "$tee_status"
+              fi
+              if [ "$bazel_status" -ne 0 ]; then
+                echo "::error::C1 preliminary build failed with Bazel exit code $bazel_status"
+                exit "$bazel_status"
+              fi
+
+         - name: Run C1 exact regression, expecting test failure
+           id: c1_test
+           continue-on-error: true
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.c1_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              stage="$EVIDENCE_DIR/c1"
+              cat > "$stage/test-command.txt" <<'EOF'
+              bazelisk --bazelrc="$BAZELRC" test //crates/pi-shell:pi-shell_test \
+                --cache_test_results=no \
+                --test_output=all \
+                --test_arg=--exact \
+                --test_arg="$C1_TEST_NAME" \
+                --test_arg=--nocapture
+              EOF
+              set +e
+              bazelisk --bazelrc="$BAZELRC" test "$TEST_TARGET" \
+                --cache_test_results=no \
+                --test_output=all \
+                --test_arg=--exact \
+                --test_arg="$C1_TEST_NAME" \
+                --test_arg=--nocapture \
+                2>&1 | tee "$stage/bazel-test.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              bazel_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              printf '%s\n' "$bazel_status" > "$stage/bazel-test-exit-code"
+              BAZEL_STATUS="$bazel_status" TEE_STATUS="$tee_status" python3 - "$stage/test-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "bazel_exit_code": int(os.environ["BAZEL_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              canonical_log="bazel-testlogs/crates/pi-shell/pi-shell_test/test.log"
+              canonical_xml="bazel-testlogs/crates/pi-shell/pi-shell_test/test.xml"
+              if [ -s "$canonical_log" ]; then
+                cp -L "$canonical_log" "$stage/canonical-test.log"
+              fi
+              if [ -f "$canonical_xml" ]; then
+                cp -L "$canonical_xml" "$stage/test.xml"
+              fi
+              echo "bazel_exit_code=$bazel_status" >> "$GITHUB_OUTPUT"
+              echo "tee_exit_code=$tee_status" >> "$GITHUB_OUTPUT"
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain C1 Bazel test output"
+                exit "$tee_status"
+              fi
+              exit "$bazel_status"
+
+         - name: Classify C1 expected-red evidence
+           id: c1_expected_red
+           if: always()
+           shell: bash
+           env:
+              BAZEL_EXIT_CODE: ${{ steps.c1_test.outputs.bazel_exit_code }}
+              TEE_EXIT_CODE: ${{ steps.c1_test.outputs.tee_exit_code }}
+              C1_BUILD_OUTCOME: ${{ steps.c1_build.outcome }}
+              C1_TEST_OUTCOME: ${{ steps.c1_test.outcome }}
+           run: |
+              set -euo pipefail
+              python3 - "$EVIDENCE_DIR/c1/canonical-test.log" "$EVIDENCE_DIR/c1/classification.json" <<'PY'
+              import json
+              import os
+              import re
+              import sys
+              from pathlib import Path
+
+              log_path = Path(sys.argv[1])
+              output_path = Path(sys.argv[2])
+              errors = []
+              text = ""
+              if not log_path.is_file() or log_path.stat().st_size == 0:
+                  errors.append("C1 canonical test log is missing or empty")
+              else:
+                  text = log_path.read_text(encoding="utf-8", errors="replace")
+
+              try:
+                  bazel_exit_code = int(os.environ.get("BAZEL_EXIT_CODE", ""))
+              except ValueError:
+                  bazel_exit_code = None
+                  errors.append("C1 Bazel test exit code was not recorded")
+              try:
+                  tee_exit_code = int(os.environ.get("TEE_EXIT_CODE", ""))
+              except ValueError:
+                  tee_exit_code = None
+                  errors.append("C1 tee exit code was not recorded")
+
+
+              if os.environ.get("C1_BUILD_OUTCOME") != "success":
+                  errors.append(
+                      "C1 preliminary build did not succeed "
+                      f"(outcome={os.environ.get('C1_BUILD_OUTCOME', '')})"
+                  )
+              if bazel_exit_code != 3:
+                  errors.append(
+                      "C1 exact test must fail with Bazel exit code 3 "
+                      f"(got {bazel_exit_code!r})"
+                  )
+              if tee_exit_code != 0:
+                  errors.append(
+                      f"C1 test log retention must exit 0 (got {tee_exit_code!r})"
+                  )
+
+
+              test_name = os.environ["C1_TEST_NAME"]
+              running_one_test = len(
+                  re.findall(r"(?m)^[ \t]*running 1 test[ \t]*$", text)
+              )
+              failed_test_lines = len(
+                  re.findall(
+                      r"(?m)^[ \t]*test "
+                      + re.escape(test_name)
+                      + r" \.\.\. FAILED[ \t]*$",
+                      text,
+                  )
+              )
+              failed_summary_records = len(
+                  re.findall(
+                      r"test result:\s*FAILED\.\s*0 passed;\s*1 failed;\s*0 ignored;",
+                      text,
+                  )
+              )
+              failed_summary = failed_summary_records == 1
+              vector = re.compile(
+                  r"""
+                  GroupDispatched\s*\{\s*pgid:\s*([1-9][0-9]*)\s*,\s*
+                  signal:\s*15\s*,\s*succeeded:\s*true\s*\}
+                  \s*,?\s*
+                  GroupDispatched\s*\{\s*pgid:\s*\1\s*,\s*
+                  signal:\s*15\s*,\s*succeeded:\s*true\s*\}
+                  \s*,?\s*
+                  ProcessDispatched\s*\{\s*pid:\s*\1\s*,\s*
+                  signal:\s*15\s*,\s*succeeded:\s*true\s*\}
+                  """,
+                  re.DOTALL | re.VERBOSE,
+              )
+              vector_match = vector.search(text)
+
+              if running_one_test != 1:
+                  errors.append(
+                      "C1 log must contain exactly one running-1-test record "
+                      f"(found {running_one_test})"
+                  )
+              if failed_test_lines != 1:
+                  errors.append(
+                      "C1 selected test must be the sole FAILED test line "
+                      f"(found {failed_test_lines})"
+                  )
+              if not failed_summary:
+                  errors.append(
+                      "C1 libtest summary must appear once with 0 passed, 1 failed, and 0 ignored"
+                  )
+              if "duplicate TERM dispatch:" not in text:
+                  errors.append("C1 panic did not contain duplicate TERM dispatch:")
+              if vector_match is None:
+                  errors.append(
+                      "C1 panic did not contain the duplicate group and direct PID "
+                      "TERM dispatch vector for one positive PID"
+                  )
+
+              classification = "expected-red" if not errors else "failure"
+              result = {
+                  "stage": "c1",
+                  "classification": classification,
+                  "bazel_exit_code": bazel_exit_code,
+                  "tee_exit_code": tee_exit_code,
+                  "c1_build_outcome": os.environ.get("C1_BUILD_OUTCOME"),
+                  "c1_test_outcome": os.environ.get("C1_TEST_OUTCOME"),
+                  "assertions": {
+                      "running_one_test_records": running_one_test,
+                      "selected_failed_test_lines": failed_test_lines,
+                      "failed_summary_records": failed_summary_records,
+                      "failed_summary": failed_summary,
+                      "duplicate_term_panic": "duplicate TERM dispatch:" in text,
+                      "duplicate_term_vector_pid": (
+                          vector_match.group(1) if vector_match is not None else None
+                      ),
+                  },
+                  "errors": errors,
+              }
+              with output_path.open("w", encoding="utf-8") as handle:
+                  json.dump(result, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              if errors:
+                  raise SystemExit("\n".join(errors))
+              PY
+
+         - name: Check out immutable fixed regression source
+           uses: actions/checkout@v4
+           with:
+              ref: 7a750d9ba0de4e280e0198a8502990254bb7fd50
+              fetch-depth: 1
+              persist-credentials: false
+              clean: false
+
+         - name: Verify fixed checkout
+           id: fixed_source
+           shell: bash
+           run: |
+              set -euo pipefail
+              resolved_sha="$(git rev-parse --verify HEAD)"
+              if [ "${resolved_sha,,}" != "${FIXED_SHA,,}" ]; then
+                echo "::error::fixed checkout resolved $resolved_sha instead of $FIXED_SHA"
+                exit 1
+              fi
+              RESOLVED_SHA="$resolved_sha" python3 - "$EVIDENCE_DIR/fixed/source.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "c2": os.environ["C2_SHA"],
+                          "requested": os.environ["FIXED_SHA"],
+                          "resolved": os.environ["RESOLVED_SHA"],
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              echo "resolved_sha=$resolved_sha" >> "$GITHUB_OUTPUT"
+
+         - id: fixed_cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Run seven fixed exact regressions serially
+           id: fixed_tests
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.fixed_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then
+                ulimit -Sn 65536 || true
+              fi
+              tests=(
+                "$C1_TEST_NAME"
+                "process::tests::termination_targets_dedupe_an_explicit_group_and_its_leader"
+                "process::tests::termination_targets_snapshot_later_leader_before_delivering_to_earlier_root"
+                "process::tests::termination_targets_fall_back_to_pinned_processes_when_a_group_signal_fails"
+                "process::tests::termination_targets_keep_an_escaped_descendant_after_group_coverage"
+                "process::tests::termination_targets_deliver_an_overlapping_direct_pid_once"
+                "process::tests::termination_targets_reenumerate_each_call_and_registry_rebuilds_new_spawns"
+              )
+              printf '%s\n' "${tests[@]}" > "$EVIDENCE_DIR/fixed/tests.txt"
+              case_number=0
+              for test_name in "${tests[@]}"; do
+                case_number=$((case_number + 1))
+                case_dir="$(printf '%s/fixed/%02d' "$EVIDENCE_DIR" "$case_number")"
+                mkdir -p "$case_dir"
+                cat > "$case_dir/test-command.txt" <<EOF
+              bazelisk --bazelrc="\$BAZELRC" test //crates/pi-shell:pi-shell_test \\
+                --cache_test_results=no \\
+                --test_output=all \\
+                --test_env=RUST_TEST_THREADS=1 \\
+                --test_arg=--exact \\
+                --test_arg="$test_name" \\
+                --test_arg=--nocapture
+              EOF
+                set +e
+                bazelisk --bazelrc="$BAZELRC" test "$TEST_TARGET" \
+                  --cache_test_results=no \
+                  --test_output=all \
+                  --test_env=RUST_TEST_THREADS=1 \
+                  --test_arg=--exact \
+                  --test_arg="$test_name" \
+                  --test_arg=--nocapture \
+                  2>&1 | tee "$case_dir/bazel-test.log"
+                statuses=("${PIPESTATUS[@]}")
+                set -e
+                bazel_status="${statuses[0]}"
+                tee_status="${statuses[1]}"
+                BAZEL_STATUS="$bazel_status" TEE_STATUS="$tee_status" TEST_NAME="$test_name" python3 - "$case_dir/test-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "bazel_exit_code": int(os.environ["BAZEL_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                          "test_name": os.environ["TEST_NAME"],
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+                canonical_log="bazel-testlogs/crates/pi-shell/pi-shell_test/test.log"
+                canonical_xml="bazel-testlogs/crates/pi-shell/pi-shell_test/test.xml"
+                if [ -s "$canonical_log" ]; then
+                  cp -L "$canonical_log" "$case_dir/canonical-test.log"
+                fi
+                if [ -f "$canonical_xml" ]; then
+                  cp -L "$canonical_xml" "$case_dir/test.xml"
+                fi
+                BAZEL_STATUS="$bazel_status" TEE_STATUS="$tee_status" TEST_NAME="$test_name" python3 - "$case_dir/canonical-test.log" "$case_dir/assertions.json" <<'PY'
+              import json
+              import os
+              import re
+              import sys
+              from pathlib import Path
+
+              log_path = Path(sys.argv[1])
+              output_path = Path(sys.argv[2])
+              test_name = os.environ["TEST_NAME"]
+              errors = []
+              text = ""
+              if not log_path.is_file() or log_path.stat().st_size == 0:
+                  errors.append("canonical test log is missing or empty")
+              else:
+                  text = log_path.read_text(encoding="utf-8", errors="replace")
+
+              bazel_exit_code = int(os.environ["BAZEL_STATUS"])
+              tee_exit_code = int(os.environ["TEE_STATUS"])
+              running_one_test = len(
+                  re.findall(r"(?m)^[ \t]*running 1 test[ \t]*$", text)
+              )
+              passed_test_lines = len(
+                  re.findall(
+                      r"(?m)^[ \t]*test "
+                      + re.escape(test_name)
+                      + r" \.\.\. ok[ \t]*$",
+                      text,
+                  )
+              )
+              passed_summary_records = len(
+                  re.findall(
+                      r"test result:\s*ok\.\s*1 passed;\s*0 failed;\s*0 ignored;",
+                      text,
+                  )
+              )
+              passed_summary = passed_summary_records == 1
+              if bazel_exit_code != 0:
+                  errors.append(f"Bazel test exit code was {bazel_exit_code}, not 0")
+              if tee_exit_code != 0:
+                  errors.append(f"tee exit code was {tee_exit_code}, not 0")
+              if running_one_test != 1:
+                  errors.append(
+                      f"expected exactly one running-1-test record, found {running_one_test}"
+                  )
+              if passed_test_lines != 1:
+                  errors.append(
+                      f"expected exactly one passing line for {test_name}, found {passed_test_lines}"
+                  )
+              if not passed_summary:
+                  errors.append(
+                      "libtest summary must appear once with 1 passed, 0 failed, and 0 ignored"
+                  )
+
+              result = {
+                  "stage": "fixed",
+                  "classification": "green" if not errors else "failure",
+                  "test_name": test_name,
+                  "bazel_exit_code": bazel_exit_code,
+                  "tee_exit_code": tee_exit_code,
+                  "assertions": {
+                      "running_one_test_records": running_one_test,
+                      "selected_passing_test_lines": passed_test_lines,
+                      "passed_summary_records": passed_summary_records,
+                      "passed_summary": passed_summary,
+                  },
+                  "errors": errors,
+              }
+              with output_path.open("w", encoding="utf-8") as handle:
+                  json.dump(result, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              if errors:
+                  raise SystemExit("\n".join(errors))
+              PY
+              done
+              python3 - "$EVIDENCE_DIR/fixed" <<'PY'
+              import json
+              import sys
+              from pathlib import Path
+
+              stage = Path(sys.argv[1])
+              assertions = sorted(stage.glob("*/assertions.json"))
+              errors = []
+              records = []
+              if len(assertions) != 7:
+                  errors.append(f"expected seven fixed assertion records, found {len(assertions)}")
+              for path in assertions:
+                  with path.open(encoding="utf-8") as handle:
+                      record = json.load(handle)
+                  records.append(record)
+                  if record.get("classification") != "green":
+                      errors.append(f"{path.parent.name} did not classify green")
+              summary = {
+                  "stage": "fixed",
+                  "classification": "green" if not errors else "failure",
+                  "tests": records,
+                  "errors": errors,
+              }
+              with (stage / "summary.json").open("w", encoding="utf-8") as handle:
+                  json.dump(summary, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              if errors:
+                  raise SystemExit("\n".join(errors))
+              PY
+
+         - name: Check out final candidate with full history
+           uses: actions/checkout@v4
+           with:
+              ref: ${{ inputs.candidate_ref }}
+              fetch-depth: 0
+              persist-credentials: false
+              clean: false
+
+         - name: Verify final candidate and required ancestry
+           id: candidate_source
+           shell: bash
+           run: |
+              set -euo pipefail
+              candidate_sha="$(git rev-parse --verify HEAD)"
+              if [ "${candidate_sha,,}" != "${REQUESTED_CANDIDATE,,}" ]; then
+                echo "::error::candidate checkout resolved $candidate_sha instead of $REQUESTED_CANDIDATE"
+                exit 1
+              fi
+              cat > "$EVIDENCE_DIR/candidate/ancestry-command.txt" <<'EOF'
+              git merge-base --is-ancestor "$C2_SHA" "$FIXED_SHA"
+              git merge-base --is-ancestor "$FIXED_SHA" "$CANDIDATE_SHA"
+              EOF
+              : > "$EVIDENCE_DIR/candidate/ancestry.log"
+              set +e
+              git merge-base --is-ancestor "$C2_SHA" "$FIXED_SHA" >> "$EVIDENCE_DIR/candidate/ancestry.log" 2>&1
+              c2_status=$?
+              git merge-base --is-ancestor "$FIXED_SHA" "$candidate_sha" >> "$EVIDENCE_DIR/candidate/ancestry.log" 2>&1
+              fixed_status=$?
+              set -e
+              C2_STATUS="$c2_status" FIXED_STATUS="$fixed_status" python3 - "$EVIDENCE_DIR/candidate/ancestry-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "c2_ancestor_of_fixed_exit_code": int(os.environ["C2_STATUS"]),
+                          "fixed_ancestor_of_candidate_exit_code": int(
+                              os.environ["FIXED_STATUS"]
+                          ),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$c2_status" -ne 0 ]; then
+                echo "::error::C2 is not an ancestor of the fixed regression source"
+                exit "$c2_status"
+              fi
+              if [ "$fixed_status" -ne 0 ]; then
+                echo "::error::fixed regression source is not an ancestor of the final candidate"
+                exit "$fixed_status"
+              fi
+              printf '%s\n' \
+                "c2_ancestor_of_fixed=true" \
+                "fixed_ancestor_of_candidate=true" \
+                > "$EVIDENCE_DIR/candidate/ancestry.txt"
+              CANDIDATE_SHA="$candidate_sha" python3 - "$EVIDENCE_DIR/candidate/source.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "requested": os.environ["REQUESTED_CANDIDATE"],
+                          "resolved": os.environ["CANDIDATE_SHA"],
+                          "c2": os.environ["C2_SHA"],
+                          "fixed": os.environ["FIXED_SHA"],
+                          "c2_ancestor_of_fixed": True,
+                          "fixed_ancestor_of_candidate": True,
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              echo "resolved_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+         - id: candidate_cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Run complete candidate Rust tests
+           id: candidate_rust_tests
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.candidate_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then
+                ulimit -Sn 65536 || true
+              fi
+              stage="$EVIDENCE_DIR/candidate"
+              cat > "$stage/rust-tests-command.txt" <<'EOF'
+              bazelisk --bazelrc="$BAZELRC" test //crates/... \
+                --cache_test_results=no \
+                --test_output=errors \
+                --build_event_json_file="$EVIDENCE_DIR/candidate/rust-tests.bep.json"
+              EOF
+              set +e
+              bazelisk --bazelrc="$BAZELRC" test //crates/... \
+                --cache_test_results=no \
+                --test_output=errors \
+                --build_event_json_file="$stage/rust-tests.bep.json" \
+                2>&1 | tee "$stage/rust-tests.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              bazel_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              BAZEL_STATUS="$bazel_status" TEE_STATUS="$tee_status" python3 - "$stage/rust-tests-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "bazel_exit_code": int(os.environ["BAZEL_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              canonical_log="bazel-testlogs/crates/pi-shell/pi-shell_test/test.log"
+              canonical_xml="bazel-testlogs/crates/pi-shell/pi-shell_test/test.xml"
+              if [ -s "$canonical_log" ]; then
+                cp -L "$canonical_log" "$stage/pi-shell-test.full-suite.log"
+              fi
+              if [ -f "$canonical_xml" ]; then
+                cp -L "$canonical_xml" "$stage/pi-shell-test.full-suite.xml"
+              fi
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain complete candidate Rust test output"
+                exit "$tee_status"
+              fi
+              if [ "$bazel_status" -ne 0 ]; then
+                echo "::error::candidate Rust tests failed with Bazel exit code $bazel_status"
+                exit "$bazel_status"
+              fi
+
+         - name: Verify candidate test BEP
+           id: candidate_test_evidence
+           shell: bash
+           run: |
+              set -euo pipefail
+              python3 - "$EVIDENCE_DIR/candidate/rust-tests.bep.json" "$EVIDENCE_DIR/candidate/rust-tests.validation.json" "$EVIDENCE_DIR/candidate/pi-shell-test.full-suite.log" <<'PY'
+              import json
+              import re
+              import sys
+              from pathlib import Path
+
+              bep_path = Path(sys.argv[1])
+              output_path = Path(sys.argv[2])
+              canonical_log_path = Path(sys.argv[3])
+              errors = []
+              events = []
+              if not bep_path.is_file() or bep_path.stat().st_size == 0:
+                  errors.append("candidate BEP is missing or empty")
+              else:
+                  for line_number, line in enumerate(
+                      bep_path.read_text(encoding="utf-8", errors="replace").splitlines(),
+                      start=1,
+                  ):
+                      if not line.strip():
+                          continue
+                      try:
+                          events.append(json.loads(line))
+                      except json.JSONDecodeError as error:
+                          errors.append(f"invalid BEP JSON on line {line_number}: {error}")
+
+              summaries = []
+              results = []
+              for event in events:
+                  if not isinstance(event, dict):
+                      errors.append("BEP event was not an object")
+                      continue
+                  summary = event.get("testSummary")
+                  if isinstance(summary, dict):
+                      summaries.append(summary)
+                  result = event.get("testResult")
+                  if isinstance(result, dict):
+                      results.append(result)
+
+              if not summaries:
+                  errors.append("candidate BEP did not contain any test summaries")
+
+              summary_statuses = []
+              bazel_test_attempt_counts = []
+              for summary in summaries:
+                  status = str(summary.get("overallStatus", "")).upper()
+                  summary_statuses.append(status)
+                  if status != "PASSED":
+                      errors.append(f"test summary had non-passing status {status!r}")
+                  try:
+                      run_count = int(summary.get("totalRunCount", 0))
+                  except (TypeError, ValueError):
+                      run_count = 0
+                  bazel_test_attempt_counts.append(run_count)
+                  if run_count < 1:
+                      errors.append(
+                          "BEP test summary did not report an executed Bazel test attempt"
+                      )
+
+              def has_cached_result(value):
+                  if isinstance(value, dict):
+                      for key, nested in value.items():
+                          if key.lower().startswith("cached") and nested is True:
+                              return True
+                          if has_cached_result(nested):
+                              return True
+                  elif isinstance(value, list):
+                      return any(has_cached_result(nested) for nested in value)
+                  return False
+
+              for result in results:
+                  status = str(result.get("status", "")).upper()
+                  if not status:
+                      errors.append("test result was missing a status")
+                  elif status != "PASSED":
+                      errors.append(f"test result had non-passing status {status!r}")
+                  if has_cached_result(result):
+                      errors.append("candidate BEP reported a cached test result")
+
+              canonical_text = ""
+              if (
+                  not canonical_log_path.is_file()
+                  or canonical_log_path.stat().st_size == 0
+              ):
+                  errors.append("candidate pi-shell canonical test log is missing or empty")
+              else:
+                  canonical_text = canonical_log_path.read_text(
+                      encoding="utf-8", errors="replace"
+                  )
+
+              libtest_summaries = [
+                  {
+                      "passed": int(match.group(1)),
+                      "failed": int(match.group(2)),
+                      "ignored": int(match.group(3)),
+                  }
+                  for match in re.finditer(
+                      r"test result:\s*ok\.\s*(\d+)\s+passed;\s*(\d+)\s+failed;\s*(\d+)\s+ignored;",
+                      canonical_text,
+                  )
+              ]
+              if not libtest_summaries:
+                  errors.append(
+                      "candidate pi-shell canonical log did not contain a libtest success summary"
+                  )
+              elif not any(
+                  summary["passed"] > 0 and summary["failed"] == 0
+                  for summary in libtest_summaries
+              ):
+                  errors.append(
+                      "candidate pi-shell libtest summary must report a nonzero pass count and zero failures"
+                  )
+              if any(summary["failed"] != 0 for summary in libtest_summaries):
+                  errors.append(
+                      "candidate pi-shell canonical log reported a failing libtest summary"
+                  )
+              if re.search(r"test result:\s*FAILED", canonical_text):
+                  errors.append("candidate pi-shell canonical log reported a failed test result")
+
+              required_regressions = [
+                  "shell::tests::cancellation_keeps_output_open_for_a_term_trap_that_writes",
+                  "process::tests::termination_targets_dedupe_an_explicit_group_and_its_leader",
+                  "process::tests::termination_targets_snapshot_later_leader_before_delivering_to_earlier_root",
+                  "process::tests::termination_targets_fall_back_to_pinned_processes_when_a_group_signal_fails",
+                  "process::tests::termination_targets_keep_an_escaped_descendant_after_group_coverage",
+                  "process::tests::termination_targets_deliver_an_overlapping_direct_pid_once",
+                  "process::tests::termination_targets_reenumerate_each_call_and_registry_rebuilds_new_spawns",
+              ]
+              passed_regressions = {}
+              for test_name in required_regressions:
+                  passed_count = len(
+                      re.findall(
+                          r"(?m)^[ \t]*test "
+                          + re.escape(test_name)
+                          + r" \.\.\. ok[ \t]*$",
+                          canonical_text,
+                      )
+                  )
+                  passed_regressions[test_name] = passed_count
+                  if passed_count != 1:
+                      errors.append(
+                          f"candidate canonical log must contain one passing result for {test_name}, found {passed_count}"
+                      )
+
+              validation = {
+                  "classification": "green" if not errors else "failure",
+                  "test_summary_count": len(summaries),
+                  "test_result_count": len(results),
+                  "test_summary_statuses": summary_statuses,
+                  "bazel_test_attempt_counts": bazel_test_attempt_counts,
+                  "pi_shell_libtest_summaries": libtest_summaries,
+                  "required_regression_pass_lines": passed_regressions,
+                  "errors": errors,
+              }
+              with output_path.open("w", encoding="utf-8") as handle:
+                  json.dump(validation, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              if errors:
+                  raise SystemExit("\n".join(errors))
+              PY
+
+         - name: Run strict Clippy gate
+           id: clippy_strict
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.candidate_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              stage="$EVIDENCE_DIR/candidate/clippy-strict"
+              mkdir -p "$stage"
+              cat > "$stage/commands.txt" <<'EOF'
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+                | xargs bazelisk --bazelrc="$BAZELRC" build --config=clippy-strict --
+              EOF
+              set +e
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+                | tee "$stage/query.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              query_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              QUERY_STATUS="$query_status" TEE_STATUS="$tee_status" python3 - "$stage/query-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "query_exit_code": int(os.environ["QUERY_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain strict Clippy query output"
+                exit "$tee_status"
+              fi
+              if [ "$query_status" -ne 0 ]; then
+                echo "::error::strict Clippy query failed with exit code $query_status"
+                exit "$query_status"
+              fi
+              if [ ! -s "$stage/query.log" ]; then
+                echo "::error::strict Clippy query returned no targets"
+                exit 1
+              fi
+              set +e
+              xargs bazelisk --bazelrc="$BAZELRC" build --config=clippy-strict -- < "$stage/query.log" 2>&1 | tee "$stage/build.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              build_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              QUERY_STATUS="$query_status" BUILD_STATUS="$build_status" TEE_STATUS="$tee_status" python3 - "$stage/exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "query_exit_code": int(os.environ["QUERY_STATUS"]),
+                          "build_exit_code": int(os.environ["BUILD_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain strict Clippy build output"
+                exit "$tee_status"
+              fi
+              if [ "$build_status" -ne 0 ]; then
+                echo "::error::strict Clippy build failed with exit code $build_status"
+                exit "$build_status"
+              fi
+
+         - name: Run default Clippy gate
+           id: clippy_default
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.candidate_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              stage="$EVIDENCE_DIR/candidate/clippy-default"
+              mkdir -p "$stage"
+              cat > "$stage/commands.txt" <<'EOF'
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/... - //crates/vendor/brush-core/...)" \
+                | xargs bazelisk --bazelrc="$BAZELRC" build --config=clippy --
+              EOF
+              set +e
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/... - //crates/vendor/brush-core/...)" \
+                | tee "$stage/query.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              query_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              QUERY_STATUS="$query_status" TEE_STATUS="$tee_status" python3 - "$stage/query-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "query_exit_code": int(os.environ["QUERY_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain default Clippy query output"
+                exit "$tee_status"
+              fi
+              if [ "$query_status" -ne 0 ]; then
+                echo "::error::default Clippy query failed with exit code $query_status"
+                exit "$query_status"
+              fi
+              if [ ! -s "$stage/query.log" ]; then
+                echo "::error::default Clippy query returned no targets"
+                exit 1
+              fi
+              set +e
+              xargs bazelisk --bazelrc="$BAZELRC" build --config=clippy -- < "$stage/query.log" 2>&1 | tee "$stage/build.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              build_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              QUERY_STATUS="$query_status" BUILD_STATUS="$build_status" TEE_STATUS="$tee_status" python3 - "$stage/exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "query_exit_code": int(os.environ["QUERY_STATUS"]),
+                          "build_exit_code": int(os.environ["BUILD_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain default Clippy build output"
+                exit "$tee_status"
+              fi
+              if [ "$build_status" -ne 0 ]; then
+                echo "::error::default Clippy build failed with exit code $build_status"
+                exit "$build_status"
+              fi
+
+         - name: Run ported Clippy gate
+           id: clippy_ported
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.candidate_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              stage="$EVIDENCE_DIR/candidate/clippy-ported"
+              mkdir -p "$stage"
+              cat > "$stage/commands.txt" <<'EOF'
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-builtins/...)" \
+                | xargs bazelisk --bazelrc="$BAZELRC" build --config=clippy-ported --
+              EOF
+              set +e
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-builtins/...)" \
+                | tee "$stage/query.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              query_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              QUERY_STATUS="$query_status" TEE_STATUS="$tee_status" python3 - "$stage/query-exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "query_exit_code": int(os.environ["QUERY_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain ported Clippy query output"
+                exit "$tee_status"
+              fi
+              if [ "$query_status" -ne 0 ]; then
+                echo "::error::ported Clippy query failed with exit code $query_status"
+                exit "$query_status"
+              fi
+              if [ ! -s "$stage/query.log" ]; then
+                echo "::error::ported Clippy query returned no targets"
+                exit 1
+              fi
+              set +e
+              xargs bazelisk --bazelrc="$BAZELRC" build --config=clippy-ported -- < "$stage/query.log" 2>&1 | tee "$stage/build.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              build_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              QUERY_STATUS="$query_status" BUILD_STATUS="$build_status" TEE_STATUS="$tee_status" python3 - "$stage/exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "query_exit_code": int(os.environ["QUERY_STATUS"]),
+                          "build_exit_code": int(os.environ["BUILD_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain ported Clippy build output"
+                exit "$tee_status"
+              fi
+              if [ "$build_status" -ne 0 ]; then
+                echo "::error::ported Clippy build failed with exit code $build_status"
+                exit "$build_status"
+              fi
+
+         - name: Run Rustfmt gate
+           id: rustfmt
+           shell: bash
+           env:
+              BAZELRC: ${{ steps.candidate_cache.outputs.rc }}
+           run: |
+              set -euo pipefail
+              stage="$EVIDENCE_DIR/candidate/rustfmt"
+              mkdir -p "$stage"
+              cat > "$stage/command.txt" <<'EOF'
+              bazelisk --bazelrc="$BAZELRC" build --config=rustfmt //crates/...
+              EOF
+              set +e
+              bazelisk --bazelrc="$BAZELRC" build --config=rustfmt //crates/... 2>&1 | tee "$stage/build.log"
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              bazel_status="${statuses[0]}"
+              tee_status="${statuses[1]}"
+              BAZEL_STATUS="$bazel_status" TEE_STATUS="$tee_status" python3 - "$stage/exit-codes.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "bazel_exit_code": int(os.environ["BAZEL_STATUS"]),
+                          "tee_exit_code": int(os.environ["TEE_STATUS"]),
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+              if [ "$tee_status" -ne 0 ]; then
+                echo "::error::failed to retain Rustfmt output"
+                exit "$tee_status"
+              fi
+              if [ "$bazel_status" -ne 0 ]; then
+                echo "::error::Rustfmt gate failed with Bazel exit code $bazel_status"
+                exit "$bazel_status"
+              fi
+
+         - name: Write candidate stage summary
+           if: always()
+           shell: bash
+           env:
+              CANDIDATE_SOURCE_OUTCOME: ${{ steps.candidate_source.outcome }}
+              CANDIDATE_TESTS_OUTCOME: ${{ steps.candidate_rust_tests.outcome }}
+              CANDIDATE_TEST_EVIDENCE_OUTCOME: ${{ steps.candidate_test_evidence.outcome }}
+              CLIPPY_STRICT_OUTCOME: ${{ steps.clippy_strict.outcome }}
+              CLIPPY_DEFAULT_OUTCOME: ${{ steps.clippy_default.outcome }}
+              CLIPPY_PORTED_OUTCOME: ${{ steps.clippy_ported.outcome }}
+              RUSTFMT_OUTCOME: ${{ steps.rustfmt.outcome }}
+           run: |
+              set -euo pipefail
+              python3 - "$EVIDENCE_DIR/candidate/summary.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              outcomes = {
+                  "candidate_source": os.environ.get("CANDIDATE_SOURCE_OUTCOME", ""),
+                  "rust_tests": os.environ.get("CANDIDATE_TESTS_OUTCOME", ""),
+                  "test_evidence": os.environ.get("CANDIDATE_TEST_EVIDENCE_OUTCOME", ""),
+                  "clippy_strict": os.environ.get("CLIPPY_STRICT_OUTCOME", ""),
+                  "clippy_default": os.environ.get("CLIPPY_DEFAULT_OUTCOME", ""),
+                  "clippy_ported": os.environ.get("CLIPPY_PORTED_OUTCOME", ""),
+                  "rustfmt": os.environ.get("RUSTFMT_OUTCOME", ""),
+              }
+              errors = [
+                  f"{name} outcome was {outcome!r}"
+                  for name, outcome in outcomes.items()
+                  if outcome != "success"
+              ]
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "stage": "candidate",
+                          "classification": "green" if not errors else "failure",
+                          "outcomes": outcomes,
+                          "errors": errors,
+                      },
+                      handle,
+                      indent=2,
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+              PY
+
+         - name: Write proof summary and provenance
+           if: always()
+           shell: bash
+           env:
+              C1_RESOLVED: ${{ steps.c1_source.outputs.resolved_sha }}
+              FIXED_RESOLVED: ${{ steps.fixed_source.outputs.resolved_sha }}
+              CANDIDATE_RESOLVED: ${{ steps.candidate_source.outputs.resolved_sha }}
+              C1_SOURCE_OUTCOME: ${{ steps.c1_source.outcome }}
+              C1_BUILD_OUTCOME: ${{ steps.c1_build.outcome }}
+              C1_TEST_OUTCOME: ${{ steps.c1_test.outcome }}
+              C1_TEST_CONCLUSION: ${{ steps.c1_test.conclusion }}
+              C1_CLASSIFIER_OUTCOME: ${{ steps.c1_expected_red.outcome }}
+              FIXED_SOURCE_OUTCOME: ${{ steps.fixed_source.outcome }}
+              FIXED_TESTS_OUTCOME: ${{ steps.fixed_tests.outcome }}
+              CANDIDATE_SOURCE_OUTCOME: ${{ steps.candidate_source.outcome }}
+              CANDIDATE_TESTS_OUTCOME: ${{ steps.candidate_rust_tests.outcome }}
+              CANDIDATE_TEST_EVIDENCE_OUTCOME: ${{ steps.candidate_test_evidence.outcome }}
+              CLIPPY_STRICT_OUTCOME: ${{ steps.clippy_strict.outcome }}
+              CLIPPY_DEFAULT_OUTCOME: ${{ steps.clippy_default.outcome }}
+              CLIPPY_PORTED_OUTCOME: ${{ steps.clippy_ported.outcome }}
+              RUSTFMT_OUTCOME: ${{ steps.rustfmt.outcome }}
+           run: |
+              set -euo pipefail
+              python3 - "$EVIDENCE_DIR/provenance.json" "$EVIDENCE_DIR/summary.json" <<'PY'
+              import json
+              import os
+              import sys
+
+              c1_green = (
+                  os.environ.get("C1_SOURCE_OUTCOME") == "success"
+                  and os.environ.get("C1_BUILD_OUTCOME") == "success"
+                  and os.environ.get("C1_CLASSIFIER_OUTCOME") == "success"
+              )
+              fixed_green = (
+                  os.environ.get("FIXED_SOURCE_OUTCOME") == "success"
+                  and os.environ.get("FIXED_TESTS_OUTCOME") == "success"
+              )
+              candidate_outcomes = {
+                  "candidate_source": os.environ.get("CANDIDATE_SOURCE_OUTCOME", ""),
+                  "rust_tests": os.environ.get("CANDIDATE_TESTS_OUTCOME", ""),
+                  "test_evidence": os.environ.get("CANDIDATE_TEST_EVIDENCE_OUTCOME", ""),
+                  "clippy_strict": os.environ.get("CLIPPY_STRICT_OUTCOME", ""),
+                  "clippy_default": os.environ.get("CLIPPY_DEFAULT_OUTCOME", ""),
+                  "clippy_ported": os.environ.get("CLIPPY_PORTED_OUTCOME", ""),
+                  "rustfmt": os.environ.get("RUSTFMT_OUTCOME", ""),
+              }
+              candidate_green = all(
+                  outcome == "success" for outcome in candidate_outcomes.values()
+              )
+              provenance = {
+                  "workflow_sha": os.environ["GITHUB_SHA"],
+                  "run_id": os.environ["GITHUB_RUN_ID"],
+                  "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                  "runner_os": os.environ["RUNNER_OS"],
+                  "runner_arch": os.environ["RUNNER_ARCH"],
+                  "sources": {
+                      "c1": {
+                          "requested": os.environ["C1_SHA"],
+                          "resolved": os.environ.get("C1_RESOLVED", ""),
+                      },
+                      "c2": {"requested": os.environ["C2_SHA"]},
+                      "fixed": {
+                          "requested": os.environ["FIXED_SHA"],
+                          "resolved": os.environ.get("FIXED_RESOLVED", ""),
+                      },
+                      "candidate": {
+                          "requested": os.environ["REQUESTED_CANDIDATE"],
+                          "resolved": os.environ.get("CANDIDATE_RESOLVED", ""),
+                      },
+                  },
+              }
+              summary = {
+                  "stages": {
+                      "c1": {
+                          "classification": "expected-red" if c1_green else "failure",
+                          "source_outcome": os.environ.get("C1_SOURCE_OUTCOME", ""),
+                          "build_outcome": os.environ.get("C1_BUILD_OUTCOME", ""),
+                          "test_outcome": os.environ.get("C1_TEST_OUTCOME", ""),
+                          "test_conclusion": os.environ.get("C1_TEST_CONCLUSION", ""),
+                          "classifier_outcome": os.environ.get("C1_CLASSIFIER_OUTCOME", ""),
+                      },
+                      "fixed": {
+                          "classification": "green" if fixed_green else "failure",
+                          "source_outcome": os.environ.get("FIXED_SOURCE_OUTCOME", ""),
+                          "tests_outcome": os.environ.get("FIXED_TESTS_OUTCOME", ""),
+                      },
+                      "candidate": {
+                          "classification": "green" if candidate_green else "failure",
+                          "outcomes": candidate_outcomes,
+                      },
+                  }
+              }
+              with open(sys.argv[1], "w", encoding="utf-8") as handle:
+                  json.dump(provenance, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              with open(sys.argv[2], "w", encoding="utf-8") as handle:
+                  json.dump(summary, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+              PY
+
+         - name: Upload Rust cancellation proof
+           if: always()
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: pi-shell-cancellation-proof-${{ steps.candidate_input.outputs.candidate_sha }}
+              path: ${{ runner.temp }}/pi-shell-cancellation-proof
+              if-no-files-found: error
+              retention-days: 14
    build_candidate_darwin_arm64:
       if: github.repository == 'jwaldrip/oh-my-pi' && github.ref == 'refs/heads/verify/cancellation-trace-20261022' && inputs.operation == 'darwin-addon'
       name: Build candidate Darwin arm64 native addon
