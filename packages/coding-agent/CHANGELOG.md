@@ -11,6 +11,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Fixed isolated subagent runs tearing down workspaces and losing uncommitted or committed work on task failure, cancellation, or double recovery failure; isolation workspaces are now torn down only after verified appropriate recovery, preexisting occupied base directories reject silent overwrites, and `omp worktree clear` preserves dependent and unknown owner Git stores.
 
 ## [18.15.0] - 2026-11-01
 

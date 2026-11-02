@@ -28,7 +28,7 @@ import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree"
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
-type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
+type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray" | "dependent-store";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
@@ -180,7 +180,11 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 	let live = 0;
 	let orphaned = 0;
 	for (const entry of entries) {
-		const tag = entry.orphanReason ? chalk.yellow("orphaned") : chalk.green("live    ");
+		const tag = entry.kind === "dependent-store"
+			? chalk.cyan("protected")
+			: entry.orphanReason
+				? chalk.yellow("orphaned")
+				: chalk.green("live    ");
 		const detail = formatEntryDetail(entry);
 		console.log(`${tag}  ${entry.path}`);
 		if (detail) console.log(`          ${chalk.dim(detail)}`);
@@ -192,7 +196,9 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
 	const entries = await scanWorktrees();
-	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
+	const targets = options.all
+		? entries.filter(entry => entry.kind !== "dependent-store")
+		: entries.filter(entry => entry.orphanReason !== undefined && entry.kind !== "dependent-store");
 
 	if (targets.length === 0) {
 		if (options.json) {
@@ -218,6 +224,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	const results: { path: string; ok: boolean; error?: string }[] = [];
 	const parentsToPrune = new Set<string>();
 	for (const target of targets) {
+		if (target.kind === "dependent-store") continue;
 		try {
 			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
 				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
@@ -313,14 +320,61 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 			}
 		}
 		if (nested === 0) {
-			entries.push({
-				path: dir,
-				kind: children.length === 0 ? "empty" : "stray",
-				orphanReason: children.length === 0 ? "empty directory" : "no recognizable worktree contents",
-			});
+			const gitStore = await checkGitStore(dir);
+			if (gitStore.isStore) {
+				entries.push({
+					path: dir,
+					kind: "dependent-store",
+					orphanReason: undefined,
+				});
+			} else {
+				entries.push({
+					path: dir,
+					kind: children.length === 0 ? "empty" : "stray",
+					orphanReason: children.length === 0 ? "empty directory" : "no recognizable worktree contents",
+				});
+			}
 		}
 	}
 	return entries;
+}
+
+interface GitStoreInfo {
+	isStore: boolean;
+	hasLinkedWorktrees: boolean;
+}
+
+async function checkGitStore(dir: string): Promise<GitStoreInfo> {
+	// Standard repo: dir/.git is a directory
+	const gitDir = path.join(dir, ".git");
+	const gitStat = await fs.stat(gitDir).catch(() => null);
+	if (gitStat?.isDirectory()) {
+		const wtDir = path.join(gitDir, "worktrees");
+		const wtStat = await fs.stat(wtDir).catch(() => null);
+		let hasLinkedWorktrees = false;
+		if (wtStat?.isDirectory()) {
+			const entries = await fs.readdir(wtDir).catch(() => []);
+			hasLinkedWorktrees = entries.length > 0;
+		}
+		return { isStore: true, hasLinkedWorktrees };
+	}
+
+	// Bare repo: dir/HEAD is a file, dir/objects is a directory, dir/refs is a directory
+	const headStat = await fs.stat(path.join(dir, "HEAD")).catch(() => null);
+	const objectsStat = await fs.stat(path.join(dir, "objects")).catch(() => null);
+	const refsStat = await fs.stat(path.join(dir, "refs")).catch(() => null);
+	if (headStat?.isFile() && objectsStat?.isDirectory() && refsStat?.isDirectory()) {
+		const wtDir = path.join(dir, "worktrees");
+		const wtStat = await fs.stat(wtDir).catch(() => null);
+		let hasLinkedWorktrees = false;
+		if (wtStat?.isDirectory()) {
+			const entries = await fs.readdir(wtDir).catch(() => []);
+			hasLinkedWorktrees = entries.length > 0;
+		}
+		return { isStore: true, hasLinkedWorktrees };
+	}
+
+	return { isStore: false, hasLinkedWorktrees: false };
 }
 
 async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
@@ -328,6 +382,14 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	const gitStat = await fs.stat(gitEntry).catch(() => null);
 	if (gitStat?.isFile()) {
 		return classifyPrCheckout(dir, gitEntry);
+	}
+	const gitStore = await checkGitStore(dir);
+	if (gitStore.isStore) {
+		return {
+			path: dir,
+			kind: "dependent-store",
+			orphanReason: undefined,
+		};
 	}
 	// A task-isolation sandbox is identified by its ownership marker — written
 	// before the backend materialises the mount — or by the `m`/`merged` mount
@@ -416,6 +478,8 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		parts.push(`${repo} · ${branch}`);
 	} else if (entry.kind === "task-isolation") {
 		parts.push("task-isolation sandbox");
+	} else if (entry.kind === "dependent-store") {
+		parts.push("dependent git store (protected)");
 	} else if (entry.kind === "empty") {
 		parts.push("legacy project shell");
 	} else {

@@ -658,6 +658,25 @@ export async function ensureIsolation(
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
+	// Fail-closed: reject overwrites of occupied unverified base dirs.
+	try {
+		const stat = await fs.stat(baseDir);
+		if (stat.isDirectory()) {
+			const entries = await fs.readdir(baseDir);
+			if (entries.length > 0) {
+				throw new Error(
+					`Isolation directory '${baseDir}' already exists and is occupied. Cannot overwrite preexisting isolation path.`,
+				);
+			}
+		} else {
+			throw new Error(
+				`Isolation path '${baseDir}' already exists and is not a directory. Cannot overwrite preexisting isolation path.`,
+			);
+		}
+	} catch (err) {
+		if (!isEnoent(err)) throw err;
+	}
+
 	for (const candidate of candidates) {
 		await fs.rm(baseDir, { recursive: true, force: true });
 		// Claim ownership before the backend materialises `m`. Backends only

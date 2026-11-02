@@ -284,6 +284,29 @@ async function writeIsolationPatch(
 }
 
 /**
+ * Determine whether the isolation workspace contains unique state (commits or
+ * working-tree changes) relative to the baseline. Fails closed (returns true)
+ * if the probe encounters an error so unique work is never mistakenly discarded.
+ */
+async function hasWorkspaceDelta(isolationDir: string, baseline: WorktreeBaseline): Promise<boolean> {
+	try {
+		const baselineSha = baseline.root.headCommit;
+		const isolationRepo = vcs.git(isolationDir);
+		if (isolationRepo) {
+			const headSha = (await isolationRepo.headSha().catch(() => "")) ?? "";
+			if (headSha && headSha !== baselineSha) return true;
+		}
+		const delta = await captureDeltaPatch(isolationDir, baseline);
+		if (delta.rootPatch.trim().length > 0) return true;
+		if (delta.nestedPatches.length > 0) return true;
+		return false;
+	} catch {
+		// Fail-closed: assume changes exist if probe fails
+		return true;
+	}
+}
+
+/**
  * Move a retained isolation workspace out of its deterministic
  * (`repoRoot` + agent id) slot into a globally unique sibling, so a later
  * isolated run with the same id cannot wipe it: `ensureIsolation`
@@ -433,18 +456,31 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// Nothing changed since the run-end capture the caller already
 				// merged or applied: a branch now would only duplicate that work.
 				if (capture.fingerprint === handedOff) return;
-				const commitResult = await commitToBranch(
-					handle.mergedDir,
-					taskBaseline,
-					opts.agentId,
-					opts.description,
-					undefined,
-				);
-				AgentRegistry.global().setHistory(opts.agentId, {
-					patchPath: patchResult.patchPath,
-					branchName: commitResult?.branchName,
-					nestedPatchPaths: patchResult.nestedPatchPaths,
-				});
+				try {
+					const commitResult = await commitToBranch(
+						handle.mergedDir,
+						taskBaseline,
+						opts.agentId,
+						opts.description,
+						undefined,
+					);
+					AgentRegistry.global().setHistory(opts.agentId, {
+						patchPath: patchResult.patchPath,
+						branchName: commitResult?.branchName,
+						nestedPatchPaths: patchResult.nestedPatchPaths,
+					});
+				} catch {
+					const baseSha = taskBaseline.root.headCommit;
+					const branchName = `omp/task/${opts.agentId}`;
+					const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+					if (rescueBranch) {
+						AgentRegistry.global().setHistory(opts.agentId, {
+							patchPath: patchResult.patchPath,
+							branchName: rescueBranch,
+							nestedPatchPaths: patchResult.nestedPatchPaths,
+						});
+					}
+				}
 			} finally {
 				await cleanupHandle();
 			}
@@ -584,9 +620,202 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				});
 			}
 		}
+		if (result.exitCode !== 0) {
+			const hasChanges = await hasWorkspaceDelta(isolationDir, baseline);
+			if (hasChanges) {
+				if (opts.mergeMode === "branch") {
+					let commitResult: CommitToBranchResult | null = null;
+					try {
+						commitResult = await commitToBranch(
+							isolationDir,
+							baseline,
+							opts.agentId,
+							opts.description,
+							opts.buildCommitMessage?.(),
+						);
+						const nestedPatchPaths = await persistNestedPatches(
+							opts.artifactsDir,
+							opts.agentId,
+							commitResult?.nestedPatches ?? [],
+						);
+						handedOff = deltaFingerprint(commitResult?.rootPatch ?? "", commitResult?.nestedPatches ?? []);
+						return rememberAgentArtifacts({
+							...result,
+							branchName: commitResult?.branchName,
+							branchBaseSha: commitResult?.baseSha,
+							nestedPatches: commitResult?.nestedPatches,
+							nestedPatchPaths,
+						});
+					} catch (branchErr) {
+						const baseSha = baseline.root.headCommit;
+						const branchName = `omp/task/${opts.agentId}`;
+						const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+						const msg = branchErr instanceof Error ? branchErr.message : String(branchErr);
+						try {
+							const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+							handedOff = capture.fingerprint;
+							return rememberAgentArtifacts({
+								...result,
+								...capture.artifacts,
+								branchName: rescueBranch,
+								error: result.error
+									? `${result.error}\n\n${renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch })}`
+									: renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch }),
+							});
+						} catch (patchErr) {
+							retainWorkspace = true;
+							const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+							return rememberAgentArtifacts({
+								...result,
+								error: result.error
+									? `${result.error}\n\n${renderIsolationError({
+											kind: "merge-failed",
+											message: msg,
+											captureError: patchErr instanceof Error ? patchErr.message : String(patchErr),
+											rescueBranch,
+											retainedDir: retained.dir,
+											sidecarMissing: !retained.sidecarOk,
+									  })}`
+									: renderIsolationError({
+											kind: "merge-failed",
+											message: msg,
+											captureError: patchErr instanceof Error ? patchErr.message : String(patchErr),
+											rescueBranch,
+											retainedDir: retained.dir,
+											sidecarMissing: !retained.sidecarOk,
+									  }),
+							});
+						}
+					}
+				} else {
+					try {
+						const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+						handedOff = capture.fingerprint;
+						return rememberAgentArtifacts({ ...result, ...capture.artifacts });
+					} catch (patchErr) {
+						retainWorkspace = true;
+						const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+						return rememberAgentArtifacts({
+							...result,
+							error: result.error
+								? `${result.error}\n\n${renderIsolationError({
+										kind: "patch-capture-failed",
+										message: patchErr instanceof Error ? patchErr.message : String(patchErr),
+										retainedDir: retained.dir,
+										sidecarMissing: !retained.sidecarOk,
+								  })}`
+								: renderIsolationError({
+										kind: "patch-capture-failed",
+										message: patchErr instanceof Error ? patchErr.message : String(patchErr),
+										retainedDir: retained.dir,
+										sidecarMissing: !retained.sidecarOk,
+								  }),
+						});
+					}
+				}
+			}
+			return rememberAgentArtifacts(result);
+		}
 		return rememberAgentArtifacts(result);
 	} catch (err) {
-		return rememberAgentArtifacts(opts.buildFailureResult(err));
+		let failureResult = opts.buildFailureResult(err);
+		if (handle && taskBaseline) {
+			const isolationDir = handle.mergedDir;
+			const isolationBackend = handle.backend;
+			const hasChanges = await hasWorkspaceDelta(isolationDir, taskBaseline);
+			if (hasChanges) {
+				if (opts.mergeMode === "branch") {
+					try {
+						const commitResult = await commitToBranch(
+							isolationDir,
+							taskBaseline,
+							opts.agentId,
+							opts.description,
+							opts.buildCommitMessage?.(),
+						);
+						const nestedPatchPaths = await persistNestedPatches(
+							opts.artifactsDir,
+							opts.agentId,
+							commitResult?.nestedPatches ?? [],
+						);
+						failureResult = {
+							...failureResult,
+							branchName: commitResult?.branchName,
+							branchBaseSha: commitResult?.baseSha,
+							nestedPatches: commitResult?.nestedPatches,
+							nestedPatchPaths,
+						};
+					} catch (branchErr) {
+						const baseSha = taskBaseline.root.headCommit;
+						const branchName = `omp/task/${opts.agentId}`;
+						const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+						const msg = branchErr instanceof Error ? branchErr.message : String(branchErr);
+						try {
+							const capture = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
+							failureResult = {
+								...failureResult,
+								...capture.artifacts,
+								branchName: rescueBranch,
+								error: failureResult.error
+									? `${failureResult.error}\n\n${renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch })}`
+									: renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch }),
+							};
+						} catch (patchErr) {
+							retainWorkspace = true;
+							const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+							failureResult = {
+								...failureResult,
+								error: failureResult.error
+									? `${failureResult.error}\n\n${renderIsolationError({
+											kind: "merge-failed",
+											message: msg,
+											captureError: patchErr instanceof Error ? patchErr.message : String(patchErr),
+											rescueBranch,
+											retainedDir: retained.dir,
+											sidecarMissing: !retained.sidecarOk,
+									  })}`
+									: renderIsolationError({
+											kind: "merge-failed",
+											message: msg,
+											captureError: patchErr instanceof Error ? patchErr.message : String(patchErr),
+											rescueBranch,
+											retainedDir: retained.dir,
+											sidecarMissing: !retained.sidecarOk,
+									  }),
+							};
+						}
+					}
+				} else {
+					try {
+						const capture = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
+						failureResult = {
+							...failureResult,
+							...capture.artifacts,
+						};
+					} catch (patchErr) {
+						retainWorkspace = true;
+						const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+						failureResult = {
+							...failureResult,
+							error: failureResult.error
+								? `${failureResult.error}\n\n${renderIsolationError({
+										kind: "patch-capture-failed",
+										message: patchErr instanceof Error ? patchErr.message : String(patchErr),
+										retainedDir: retained.dir,
+										sidecarMissing: !retained.sidecarOk,
+								  })}`
+								: renderIsolationError({
+										kind: "patch-capture-failed",
+										message: patchErr instanceof Error ? patchErr.message : String(patchErr),
+										retainedDir: retained.dir,
+										sidecarMissing: !retained.sidecarOk,
+								  }),
+						};
+					}
+				}
+			}
+		}
+		return rememberAgentArtifacts(failureResult);
 	} finally {
 		if (
 			handle &&
