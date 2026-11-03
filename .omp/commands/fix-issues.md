@@ -52,12 +52,12 @@ If a check fails, stop the whole run and report the state. Do not skip to the ne
 
 ### 3b. Dispatch one child
 
-Dispatch one `task` with `isolated: true`. Assignment: number, title, body summary, the workflow in 3c, and `MAIN`. The child reads `issue://<N>` (cross-repo: `issue://<owner>/<repo>/<N>`); comments often hold repro hints, and `?comments=0` skips them only when explicitly asked.
+Dispatch one `task` with `isolated: true`. Assignment: number, title, body summary, the workflow in 3c's child steps, and `MAIN`. The child reads `issue://<N>` (cross-repo: `issue://<owner>/<repo>/<N>`); comments often hold repro hints, and `?comments=0` skips them only when explicitly asked.
 
 The child MUST:
 
-1. Record its base with `git rev-parse HEAD`.
-2. Symlink build outputs from `MAIN` by absolute path, and exclude them from git so they are never part of the change:
+1. Record its base with `git rev-parse HEAD`, and its git admin directory with `git rev-parse --git-common-dir`.
+2. Symlink build outputs from `MAIN` by absolute path. These links point into the primary checkout, so they must be removed before the change is reported:
 
    ```bash
    ln -snf "$MAIN/target"       "$PWD/target"
@@ -65,21 +65,22 @@ The child MUST:
    for f in "$MAIN"/packages/natives/native/*.node; do
      [ -e "$f" ] && ln -snf "$f" "$PWD/packages/natives/native/"
    done
-   printf '%s\n' target node_modules 'packages/natives/native/*.node' >> "$(git rev-parse --git-path info/exclude)"
    ```
 
-   Never symlink the whole `packages/natives/native/` directory: it shadows tracked source.
+   Never symlink the whole `packages/natives/native/` directory: it shadows tracked source. Do not write to any git exclude file. Git admin for the child's workspace is not guaranteed to be the primary checkout's.
 3. Reproduce. Read the relevant source and state a concrete 1–2-sentence failure hypothesis. Create a focused `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.). Run only that file, never the suite, and confirm the failure.
    - Not reproduced → delete the test. Report `unreproduced` with the hypothesis, the non-failure evidence, and what is needed to reproduce. Change nothing else.
    - Out of scope or not a bug → report `not-a-bug` with an issue-postable explanation. Change nothing.
 4. Fix the root cause, following `AGENTS.md`. No product-code stubs or mocks. Re-run the repro until it passes. If the real contract changed, add or adjust adjacent unit or contract tests, running only the affected files. Run `bun fmt` over the edited files.
-5. Leave the change uncommitted. Do NOT commit, push, or open a PR: the handoff carries the working-tree change.
-6. Report:
+5. Remove every symlink from step 2 (`[ -L path ] && rm path` for each one created). Leave the change uncommitted. Do NOT commit, push, or open a PR: the handoff carries the working-tree change.
+6. Check that `git status --porcelain` lists only the paths of the fix, and the repro test if it is kept. Any other entry is a child error: fix it before reporting.
+7. Report:
 
    ```
    Issue #<N>  <title>
    Status:    fixed | unreproduced | not-a-bug | existing-pr (#<M>)
    Base:      <SHA>
+   Admin:     <git common dir>
    Subject:   fix(<scope>): <one-line summary>
    Files:     <every changed path, one per line>   (fixed only)
    Repro:     <test path>                          (fixed only)
@@ -90,6 +91,7 @@ The child MUST:
 
 After the child finishes, the handoff has already applied its change to this workspace, uncommitted. Verify before delivering anything. For a non-`fixed` status, verify that the workspace is still clean, then continue to the next issue.
 
+- Record the child's `Admin:` value and this workspace's `git rev-parse --git-common-dir`. Log both. They document which isolation backend ran. They do not change delivery.
 - `git rev-parse HEAD` still equals `origin/main`.
 - `git diff --name-only --diff-filter=U` prints nothing. Any conflicted path is a stop.
 - `git status --porcelain` lists only paths from the child's `Files:` list, and every listed path appears. Any extra or missing path is a stop: report it and leave the workspace exactly as found.
@@ -120,12 +122,15 @@ The zero old value makes `update-ref` fail if the branch appeared meanwhile. The
 - `git diff --name-only origin/main fix/issue-<N>` matches the `Files:` list exactly.
 - `git diff --quiet "$C" -- "${FILES[@]}"` succeeds, so the working tree equals the commit.
 
-Only after all three pass, return the workspace to `origin/main`. Restore tracked paths from HEAD. Remove untracked paths that the child listed as new, after confirming they are untracked:
+Only after all three pass, return the workspace to `origin/main`. Immediately before the restore, repeat the 3c status comparison. If it differs, stop without restoring. A change to these paths since 3c is someone else's edit, and restoring would discard it. Then restore:
 
 ```bash
-git restore --source=HEAD --staged --worktree -- <tracked paths>
-git clean -f -- <untracked paths>
+git status --porcelain            # must list only the Files: paths, as in 3c
+git restore --source=HEAD --staged --worktree -- <tracked Files: paths>
+git clean -f -- <untracked Files: paths>
 ```
+
+The re-check narrows the window between verification and restore to the moment between two commands. It does not close it. A writer that changes these files in that moment can still be overwritten, which is why the one-writer rule in 2 matters.
 
 Confirm `git status --porcelain` prints nothing and HEAD still equals `origin/main`. Report `delivered` with `fix/issue-<N>` and `$C`. Then go back to 3a for the next issue.
 
@@ -146,6 +151,6 @@ List each `delivered` issue with its `fix/issue-<N>` ref and commit, then every 
 
 ## Rules
 
-MUST: check the preconditions before the first issue and stop on any failure; run one child at a time with `isolated: true`; verify the integrated result against the child's file list before delivering it; deliver each issue to its own branch before the next child starts; leave the workspace clean at `origin/main` between issues; stop on dirty, conflicting, or mismatched state.
+MUST: check the preconditions before the first issue and stop on any failure; run one child at a time with `isolated: true`; verify the integrated result against the child's file list before delivering it; re-check the status before restoring; deliver each issue to its own branch before the next child starts; leave the workspace clean at `origin/main` between issues; stop on dirty, conflicting, or mismatched state.
 
-MUST NOT: change any configuration; switch branches, reset HEAD, or overwrite an existing `fix/issue-<N>`; apply a child's change a second time or by hand; commit inside a child; symlink the whole `packages/natives/native/` directory; push, open PRs, or comment on issues; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond the reported bug.
+MUST NOT: change any configuration; switch branches, reset HEAD, or overwrite an existing `fix/issue-<N>`; apply a child's change a second time or by hand; commit inside a child; write to any git exclude file; leave build symlinks in a reported change; symlink the whole `packages/natives/native/` directory; push, open PRs, or comment on issues; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond the reported bug.
