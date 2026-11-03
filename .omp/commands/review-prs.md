@@ -1,6 +1,6 @@
 # Review PRs
 
-Parallel PR triage: decide merge-worthiness, examine each PR in an OMP-managed isolated task, and return findings and blocker fixes for human review.
+Parallel PR triage: review PRs read-only in OMP-managed isolated tasks and return findings. Prepare blocker fixes only when the assigned workspace already matches the PR head.
 
 ## Arguments
 
@@ -37,31 +37,31 @@ Assign each PR's number, head ref, author, and workflow to a `task` with `isolat
 
 Ambiguous: `worthy`; human decides on a real branch.
 
-#### Prepare the PR in the assigned workspace
+#### Inspect the PR without changing the workspace
 
-Fetch the PR head and record its SHA. In the isolated workspace only, apply the
-diff from the task's initial HEAD to the fetched PR head so the working files
-match the PR snapshot; do not change the managed checkout's branch. If this
-cannot be applied cleanly, report the blocker rather than modifying another
-workspace. Do not link shared build outputs into this workspace. In particular,
-never symlink all of `packages/natives/native/`, which would shadow tracked files.
-
-Compare the PR head with the current base and report conflicts or a stale base.
-Do not rebase or rewrite the author's branch.
+Read the PR diff and relevant files at its recorded head SHA using GitHub or
+read-only Git commands. Compare that head with the current base and report a
+stale base or conflicts when established. Do not apply the PR snapshot, switch
+branches, rebase, or modify another checkout. An isolated task's changes are
+applied to its parent, so importing the PR snapshot would import it there too.
 
 #### Review and fix
 
-Review for correctness, security, regressions, breaking-change impact, and new-path test coverage. Fix merge blockers only: build/test failure, obvious PR-introduced bugs, or edge cases required by the PR's goal. Do NOT taste-rewrite, unrelated-refactor, or expand scope.
+Review for correctness, security, regressions, breaking-change impact, and
+new-path test coverage. Fix only merge blockers in the PR's diff; do not expand
+scope. A task may edit and test a fix only if its assigned workspace starts
+clean at the exact recorded PR head SHA. In that case, read existing patterns,
+follow `AGENTS.md`, add or update behavior-change tests, run targeted files, and
+format the edited files. Return only the fix as the task patch.
 
-Each fix: read existing patterns; follow `AGENTS.md` conventions; add/update behavior-change tests; run targeted area test files only—no project-wide subagent tests. End with `bun fmt` over union of edited files.
+Otherwise, keep the task read-only and report the evidence, proposed fix, and
+that the fix and tests were not exercised. A separate session whose OMP-assigned
+workspace starts at that PR head can implement and verify it. Never import a PR
+snapshot into a child patch to make a fix appear applicable.
 
-#### Return fixes
-
-Keep fixes in the assigned workspace. Return the fix-only diff relative to the
-recorded PR head, separately from the PR's own changes, and identify the head
-SHA. The parent must not integrate the task's entire patch as a new change:
-it contains the PR snapshot as well as any fixes. Do not amend author commits,
-push, merge, or force-push author history; a human reviews and merges.
+Do not amend author commits, push, merge, or force-push author history; a human
+reviews and merges. Never symlink all of `packages/natives/native/`, which would
+shadow tracked files.
 
 #### Report
 
@@ -70,9 +70,9 @@ Return:
 ```
 PR #<N>  <title>
 Decision: worthy | slop | superseded
-PR head:  <recorded SHA, or not prepared>
-Base:     current | stale | conflicts (details)
-Fixes:    <fix-only diff relative to PR head, or none needed>
+PR head:  <recorded SHA>
+Base:     current | stale | conflicts | unknown (evidence)
+Fixes:    <fix-only task patch if workspace matched PR head; otherwise proposed fix or none>
 Blockers: <anything the human must decide>
 ```
 
@@ -85,11 +85,11 @@ After all agents finish, print:
 |----|-------|----------|--------|-------|----------|
 ```
 
-Group findings by decision. Return fix-only diffs with their PR head SHAs.
+Group findings by decision. Identify fix-only patches and the PR head SHA each was based on.
 
 ## Rules
 
 - MUST use parallel subagents, one/PR; NEVER serial loop.
-- `slop`/`superseded`: skip checkout; record decision only.
-- Fixes limited to merge blockers in that PR's diff.
+- `slop`/`superseded`: record decision only.
+- Fixes are limited to merge blockers in that PR's diff, and are returned only from a clean task workspace already at that PR head.
 - MUST NOT push or merge; human reviews and merges.
