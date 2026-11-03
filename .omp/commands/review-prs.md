@@ -1,6 +1,6 @@
 # Review PRs
 
-Parallel PR triage: decide merge-worthiness, prepare rebased worktrees, fix blockers, return them for human merge.
+Parallel PR triage: decide merge-worthiness with read-only reviewers, then fix merge blockers one PR at a time in a dedicated worktree for the human to push and merge.
 
 ## Arguments
 
@@ -20,72 +20,62 @@ github { op: "search_prs", query: "is:open", since: "3d", limit: 50 }
 
 Pass supplied qualifiers verbatim in `query`; add `is:open` unless present. Time window (`3d`, `2w`, `12h`, ISO date; see `github` docs): `since`. `dateField` defaults `created`; set `"updated"` only on explicit request for recently-touched PRs. Print resolved set before fan-out for scope confirmation.
 
-## 2. One parallel `task` subagent/PR
+## 2. Read-only review, one `task` per PR
 
-Assign each PR's number, head ref, author, and workflow. Agents isolate; use `irc` only if a fix on PR A obviously conflicts with PR B.
+Dispatch one `task` per PR, in parallel, **without** the `isolated` option. A review task only reads. It takes the PR diff from `pr://<N>/diff/all` (or `pr://<N>/diff/<i>` per file), reads files at the PR head with the `github` file read on the PR's head branch, and runs `gh search prs`. It does not run `git fetch`, `git show` of commits it has not fetched, or any checkout, switch, reset, or write. Nothing it does can reach another workspace.
 
-### Required subagent workflow
+Each review task:
 
-#### Read and decide
+1. Reads `pr://<N>` (comments default; `?comments=0` skips) and the changed-file listing.
+2. Checks `git log origin/main` and `gh search prs` for an already-landed equivalent.
+3. Records the head SHA from the PR metadata. This is the SHA every later step refers to.
+4. Decides:
+   - `slop`: AI-generated noise, broken, off-spec, or net-negative. Drop; 1–2-line justification.
+   - `superseded`: fixed or merged in main or a newer PR. Drop with pointer.
+   - `worthy`: review for correctness, security, regressions, breaking-change impact, and new-path test coverage. Record each merge blocker with `file:line` evidence.
 
-1. Read `pr://<N>` (comments default; `?comments=0` skips) and `pr://<N>/diff` (changed-file listing). Full unified diff: `pr://<N>/diff/all`; file slice: `pr://<N>/diff/<i>`.
-2. Check `git log origin/main` and `gh search prs` for an already-landed equivalent.
-3. Decision:
-   - `slop`: AI-generated noise, broken, off-spec, or net-negative. Drop; 1–2-line justification; no checkout.
-   - `superseded`: fixed/merged in main or newer PR. Drop with pointer.
-   - `worthy`: proceed.
+   Ambiguous: `worthy`; human decides on a real branch.
+5. Compares the head with `origin/main` and reports `current`, `stale`, or `conflicts` with evidence.
 
-Ambiguous: `worthy`; human decides on a real branch.
+Report:
 
-#### Checkout
-
-```bash
-gh_PR=<NUMBER>
-# pr_checkout creates ~/.omp/wt/<encoded-repo>/pr-<N>/ and configures push remote
+```
+PR #<N>  <title>
+Decision: worthy | slop | superseded
+PR head:  <full SHA>
+Base:     current | stale | conflicts | unknown (evidence)
+Blockers: <merge blockers with file:line evidence, or none>
 ```
 
-MUST use `github pr_checkout`, not raw `gh pr checkout`: it creates a dedicated worktree wired for later `pr_push`.
+## 3. Fix merge blockers, one PR at a time
 
-#### Symlink build artifacts
+Only for `worthy` PRs with blockers. The dispatching session does this itself. It is not a child task, because an isolated child starts from the parent's HEAD and not from a PR head, and it would have nothing to fix. Work through PRs sequentially.
 
-Before any worktree build/test, from the worktree symlink main-checkout outputs to avoid `bun check` / `cargo build` / native-loader recompilation:
+**Preconditions.** Every one must hold. If any fails, record `fix: not attempted` with the failed check and move on.
+
+- `github pr_checkout` created the worktree at `~/.omp/wt/<encoded-repo>/pr-<N>/`. Use this, never `gh pr checkout`, and never switch the primary checkout.
+- `git -C <worktree> rev-parse HEAD` equals the recorded PR head SHA. This also means the PR head has not moved since review.
+- `git -C <worktree> status --short` is empty.
+
+**Artifacts.** Before any build or test in the worktree, symlink outputs from the primary checkout using absolute paths:
 
 ```bash
-MAIN="<absolute path to main worktree, e.g. ~/Projects/pi>"
-WT="$(pwd)"
-
-# Rust target dir + JS deps (root-level in this monorepo)
-ln -snf "$MAIN/target"        "$WT/target"
-ln -snf "$MAIN/node_modules"  "$WT/node_modules"
-
-# Prebuilt native addon (avoids 30s+ napi-rs rebuild). Link only the .node
-# binaries — the rest of packages/natives/native/ is tracked by git, so
-# folder-level symlinks would shadow PR-modified files and break review.
+MAIN="$(git rev-parse --show-toplevel)"   # run from the primary checkout, before pr_checkout
+WT="<worktree path>"
+ln -snf "$MAIN/target"       "$WT/target"
+ln -snf "$MAIN/node_modules" "$WT/node_modules"
 for f in "$MAIN"/packages/natives/native/*.node; do
   [ -e "$f" ] && ln -snf "$f" "$WT/packages/natives/native/"
 done
 ```
 
-Before `pr_checkout`, derive `$MAIN` from original cwd: `git rev-parse --show-toplevel`. Symlinks MUST use absolute paths: worktree is outside main repo; relative paths break. MUST NOT symlink whole `packages/natives/native/`: it shadows tracked PR changes.
+Never symlink the whole `packages/natives/native/` directory: it shadows tracked files the PR may change. Remove the symlinks again before committing, so none of them is part of the fix.
 
-#### Rebase
+**Stale base.** Do not rebase. A rebased PR branch can only reach the remote by force push, which rewrites the author's history, and this command never force-pushes. Report `Base: stale` and make the fix on the PR head as it is. Rebasing a stale branch is the author's decision.
 
-```bash
-git fetch origin main
-git rebase origin/main
-```
+**Fix.** Fix only merge blockers in the PR's own diff: build or test failure, an obvious PR-introduced bug, or an edge case the PR's goal requires. Do not taste-rewrite, refactor unrelated code, or expand scope. Each fix reads existing patterns, follows `AGENTS.md`, adds or updates behavior-change tests, and runs only the targeted test files, never the full suite. Run `bun fmt` over the union of edited files.
 
-Mechanical conflicts (formatting, import order, adjacent edits): resolve, continue. Semantic conflicts: abort, note final report, do not commit.
-
-#### Review and fix
-
-Review for correctness, security, regressions, breaking-change impact, and new-path test coverage. Fix merge blockers only: build/test failure, obvious PR-introduced bugs, or edge cases required by the PR's goal. Do NOT taste-rewrite, unrelated-refactor, or expand scope.
-
-Each fix: read existing patterns; follow `AGENTS.md` conventions; add/update behavior-change tests; run targeted area test files only—no project-wide subagent tests. End with `bun fmt` over union of edited files.
-
-#### Commit
-
-One conventional commit/logical fix atop rebased PR branch:
+**Commit.** One conventional commit on the PR branch in the worktree, as a fast-forward of the PR head:
 
 ```bash
 git add -A
@@ -94,35 +84,32 @@ git commit -m "fix(<scope>): <what & why>
 Addresses review feedback on #<PR>."
 ```
 
-Do NOT amend author commits, push, merge, or force-push author history; human reviews/merges.
+Do not amend author commits. Do not push, merge, or force-push. The human reviews the commit. If accepted, the human pushes it with `github pr_push`, which is a fast-forward because the head was not rewritten. Before that push, the human confirms the PR head still equals the recorded SHA; if it has moved, the fix must be re-checked on the new head.
 
-#### Report
-
-Return:
+Report:
 
 ```
 PR #<N>  <title>
-Decision: worthy | slop | superseded
-Worktree: ~/.omp/wt/.../pr-<N>   (or: not checked out)
-Rebase:   clean | conflicts (resolved | aborted: <reason>)
-Fixes:    <commit shas + one-liners>   (or: none needed)
-Blockers: <anything the human must decide>
+Worktree: ~/.omp/wt/.../pr-<N>
+Fix:      <commit sha + one-liner>, or none needed, or not attempted (<check>)
+Tests:    <targeted files run and their exit codes>
 ```
 
-## 3. Aggregate
+## 4. Aggregate
 
-After all agents finish, print:
+After every review task and every fix finishes, print:
 
 ```
-| PR | Title | Decision | Rebase | Fixes | Blockers |
-|----|-------|----------|--------|-------|----------|
+| PR | Title | Decision | Base | Fixes | Blockers |
+|----|-------|----------|------|-------|----------|
 ```
 
-Then worktree paths grouped by decision for `cd` and merge.
+Then list the worktree paths and fix commit SHAs for the human to review, grouped by decision. Nothing is pushed or merged by this command.
 
 ## Rules
 
-- MUST use parallel subagents, one/PR; NEVER serial loop.
-- `slop`/`superseded`: skip checkout; record decision only.
-- Fixes limited to merge blockers in that PR's diff.
-- MUST NOT push or merge; human reviews and merges.
+- Review tasks run in parallel and are read-only. They never use `isolated`, because nothing they do needs isolation.
+- Fixes run one PR at a time in the `pr_checkout` worktree, under the preconditions above. This command never applies a task's output into any checkout.
+- `slop` and `superseded` PRs: record the decision only, with no checkout.
+- Fixes are limited to merge blockers in that PR's diff.
+- MUST NOT push, merge, rebase, or force-push. A human reviews, pushes, and merges.
