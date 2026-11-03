@@ -1,6 +1,6 @@
 # Review PRs
 
-Parallel PR triage: decide merge-worthiness, prepare rebased worktrees, fix blockers, return them for human merge.
+Parallel PR triage: decide merge-worthiness, examine each PR in an OMP-managed isolated task, and return findings and blocker fixes for human review.
 
 ## Arguments
 
@@ -22,7 +22,7 @@ Pass supplied qualifiers verbatim in `query`; add `is:open` unless present. Time
 
 ## 2. One parallel `task` subagent/PR
 
-Assign each PR's number, head ref, author, and workflow. Agents isolate; use `irc` only if a fix on PR A obviously conflicts with PR B.
+Assign each PR's number, head ref, author, and workflow to a `task` with `isolated: true`. Coordinate only if fixes on separate PRs obviously conflict.
 
 ### Required subagent workflow
 
@@ -37,45 +37,17 @@ Assign each PR's number, head ref, author, and workflow. Agents isolate; use `ir
 
 Ambiguous: `worthy`; human decides on a real branch.
 
-#### Checkout
+#### Prepare the PR in the assigned workspace
 
-```bash
-gh_PR=<NUMBER>
-# pr_checkout creates ~/.omp/wt/<encoded-repo>/pr-<N>/ and configures push remote
-```
+Fetch the PR head and record its SHA. In the isolated workspace only, apply the
+diff from the task's initial HEAD to the fetched PR head so the working files
+match the PR snapshot; do not change the managed checkout's branch. If this
+cannot be applied cleanly, report the blocker rather than modifying another
+workspace. Do not link shared build outputs into this workspace. In particular,
+never symlink all of `packages/natives/native/`, which would shadow tracked files.
 
-MUST use `github pr_checkout`, not raw `gh pr checkout`: it creates a dedicated worktree wired for later `pr_push`.
-
-#### Symlink build artifacts
-
-Before any worktree build/test, from the worktree symlink main-checkout outputs to avoid `bun check` / `cargo build` / native-loader recompilation:
-
-```bash
-MAIN="<absolute path to main worktree, e.g. ~/Projects/pi>"
-WT="$(pwd)"
-
-# Rust target dir + JS deps (root-level in this monorepo)
-ln -snf "$MAIN/target"        "$WT/target"
-ln -snf "$MAIN/node_modules"  "$WT/node_modules"
-
-# Prebuilt native addon (avoids 30s+ napi-rs rebuild). Link only the .node
-# binaries — the rest of packages/natives/native/ is tracked by git, so
-# folder-level symlinks would shadow PR-modified files and break review.
-for f in "$MAIN"/packages/natives/native/*.node; do
-  [ -e "$f" ] && ln -snf "$f" "$WT/packages/natives/native/"
-done
-```
-
-Before `pr_checkout`, derive `$MAIN` from original cwd: `git rev-parse --show-toplevel`. Symlinks MUST use absolute paths: worktree is outside main repo; relative paths break. MUST NOT symlink whole `packages/natives/native/`: it shadows tracked PR changes.
-
-#### Rebase
-
-```bash
-git fetch origin main
-git rebase origin/main
-```
-
-Mechanical conflicts (formatting, import order, adjacent edits): resolve, continue. Semantic conflicts: abort, note final report, do not commit.
+Compare the PR head with the current base and report conflicts or a stale base.
+Do not rebase or rewrite the author's branch.
 
 #### Review and fix
 
@@ -83,18 +55,13 @@ Review for correctness, security, regressions, breaking-change impact, and new-p
 
 Each fix: read existing patterns; follow `AGENTS.md` conventions; add/update behavior-change tests; run targeted area test files only—no project-wide subagent tests. End with `bun fmt` over union of edited files.
 
-#### Commit
+#### Return fixes
 
-One conventional commit/logical fix atop rebased PR branch:
-
-```bash
-git add -A
-git commit -m "fix(<scope>): <what & why>
-
-Addresses review feedback on #<PR>."
-```
-
-Do NOT amend author commits, push, merge, or force-push author history; human reviews/merges.
+Keep fixes in the assigned workspace. Return the fix-only diff relative to the
+recorded PR head, separately from the PR's own changes, and identify the head
+SHA. The parent must not integrate the task's entire patch as a new change:
+it contains the PR snapshot as well as any fixes. Do not amend author commits,
+push, merge, or force-push author history; a human reviews and merges.
 
 #### Report
 
@@ -103,9 +70,9 @@ Return:
 ```
 PR #<N>  <title>
 Decision: worthy | slop | superseded
-Worktree: ~/.omp/wt/.../pr-<N>   (or: not checked out)
-Rebase:   clean | conflicts (resolved | aborted: <reason>)
-Fixes:    <commit shas + one-liners>   (or: none needed)
+PR head:  <recorded SHA, or not prepared>
+Base:     current | stale | conflicts (details)
+Fixes:    <fix-only diff relative to PR head, or none needed>
 Blockers: <anything the human must decide>
 ```
 
@@ -114,11 +81,11 @@ Blockers: <anything the human must decide>
 After all agents finish, print:
 
 ```
-| PR | Title | Decision | Rebase | Fixes | Blockers |
+| PR | Title | Decision | Base | Fixes | Blockers |
 |----|-------|----------|--------|-------|----------|
 ```
 
-Then worktree paths grouped by decision for `cd` and merge.
+Group findings by decision. Return fix-only diffs with their PR head SHAs.
 
 ## Rules
 

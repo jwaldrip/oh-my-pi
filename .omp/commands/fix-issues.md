@@ -1,6 +1,6 @@
 # Fix Issues Command
 
-Diagnose, reproduce, then fix reproducible open GitHub issues in parallel: one clean worktree/issue; symlink build artifacts to avoid rebuilds.
+Diagnose, reproduce, then fix reproducible open GitHub issues in parallel using OMP-managed isolated tasks.
 
 ## Arguments
 
@@ -25,7 +25,7 @@ Print resolved set before fan-out for scope confirmation.
 
 ## 2. Parallel subagents
 
-Use parallel `task` subagents: one/issue. Assignment: number, title, body summary, workflow below. Isolated work; `irc` only if issues clearly touch the same file.
+Use parallel `task` subagents with `isolated: true`, one per issue. Assignment: number, title, body summary, workflow below. Integrate returned patches after tasks finish; coordinate if issues clearly touch the same file.
 
 Each subagent MUST:
 
@@ -36,83 +36,33 @@ Each subagent MUST:
 
 ### b. Diagnose/reproduce
 
-MUST reproduce in current cwd on `main`, before any worktree.
+Reproduce in the OMP-assigned isolated workspace, starting from the supplied base revision. Do not write a repro in the parent checkout.
 
 1. Read relevant checkout source; state concrete 1–2-sentence failure hypothesis.
 2. Under affected package, create focused `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.): unique, greppable, deletable.
 3. Run only that file, never suite; confirm expected failure.
 
-- Reproduced → c.
-- Not reproduced → stop; delete test; report `unreproduced`: hypothesis, non-failure evidence, unblockers (versions, OS, config, author repro snippet). No worktree/commit.
+- Reproduced → fix.
+- Not reproduced → stop; remove the temporary test; report `unreproduced`: hypothesis, non-failure evidence, unblockers (versions, OS, config, author repro snippet).
 - Out-of-scope/not bug (user-config error, intended behavior, dup) → stop; report `not-a-bug` with issue-postable explanation.
 
-### c. Worktree
+### c. Fix
 
-Confirmed local repro required.
+1. Keep the failing test in the assigned workspace and confirm the failure there.
+2. Fix source, following `AGENTS.md` patterns: root cause, not symptom; no product-code stubs/mocks.
+3. Re-run repro until passing.
+4. If the real contract changed, add or adjust adjacent unit or contract tests; run only affected files, never the full suite.
+5. `bun fmt` the union of edited files.
 
-```bash
-MAIN="$(git rev-parse --show-toplevel)"
-ENC="$(printf '%s' "$MAIN" | sed 's|[/\\:]|-|g')"
-WT="$HOME/.omp/wt/${ENC}/fix-issue-<N>"
 
-git -C "$MAIN" fetch origin main
-git -C "$MAIN" worktree add -B "fix/issue-<N>" "$WT" origin/main
-```
-
-Branch: `fix/issue-<N>`; `fix/issue-<N>-<slug>` for multiple fixes. Worktree path follows `pr_checkout` convention.
-
-### d. Symlink artifacts
-
-Before any worktree build/test, use absolute paths:
-
-```bash
-cd "$WT"
-ln -snf "$MAIN/target"       "$WT/target"
-ln -snf "$MAIN/node_modules" "$WT/node_modules"
-
-# Only the .node binaries are expensive to rebuild. The rest of
-# packages/natives/native/ is tracked by git, so folder-level symlinks would
-# shadow real source files and break the fix.
-for f in "$MAIN"/packages/natives/native/*.node; do
-  [ -e "$f" ] && ln -snf "$f" "$WT/packages/natives/native/"
-done
-```
-
-MUST NOT symlink whole `packages/natives/native/`: shadows tracked source.
-
-### e. Fix
-
-1. Move, never copy, failing test from main into same worktree path; remove it from main.
-2. Confirm failure in worktree/current branch.
-3. Fix source, following `AGENTS.md` patterns: root cause, not symptom; no product-code stubs/mocks.
-4. Re-run repro until passing.
-5. If real contract changed, add/adjust adjacent unit/contract tests; run only affected files, never full suite.
-6. `bun fmt` union of edited files.
-
-### f. Commit
-
-One logical conventional commit with `Fixes #<N>`:
-
-```bash
-git add -A
-git commit -m "fix(<scope>): <one-line summary>
-
-<short body explaining root cause and the fix>
-
-Fixes #<N>."
-```
-
-Do NOT push; human pushes/opens PR.
-
-### g. Report
+### d. Report
 
 ```
 Issue #<N>  <title>
 Status:    fixed | unreproduced | not-a-bug | existing-pr (#<M>)
-Repro:     <test path inside worktree>            (if applicable)
-Worktree:  ~/.omp/wt/.../fix-issue-<N>            (if created)
-Branch:    fix/issue-<N>                          (if created)
-Commits:   <shas + one-liners>                    (if any)
+Repro:     <test path>                            (if applicable)
+Base:      <revision used for the isolated task>
+Patch:     <returned patch or none>
 Notes:     <root cause in one sentence; or what info is missing>
 ```
 
@@ -125,12 +75,12 @@ After all subagents, print:
 |---|-------|--------|----------------|
 ```
 
-Group worktree paths by status, `fixed` first, for batch `cd`/push.
+Group results by status, `fixed` first. Integrate non-conflicting returned patches in the parent workspace.
 
 ## Rules
 
-MUST: reproduce on current-cwd `main` before worktree; parallel one-issue subagents; check existing PR first and divert reasonable ones to `review-prs`; symlink `target`, `node_modules`, native `*.node` before worktree builds/tests; conventional commits with body `Fixes #<N>`.
+MUST: reproduce in the assigned isolated workspace; parallel one-issue subagents with `isolated: true`; check existing PR first and divert reasonable ones to `review-prs`.
 
-MUST NOT: symlink entire `packages/natives/native/`; push, open PRs, or comment on issues; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond reported bug into adjacent code smells.
+MUST NOT: push, open PRs, or comment on issues; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond reported bug into adjacent code smells. Do not symlink the whole `packages/natives/native/`, which shadows tracked source.
 
-Failed repro → delete temporary cwd test before yielding; leave original checkout clean.
+Failed repro → remove the temporary test before yielding; leave the parent workspace untouched.
