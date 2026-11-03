@@ -1,6 +1,6 @@
 # Fix Issues Command
 
-Diagnose, reproduce, then fix reproducible open GitHub issues in parallel, one isolated task per issue. The harness hands each task's change back through its configured native isolation. This command delivers each fix on its own `fix/issue-<N>` branch from that handoff, and never applies a change a second time.
+Diagnose, reproduce, then fix reproducible open GitHub issues one at a time. Each issue runs in one isolated child task, and the child's change returns through the operator's configured handoff. The dispatching session verifies that already-integrated change, delivers it to its own `fix/issue-<N>` branch, cleans its workspace, and only then starts the next issue.
 
 ## Arguments
 
@@ -21,109 +21,131 @@ Parse `$ARGUMENTS`.
 
   User qualifiers verbatim in `query`; add `is:open` unless present. Time window (`3d`, `2w`, `12h`, ISO date; see `github` docs) → `since`. `dateField` defaults `created`; set `"updated"` only for explicitly requested recently-touched issues.
 
-Print resolved set before fan-out for scope confirmation.
+Print the resolved set before starting, for scope confirmation.
 
-## 2. Preconditions, then dispatch
+## 2. Preconditions
 
-Every check must pass. If one fails, stop and report the check. Do not change config, and do not fall back to editing any checkout.
+Check these once before the first issue. If any fails, stop and report the check. Change no configuration, and do not switch branches, reset, or clean any checkout.
 
-- `omp config get task.isolation.enabled --json` reports `true`. Without it, `isolated` is refused.
-- `omp config get task.isolation.apply --json` reports `true`. This command relies on the native handoff, so it does not run when that handoff is off.
-- `omp config get task.isolation.merge --json` reports `branch`. Under `patch`, the handoff applies every child's change uncommitted into the dispatching workspace, all mixed together. A per-issue commit cannot then be separated safely, so this command stops rather than guess.
-- The dispatching session runs in a clean batch worktree that this run owns, whose HEAD is `origin/main`. Create it once with `git worktree add -b fix/batch-<timestamp> <path> origin/main` and start the session there. Confirm with `git rev-parse HEAD` and `git rev-parse origin/main`, which must match after `git fetch origin main`. Do not dispatch from the primary checkout: the handoff writes into the dispatching workspace.
+- `omp config get task.isolation.enabled --json` reports `true`. Otherwise `isolated` is refused and nothing runs.
+- `omp config get task.isolation.merge --json` reports `patch`. Under `branch`, the handoff commits each child's change onto the dispatching session's own branch. That moves the branch every issue is based on, so a later issue's branch would contain an earlier fix. Stop and report that blocker. Do not rewind the branch to work around it.
+- `omp config get task.isolation.apply --json` reports `true`. If it reports `false`, nothing is integrated into the workspace, so there is no result to verify. Stop and report.
+- `git fetch origin main`, then `git rev-parse HEAD` equals `git rev-parse origin/main`. Each issue branch must start from `origin/main`.
+- `git status --porcelain` prints nothing, and no merge, rebase, or cherry-pick is in progress (`git rev-parse -q --verify MERGE_HEAD` and the `.git/rebase-*` and `.git/CHERRY_PICK_HEAD` paths are absent).
+- Record `MAIN` as `git rev-parse --show-toplevel`. Children use it for build artifacts.
 
-Record `MAIN`, the primary checkout from `git rev-parse --show-toplevel` in the original checkout, for symlink sources.
+The dispatching session works in its harness-assigned workspace. If that workspace is a shared checkout, run this command only while no other live session is writing to it. The handoff writes into this workspace while a child runs, and another writer would see or mix with those changes.
 
-Then dispatch one `task` per issue with `isolated: true`, in parallel. Assignment: number, title, body summary, workflow below, and `MAIN`. Coordinate only if two issues clearly touch the same file.
+## 3. One issue at a time
 
-Each subagent MUST:
+Repeat this loop for each issue in the resolved set, one at a time. Do not dispatch the next child until the previous issue is delivered and the workspace is clean again.
 
-### a. Read
+### 3a. Gate
 
-1. Read `issue://<N>`; cross-repo: `issue://<owner>/<repo>/<N>`. Includes body/comments; comments often contain repro/fix hints. Append `?comments=0` only to explicitly skip comments.
-2. Run `gh search prs` for the issue number. Reasonable existing PR → report `existing-pr` with its number. Do NOT create a competing fix.
+Before dispatch, every check must pass:
 
-### b. Prepare your workspace
+- `git status --porcelain` prints nothing, and `git rev-parse HEAD` still equals `origin/main`.
+- `git show-ref --verify --quiet refs/heads/fix/issue-<N>` fails. An existing branch is never overwritten.
+- `gh search prs` for the issue number finds no reasonable open PR. If one exists, record `existing-pr (#<M>)`, divert it to `review-prs`, and move on. Do not create a competing fix.
 
-Your workspace is the one the harness gave you. Record its base with `git rev-parse HEAD`. Before any build or test, symlink outputs from `MAIN` using absolute paths, then exclude those symlinks from git so they are never captured as part of your change:
+If a check fails, stop the whole run and report the state. Do not skip to the next issue on a dirty or conflicting workspace.
+
+### 3b. Dispatch one child
+
+Dispatch one `task` with `isolated: true`. Assignment: number, title, body summary, the workflow in 3c, and `MAIN`. The child reads `issue://<N>` (cross-repo: `issue://<owner>/<repo>/<N>`); comments often hold repro hints, and `?comments=0` skips them only when explicitly asked.
+
+The child MUST:
+
+1. Record its base with `git rev-parse HEAD`.
+2. Symlink build outputs from `MAIN` by absolute path, and exclude them from git so they are never part of the change:
+
+   ```bash
+   ln -snf "$MAIN/target"       "$PWD/target"
+   ln -snf "$MAIN/node_modules" "$PWD/node_modules"
+   for f in "$MAIN"/packages/natives/native/*.node; do
+     [ -e "$f" ] && ln -snf "$f" "$PWD/packages/natives/native/"
+   done
+   printf '%s\n' target node_modules 'packages/natives/native/*.node' >> "$(git rev-parse --git-path info/exclude)"
+   ```
+
+   Never symlink the whole `packages/natives/native/` directory: it shadows tracked source.
+3. Reproduce. Read the relevant source and state a concrete 1–2-sentence failure hypothesis. Create a focused `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.). Run only that file, never the suite, and confirm the failure.
+   - Not reproduced → delete the test. Report `unreproduced` with the hypothesis, the non-failure evidence, and what is needed to reproduce. Change nothing else.
+   - Out of scope or not a bug → report `not-a-bug` with an issue-postable explanation. Change nothing.
+4. Fix the root cause, following `AGENTS.md`. No product-code stubs or mocks. Re-run the repro until it passes. If the real contract changed, add or adjust adjacent unit or contract tests, running only the affected files. Run `bun fmt` over the edited files.
+5. Leave the change uncommitted. Do NOT commit, push, or open a PR: the handoff carries the working-tree change.
+6. Report:
+
+   ```
+   Issue #<N>  <title>
+   Status:    fixed | unreproduced | not-a-bug | existing-pr (#<M>)
+   Base:      <SHA>
+   Subject:   fix(<scope>): <one-line summary>
+   Files:     <every changed path, one per line>   (fixed only)
+   Repro:     <test path>                          (fixed only)
+   Notes:     <root cause in one sentence, or what information is missing>
+   ```
+
+### 3c. Verify the integrated result
+
+After the child finishes, the handoff has already applied its change to this workspace, uncommitted. Verify before delivering anything. For a non-`fixed` status, verify that the workspace is still clean, then continue to the next issue.
+
+- `git rev-parse HEAD` still equals `origin/main`.
+- `git diff --name-only --diff-filter=U` prints nothing. Any conflicted path is a stop.
+- `git status --porcelain` lists only paths from the child's `Files:` list, and every listed path appears. Any extra or missing path is a stop: report it and leave the workspace exactly as found.
+- Untracked files appear only where the child listed them as new.
+
+Any stop here leaves the workspace as it is and ends the run. Do not repair it by hand.
+
+### 3d. Deliver this issue
+
+The change exists only in this workspace, so it is preserved as a commit on its own branch before anything else runs. Build the commit in a temporary index, which leaves HEAD and the working tree untouched until the branch exists:
 
 ```bash
-ln -snf "$MAIN/target"       "$PWD/target"
-ln -snf "$MAIN/node_modules" "$PWD/node_modules"
-for f in "$MAIN"/packages/natives/native/*.node; do
-  [ -e "$f" ] && ln -snf "$f" "$PWD/packages/natives/native/"
-done
-printf '%s\n' target node_modules 'packages/natives/native/*.node' >> "$(git rev-parse --git-path info/exclude)"
+FILES=(<the Files: paths>)
+IDX="$(mktemp)"
+GIT_INDEX_FILE="$IDX" git read-tree HEAD
+GIT_INDEX_FILE="$IDX" git add -A -- "${FILES[@]}"
+TREE="$(GIT_INDEX_FILE="$IDX" git write-tree)"
+C="$(git commit-tree "$TREE" -p HEAD -m "<Subject>
+
+Fixes #<N>.")"
+git update-ref refs/heads/fix/issue-<N> "$C" 0000000000000000000000000000000000000000
+rm -f "$IDX"
 ```
 
-Never symlink the whole `packages/natives/native/` directory: it shadows tracked source.
+The zero old value makes `update-ref` fail if the branch appeared meanwhile. Then verify the branch before the workspace is touched:
 
-### c. Diagnose and reproduce
+- `git rev-list --count origin/main..fix/issue-<N>` is `1`.
+- `git diff --name-only origin/main fix/issue-<N>` matches the `Files:` list exactly.
+- `git diff --quiet "$C" -- "${FILES[@]}"` succeeds, so the working tree equals the commit.
 
-Reproduce in your own workspace, after step b.
+Only after all three pass, return the workspace to `origin/main`. Restore tracked paths from HEAD. Remove untracked paths that the child listed as new, after confirming they are untracked:
 
-1. Read the relevant source; state a concrete 1–2-sentence failure hypothesis.
-2. Under the affected package, create a focused `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.): unique, greppable, and kept with the fix as its regression test.
-3. Run only that file, never the suite. Confirm the expected failure.
-
-- Reproduced → fix.
-- Not reproduced → delete the test; report `unreproduced` with the hypothesis, non-failure evidence, and unblockers (versions, OS, config, author repro snippet). Change nothing else.
-- Out of scope or not a bug (user-config error, intended behavior, duplicate) → report `not-a-bug` with an issue-postable explanation. Change nothing.
-
-### d. Fix
-
-1. Confirm the failure in your workspace.
-2. Fix the source, following `AGENTS.md` patterns: root cause, not symptom; no product-code stubs or mocks.
-3. Re-run the repro until it passes.
-4. If the real contract changed, add or adjust adjacent unit or contract tests; run only the affected files, never the full suite.
-5. `bun fmt` the union of edited files.
-
-### e. Leave the change for the handoff
-
-Do NOT commit, push, or open a PR. Leave the change as uncommitted working-tree edits. The configured native handoff carries it back, committed to `omp/task/<id>` in branch mode, so a commit made here would be applied twice.
-
-### f. Report
-
-```
-Issue #<N>  <title>
-Status:    fixed | unreproduced | not-a-bug | existing-pr (#<M>)
-Base:      <SHA your workspace started from>
-Files:     <every path you changed, one per line>   (if fixed)
-Repro:     <test path>                              (if fixed)
-Notes:     <root cause in one sentence; or what info is missing>
+```bash
+git restore --source=HEAD --staged --worktree -- <tracked paths>
+git clean -f -- <untracked paths>
 ```
 
-## 3. Deliver, in the dispatching session
+Confirm `git status --porcelain` prints nothing and HEAD still equals `origin/main`. Report `delivered` with `fix/issue-<N>` and `$C`. Then go back to 3a for the next issue.
 
-Run after every subagent has finished. The handoff has already put each fixed change into the batch worktree and committed it to `omp/task/<id>`. Deliver by naming those commits. Never re-apply a change.
+If the commit or any verification fails, stop before restoring. The integrated change stays in the workspace for a human to inspect, and the run reports it as the stop.
 
-For each `fixed` result, with `<id>` from its task record:
-
-1. `git rev-parse --verify omp/task/<id>` must succeed. If it does not, the change was not committed by the handoff. Report `not integrated: no handoff branch`, and leave the batch worktree's uncommitted changes as they are. Do not commit them by hand: that would mix issues together.
-2. `git log --oneline origin/main..omp/task/<id>` must show exactly one commit.
-3. `git diff --name-only origin/main omp/task/<id>` must match the subagent's `Files:` list. A mismatch means the handoff and the report disagree, so report `not integrated: file mismatch` and create nothing.
-4. Create the per-issue ref without a checkout: `git branch fix/issue-<N> omp/task/<id>`.
-5. Check the commit message contains `Fixes #<N>`. If it does not, report that, and leave the wording for whoever opens the PR.
-
-Do not check out, reset, or clean the batch worktree. Its handoff state is the native outcome and stays as it is.
-
-A worktree is needed for a PR target only when a branch ref cannot be used, for example to push or to run tests on a branch. Create one for that issue alone, when needed. Do not create per-issue worktrees by default.
+Nothing is pushed and no PR is opened. A worktree is needed only when a branch must be pushed or tested; create one for that single issue at that moment. Never by default.
 
 ## 4. Aggregate
 
-Print:
+After the last issue, print:
 
 ```
 | # | Title | Status | Branch / Notes |
 |---|-------|--------|----------------|
 ```
 
-Group by status, `fixed` (with its `fix/issue-<N>` ref) first. Nothing is pushed, and no PR is opened, by this command.
+List each `delivered` issue with its `fix/issue-<N>` ref and commit, then every other status. Name any stop that ended the run and the state it left behind.
 
 ## Rules
 
-MUST: check every precondition before dispatch and stop if one fails; use `isolated: true` on every subagent; leave changes uncommitted for the handoff; deliver by naming `omp/task/<id>` and never by re-applying; keep the symlinks out of git; check for an existing PR first and divert reasonable ones to `review-prs`.
+MUST: check the preconditions before the first issue and stop on any failure; run one child at a time with `isolated: true`; verify the integrated result against the child's file list before delivering it; deliver each issue to its own branch before the next child starts; leave the workspace clean at `origin/main` between issues; stop on dirty, conflicting, or mismatched state.
 
-MUST NOT: change `task.isolation` config or any other config; dispatch from the primary checkout; push, open PRs, or comment on issues; apply any subagent output a second time or by hand; symlink the whole `packages/natives/native/` directory; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond the reported bug into adjacent code smells.
-
-Failed repro → delete the temporary test in the subagent's workspace before yielding.
+MUST NOT: change any configuration; switch branches, reset HEAD, or overwrite an existing `fix/issue-<N>`; apply a child's change a second time or by hand; commit inside a child; symlink the whole `packages/natives/native/` directory; push, open PRs, or comment on issues; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond the reported bug.
