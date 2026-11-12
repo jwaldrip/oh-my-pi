@@ -23,10 +23,14 @@ import { Comment, type Document, Element, type Node, parseHTML, Text } from "@oh
 /** Inline emphasis a span keeps from `<code>`, `<strong>`/`<b>` and `<em>`/`<i>`. */
 export type FormSpanStyle = "code" | "strong" | "em";
 
-/** A run of inline text; `"\n"` inside `text` is a hard line break (`<br>`). */
+/**
+ * A run of inline text; `"\n"` inside `text` is a hard line break (`<br>`).
+ * `href` is the http(s) destination of the `<a>` around the run, or the URL the run spells out.
+ */
 export interface FormSpan {
 	text: string;
 	style?: FormSpanStyle;
+	href?: string;
 }
 
 /** One answer of a {@link ChoiceField}. */
@@ -166,29 +170,72 @@ export function parseHtmlForm(html: string): HtmlForm {
 	return new FormBuilder(document.querySelector("form") ?? document).build();
 }
 
-/** Append `text` to `spans`, merging into the previous span when the style matches. */
-function appendSpan(spans: FormSpan[], text: string, style: FormSpanStyle | undefined): void {
+/** Append `text` to `spans`, merging into the previous span when the style and link match. */
+function appendSpan(spans: FormSpan[], text: string, style: FormSpanStyle | undefined, href?: string): void {
 	if (!text) return;
 	const last = spans[spans.length - 1];
-	if (last && last.style === style) last.text += text;
-	else spans.push(style ? { text, style } : { text });
+	if (last && last.style === style && last.href === href) last.text += text;
+	else spans.push({ text, ...(style ? { style } : {}), ...(href ? { href } : {}) });
+}
+
+/** An `<a>`'s destination when it is an http(s) URL; any other `href` leaves the anchor's text plain. */
+function anchorHref(anchor: Element): string | undefined {
+	const href = anchor.getAttribute("href")?.trim();
+	return href && /^https?:\/\//i.test(href) ? href : undefined;
+}
+
+const BARE_URL = /(?<![A-Za-z0-9+.-])https?:\/\/[^\s<>"'`]+/g;
+const URL_OPENERS: Partial<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+/** `url` without the sentence punctuation and unbalanced closing brackets that follow it in prose. */
+function trimBareUrl(url: string): string {
+	while (url) {
+		const last = url.at(-1)!;
+		const opener = URL_OPENERS[last];
+		const unbalanced = opener !== undefined && url.split(last).length > url.split(opener).length;
+		if (!unbalanced && !".,;:!?".includes(last)) break;
+		url = url.slice(0, -1);
+	}
+	return url;
+}
+
+/** Split each http(s) URL written out in unlinked text into its own span, linked to itself. */
+function linkBareUrls(spans: FormSpan[]): FormSpan[] {
+	const out: FormSpan[] = [];
+	for (const span of spans) {
+		if (span.href || !span.text.includes("://")) {
+			out.push(span);
+			continue;
+		}
+		let copied = 0;
+		for (const match of span.text.matchAll(BARE_URL)) {
+			const url = trimBareUrl(match[0]);
+			if (!/:\/\/./.test(url)) continue;
+			appendSpan(out, span.text.slice(copied, match.index), span.style);
+			appendSpan(out, url, span.style, url);
+			copied = match.index + url.length;
+		}
+		appendSpan(out, span.text.slice(copied), span.style);
+	}
+	return out;
 }
 
 /**
  * Collapse whitespace like HTML layout does: runs become one space, spaces
- * next to a hard break vanish, and the ends are trimmed. Empty spans drop.
+ * next to a hard break vanish, and the ends are trimmed. Empty spans drop,
+ * and bare URLs become links.
  */
 function normalizeSpans(spans: FormSpan[]): FormSpan[] {
 	const out: FormSpan[] = [];
 	for (const span of spans) {
 		const text = span.text.replace(/[^\S\n]+/g, " ").replace(/ ?\n ?/g, "\n");
-		appendSpan(out, text, span.style);
+		appendSpan(out, text, span.style, span.href);
 	}
 	const first = out[0];
 	if (first) first.text = first.text.replace(/^\s+/, "");
 	const last = out[out.length - 1];
 	if (last) last.text = last.text.replace(/\s+$/, "");
-	return out.filter(span => span.text !== "");
+	return linkBareUrls(out.filter(span => span.text !== ""));
 }
 
 /** Plain text of spans, for labels that fall back to a single string. */
@@ -254,20 +301,23 @@ class FormBuilder {
 		};
 	}
 
-	#children(node: Node, style: FormSpanStyle | undefined): void {
-		for (const child of node.childNodes) this.#walk(child, style);
+	#children(node: Node, style: FormSpanStyle | undefined, href?: string): void {
+		for (const child of node.childNodes) this.#walk(child, style, href);
 	}
 
-	#walk(node: Node, style: FormSpanStyle | undefined): void {
+	#walk(node: Node, style: FormSpanStyle | undefined, href?: string): void {
 		if (node instanceof Comment) return;
 		if (node instanceof Text) {
-			appendSpan(this.#inline, node.data, style);
+			appendSpan(this.#inline, node.data, style, href);
 			return;
 		}
 		if (!(node instanceof Element)) return;
 		const tag = node.localName;
 		if (SKIPPED[tag]) return;
 		switch (tag) {
+			case "a":
+				this.#children(node, style, anchorHref(node) ?? href);
+				return;
 			case "br":
 				appendSpan(this.#inline, "\n", undefined);
 				return;
@@ -280,14 +330,14 @@ class FormBuilder {
 				this.#control(node, undefined);
 				return;
 			case "label":
-				this.#label(node, style);
+				this.#label(node, style, href);
 				return;
 			case "fieldset":
 				this.#fieldset(node);
 				return;
 			case "legend":
 				this.#flush(false);
-				this.#children(node, style);
+				this.#children(node, style, href);
 				this.#flush(true);
 				return;
 			case "ul":
@@ -315,17 +365,17 @@ class FormBuilder {
 		}
 		if (HEADING[tag]) {
 			this.#flush(false);
-			this.#children(node, style);
+			this.#children(node, style, href);
 			this.#flush(true);
 			return;
 		}
 		if (BLOCK[tag]) {
 			this.#flush(false);
-			this.#children(node, style);
+			this.#children(node, style, href);
 			this.#flush(false);
 			return;
 		}
-		this.#children(node, STYLE_OF[tag] ?? style);
+		this.#children(node, STYLE_OF[tag] ?? style, href);
 	}
 
 	/** Emit buffered inline content as a text block. */
@@ -338,10 +388,10 @@ class FormBuilder {
 	/** Inline spans of `element`, skipping controls (their label is the text around them). */
 	#spansOf(element: Element): FormSpan[] {
 		const spans: FormSpan[] = [];
-		const visit = (node: Node, style: FormSpanStyle | undefined): void => {
+		const visit = (node: Node, style: FormSpanStyle | undefined, href: string | undefined): void => {
 			if (node instanceof Comment) return;
 			if (node instanceof Text) {
-				appendSpan(spans, node.data, style);
+				appendSpan(spans, node.data, style, href);
 				return;
 			}
 			if (!(node instanceof Element)) return;
@@ -353,22 +403,23 @@ class FormBuilder {
 			}
 			// Labels stay text: a picture inside one reads as its alt text.
 			if (tag === "img") {
-				appendSpan(spans, node.getAttribute("alt") ?? "", style);
+				appendSpan(spans, node.getAttribute("alt") ?? "", style, href);
 				return;
 			}
 			if (BLOCK[tag] || HEADING[tag]) appendSpan(spans, " ", undefined);
-			for (const child of node.childNodes) visit(child, STYLE_OF[tag] ?? style);
+			const inner = tag === "a" ? (anchorHref(node) ?? href) : href;
+			for (const child of node.childNodes) visit(child, STYLE_OF[tag] ?? style, inner);
 		};
-		for (const child of element.childNodes) visit(child, undefined);
+		for (const child of element.childNodes) visit(child, undefined, undefined);
 		return normalizeSpans(spans);
 	}
 
-	#label(label: Element, style: FormSpanStyle | undefined): void {
+	#label(label: Element, style: FormSpanStyle | undefined, href?: string): void {
 		const target = label.getAttribute("for");
 		if (target && this.#labelFor.get(target) === label) return;
 		const controls = label.querySelectorAll(CONTROL_SELECTOR);
 		if (controls.length === 0) {
-			this.#children(label, style);
+			this.#children(label, style, href);
 			return;
 		}
 		this.#flush(false);
@@ -451,7 +502,7 @@ class FormBuilder {
 				const spans = this.#spansOf(cell);
 				if (spans.length === 0) continue;
 				if (text.length > 0) appendSpan(text, " · ", undefined);
-				for (const span of spans) appendSpan(text, span.text, span.style);
+				for (const span of spans) appendSpan(text, span.text, span.style, span.href);
 			}
 			if (text.length > 0) this.#section.blocks.push({ kind: "text", spans: text, heading: false });
 			cells.forEach((cell, column) => {

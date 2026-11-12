@@ -61,6 +61,7 @@ import { actionBar, actionButton, itemIndex } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
 import type { AskDialogInputGuard } from "../overlays/ask-dialog";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
+import { isHyperlinkEnabled, isNativeLinkEnabled, urlHyperlink, urlLinkSpan } from "../render/hyperlink";
 import { getEditorTheme, type ThemeColor, theme } from "../theme/theme";
 import { optionMarker } from "../tools/ask";
 import type { Component, Focusable } from "../tui";
@@ -200,27 +201,51 @@ function optionText(option: ChoiceOption): string {
 	return sanitize(spansText(option.label)).replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Spans for a surface where a link cannot be clicked: each link drawn as plain text, followed by
+ * its URL unless the label already spells it.
+ */
+function spellOutLinks(spans: readonly FormSpan[]): FormSpan[] {
+	const out: FormSpan[] = [];
+	let label = "";
+	spans.forEach((span, index) => {
+		if (!span.href) {
+			out.push(span);
+			return;
+		}
+		const { href, ...plain } = span;
+		out.push(plain);
+		label += span.text;
+		if (spans[index + 1]?.href === href) return;
+		if (label.trim() !== href) out.push({ text: ` (${href})` });
+		label = "";
+	});
+	return out;
+}
+
 /** Split spans at hard breaks into display lines. */
 function splitLines(spans: readonly FormSpan[]): FormSpan[][] {
 	const lines: FormSpan[][] = [[]];
 	for (const span of spans) {
 		span.text.split("\n").forEach((part, index) => {
 			if (index > 0) lines.push([]);
-			if (part) lines[lines.length - 1]!.push({ text: part, style: span.style });
+			if (part) lines[lines.length - 1]!.push({ ...span, text: part });
 		});
 	}
 	return lines;
 }
 
-/** One line of spans styled over `base`; code keeps the markdown code color. */
+/** One line of spans styled over `base`; code keeps the markdown code color, a link is an underlined OSC 8 run. */
 function styleSpans(spans: readonly FormSpan[], base: (text: string) => string): string {
 	let out = "";
 	for (const span of spans) {
 		const text = sanitize(span.text);
-		if (span.style === "code") out += theme.fg("mdCode", text);
-		else if (span.style === "strong") out += theme.bold(base(text));
-		else if (span.style === "em") out += theme.italic(base(text));
-		else out += base(text);
+		let run: string;
+		if (span.style === "code") run = theme.fg("mdCode", text);
+		else if (span.style === "strong") run = theme.bold(base(text));
+		else if (span.style === "em") run = theme.italic(base(text));
+		else run = base(text);
+		out += span.href ? urlHyperlink(span.href, theme.underline(run)) : run;
 	}
 	return out;
 }
@@ -228,16 +253,18 @@ function styleSpans(spans: readonly FormSpan[], base: (text: string) => string):
 /** Spans wrapped under `prefix`, continuation and hard-break rows hanging at the prefix column. */
 function hang(prefix: string, spans: readonly FormSpan[], base: (text: string) => string, width: number): string[] {
 	const indent = padding(visibleWidth(prefix));
-	return splitLines(spans).flatMap((line, index) =>
+	return splitLines(isHyperlinkEnabled() ? spans : spellOutLinks(spans)).flatMap((line, index) =>
 		wrapPrefixedLine(index === 0 ? prefix : indent, indent, styleSpans(line, base), width),
 	);
 }
 
-/** Form spans as native spans; `extra` tokens apply to every run. */
+/** Form spans as native spans; `extra` tokens apply to every run, and a link carries its `href`. */
 function nativeSpans(spans: readonly FormSpan[], extra?: string): TspSpan[] {
-	return spans.map(item => {
+	return (isNativeLinkEnabled() ? spans : spellOutLinks(spans)).map(item => {
+		const text = sanitize(item.text);
 		const tokens = [item.style, extra].filter(Boolean).join(" ");
-		return span(sanitize(item.text), tokens || undefined);
+		if (item.href) return urlLinkSpan(item.href, text, tokens ? `${tokens} link` : "link");
+		return span(text, tokens || undefined);
 	});
 }
 
@@ -1726,7 +1753,10 @@ export class HtmlFormDialog implements Component, Focusable {
 				return [atom([theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))])];
 			}
 			case "table": {
-				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell)).replace(/\s+/g, " ")));
+				// A cell is truncated plain text, which cannot carry an OSC 8 link: its URL is spelled out instead.
+				const cells = block.rows.map(row =>
+					row.map(cell => sanitize(spansText(spellOutLinks(cell))).replace(/\s+/g, " ")),
+				);
 				const count = Math.max(0, ...cells.map(row => row.length));
 				const columns: TableColumn[] = Array.from({ length: count }, (_, column) => ({
 					width: Math.max(1, ...cells.map(row => visibleWidth(row[column] ?? ""))),

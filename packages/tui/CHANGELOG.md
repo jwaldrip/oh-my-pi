@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Links in an `ask` form are clickable instead of plain text: an `<a href>` to an http(s) URL and any http(s) URL written out in the form are OSC 8 hyperlinks in the terminal and link spans in Tern, and the URL is written out after the link text where hyperlinks are off
+
 ## [18.19.0] - 2026-11-12
 
 ### Added

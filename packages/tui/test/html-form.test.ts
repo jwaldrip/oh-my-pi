@@ -14,6 +14,7 @@ import { BreakRank, type PageAtom, paginate } from "@oh-my-pi/pi-tui/html-form/p
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
@@ -462,6 +463,28 @@ describe("html form", () => {
 			expect(form.fields.map(field => [field.name, spansText(field.label)])).toEqual([["domain", "Domain"]]);
 			expect(defaultFormData(form)).toEqual({ kind: "deploy", domain: "" });
 		});
+
+		it("links `<a href>` and bare URLs in context, labels and options; other schemes stay plain text", () => {
+			const form = parseHtmlForm(`<form>
+				<p>Read the <a href="https://example.com/report">report</a> (see https://example.com/raw.json), or <a href="javascript:evil()">don't</a>.</p>
+				<label><input type="radio" name="pick" value="a"> <a href="https://example.com/a">Option A</a></label>
+				<label><input type="radio" name="pick" value="b"> Option B</label></form>`);
+			expect(form.sections[0]!.blocks[0]).toEqual({
+				kind: "text",
+				heading: false,
+				spans: [
+					{ text: "Read the " },
+					{ text: "report", href: "https://example.com/report" },
+					{ text: " (see " },
+					{ text: "https://example.com/raw.json", href: "https://example.com/raw.json" },
+					{ text: "), or don't." },
+				],
+			});
+			const pick = form.fields[0]!;
+			expect(pick.kind === "choice" && pick.options[0]!.label).toEqual([
+				{ text: "Option A", href: "https://example.com/a" },
+			]);
+		});
 	});
 
 	describe("form data", () => {
@@ -836,6 +859,67 @@ describe("html form", () => {
 			vi.advanceTimersByTime(2000);
 			expect(onTimeout).toHaveBeenCalledWith({ db: "pg", extras: ["ci"], region: "us", workers: 4, notes: "" }, []);
 			form.dispose();
+		});
+
+		it("draws a link as an underlined OSC 8 run on every row it wraps onto, and spells its URL out where links are off", () => {
+			const html = `<form><p>Read the <a href="https://example.com/report">quarterly report on agent accuracy</a> first.</p>
+				<label>Name <input name="name"></label></form>`;
+			try {
+				applyHyperlinkSetting("always");
+				const linked = dialog(html)
+					.form.render(34)
+					.filter(row => row.includes("\x1b]8;"));
+				expect(linked.length).toBeGreaterThan(1);
+				// One open and one close per row: a row that left the link open would link the panel border too.
+				const run = /\x1b\]8;[^;]*;https:\/\/example\.com\/report(?:\x07|\x1b\\)(.*?)\x1b\]8;;(?:\x07|\x1b\\)/;
+				for (const row of linked) expect(row.match(/\x1b\]8;/g)).toHaveLength(2);
+				expect(linked.map(row => Bun.stripANSI(run.exec(row)?.[1] ?? "")).join(" ")).toBe(
+					"quarterly report on agent accuracy",
+				);
+
+				applyHyperlinkSetting("off");
+				const plain = dialog(html).form.render(100).join("\n");
+				expect(plain).not.toContain("\x1b]8;");
+				expect(Bun.stripANSI(plain)).toContain(
+					"Read the quarterly report on agent accuracy (https://example.com/report) first.",
+				);
+			} finally {
+				applyHyperlinkSetting("auto");
+			}
+		});
+
+		it("natively: a link is a span carrying its href, and its URL is spelled out where links are off", () => {
+			const html = `<form><p>Read the <a href="https://example.com/report"><b>report</b></a> or https://example.com/raw.json.</p>
+				<label>Name <input name="name"></label></form>`;
+			const context = (node: NativeNode): NativeNode | undefined => {
+				if (node.p?.role === "omp.ask.text") return node;
+				for (const child of node.c ?? []) {
+					const found = isNode(child) ? context(child) : undefined;
+					if (found) return found;
+				}
+				return undefined;
+			};
+			try {
+				expect(context(dialog(html).form.describe(CX))?.p).toMatchObject({
+					spans: [
+						{ t: "Read the " },
+						{ t: "report", s: "strong link", href: "https://example.com/report" },
+						{ t: " or " },
+						{ t: "https://example.com/raw.json", s: "link", href: "https://example.com/raw.json" },
+						{ t: "." },
+					],
+				});
+
+				applyHyperlinkSetting("off");
+				const off = context(dialog(html).form.describe(CX))?.p;
+				const spans = off && "spans" in off && Array.isArray(off.spans) ? off.spans : [];
+				expect(spans.map(item => item.t).join("")).toBe(
+					"Read the report (https://example.com/report) or https://example.com/raw.json.",
+				);
+				expect(spans.some(item => item.href !== undefined)).toBe(false);
+			} finally {
+				applyHyperlinkSetting("auto");
+			}
 		});
 
 		it("natively: one tab per question with Next, and Submit on the Review tab sends the answers", () => {
